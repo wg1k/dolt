@@ -18,22 +18,23 @@ import (
 	"io"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/conflict"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 )
 
 var _ sql.Table = (*TableOfTablesInConflict)(nil)
 
 // TableOfTablesInConflict is a sql.Table implementation that implements a system table which shows the current conflicts
 type TableOfTablesInConflict struct {
-	ddb  *doltdb.DoltDB
-	root *doltdb.RootValue
+	dbName string
+	ddb    *doltdb.DoltDB
 }
 
 // NewTableOfTablesInConflict creates a TableOfTablesInConflict
-func NewTableOfTablesInConflict(_ *sql.Context, ddb *doltdb.DoltDB, root *doltdb.RootValue) sql.Table {
-	return &TableOfTablesInConflict{ddb: ddb, root: root}
+func NewTableOfTablesInConflict(_ *sql.Context, dbName string, ddb *doltdb.DoltDB) sql.Table {
+	return &TableOfTablesInConflict{dbName: dbName, ddb: ddb}
 }
 
 // Name is a sql.Table interface function which returns the name of the table which is defined by the constant
@@ -51,17 +52,20 @@ func (dt *TableOfTablesInConflict) String() string {
 // Schema is a sql.Table interface function that gets the sql.Schema of the log system table.
 func (dt *TableOfTablesInConflict) Schema() sql.Schema {
 	return []*sql.Column{
-		{Name: "table", Type: sql.Text, Source: doltdb.TableOfTablesInConflictName, PrimaryKey: true},
-		{Name: "num_conflicts", Type: sql.Uint64, Source: doltdb.TableOfTablesInConflictName, PrimaryKey: false},
+		{Name: "table", Type: types.Text, Source: doltdb.TableOfTablesInConflictName, PrimaryKey: true, DatabaseSource: dt.dbName},
+		{Name: "num_conflicts", Type: types.Uint64, Source: doltdb.TableOfTablesInConflictName, PrimaryKey: false, DatabaseSource: dt.dbName},
 	}
 }
 
+// Collation implements the sql.Table interface.
+func (dt *TableOfTablesInConflict) Collation() sql.CollationID {
+	return sql.Collation_Default
+}
+
 type tableInConflict struct {
-	name    string
-	size    uint64
-	done    bool
-	schemas conflict.ConflictSchema
-	//cnfItr types.MapIterator
+	name string
+	size uint64
+	done bool
 }
 
 // Key returns a unique key for the partition
@@ -111,26 +115,35 @@ func (p *tablesInConflict) Close(*sql.Context) error {
 
 // Partitions is a sql.Table interface function that returns a partition of the data.  Conflict data is partitioned by table.
 func (dt *TableOfTablesInConflict) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
-	tblNames, err := dt.root.TablesInConflict(ctx)
-
+	sess := dsess.DSessFromSess(ctx.Session)
+	ws, err := sess.WorkingSet(ctx, dt.dbName)
 	if err != nil {
 		return nil, err
 	}
 
+	root := ws.WorkingRoot()
+	tblNames, err := doltdb.TablesWithDataConflicts(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+
+	if ws.MergeActive() {
+		schConflicts := ws.MergeState().TablesWithSchemaConflicts()
+		tblNames = append(tblNames, schConflicts...)
+	}
+
 	var partitions []*tableInConflict
 	for _, tblName := range tblNames {
-		tbl, ok, err := dt.root.GetTable(ctx, tblName)
+		tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: tblName})
 
 		if err != nil {
 			return nil, err
 		} else if ok {
-			schemas, m, err := tbl.GetConflicts(ctx)
-
+			n, err := tbl.NumRowsInConflict(ctx)
 			if err != nil {
 				return nil, err
 			}
-
-			partitions = append(partitions, &tableInConflict{tblName, m.Len(), false, schemas})
+			partitions = append(partitions, &tableInConflict{tblName, n, false})
 		}
 	}
 

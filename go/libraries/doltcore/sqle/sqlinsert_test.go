@@ -24,8 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
-	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
 	"github.com/dolthub/dolt/go/store/types"
@@ -70,12 +68,12 @@ var BasicInsertTests = []InsertTest{
 	{
 		Name:        "insert no columns too few values",
 		InsertQuery: "insert into people values (2, 'Bart', 'Simpson', false, 10, 9, '00000000-0000-0000-0000-000000000002')",
-		ExpectedErr: "too few values",
+		ExpectedErr: "number of values does not match number of columns provided",
 	},
 	{
 		Name:        "insert no columns too many values",
 		InsertQuery: "insert into people values (2, 'Bart', 'Simpson', false, 10, 9, '00000000-0000-0000-0000-000000000002', 222, 'abc')",
-		ExpectedErr: "too many values",
+		ExpectedErr: "number of values does not match number of columns provided",
 	},
 	{
 		Name:           "insert full columns",
@@ -129,27 +127,27 @@ var BasicInsertTests = []InsertTest{
 	{
 		Name:        "insert partial columns duplicate column",
 		InsertQuery: "insert into people (id, first_name, last_name, first_name) values (2, 'Bart', 'Simpson', 'Bart')",
-		ExpectedErr: "duplicate column",
+		ExpectedErr: "column 'first_name' specified twice",
 	},
 	{
 		Name:        "insert partial columns invalid column",
 		InsertQuery: "insert into people (id, first_name, last_name, middle) values (2, 'Bart', 'Simpson', 'Nani')",
-		ExpectedErr: "duplicate column",
+		ExpectedErr: "Unknown column 'middle' in 'people'",
 	},
 	{
 		Name:        "insert missing non-nullable column",
 		InsertQuery: "insert into people (id, first_name) values (2, 'Bart')",
-		ExpectedErr: "column <last_name> received nil but is non-nullable",
+		ExpectedErr: "Field 'last_name' doesn't have a default value",
 	},
 	{
 		Name:        "insert partial columns mismatch too many values",
 		InsertQuery: "insert into people (id, first_name, last_name) values (2, 'Bart', 'Simpson', false)",
-		ExpectedErr: "too many values",
+		ExpectedErr: "number of values does not match number of columns provided",
 	},
 	{
 		Name:        "insert partial columns mismatch too few values",
 		InsertQuery: "insert into people (id, first_name, last_name) values (2, 'Bart')",
-		ExpectedErr: "too few values",
+		ExpectedErr: "number of values does not match number of columns provided",
 	},
 	{
 		Name:        "insert partial columns functions",
@@ -189,7 +187,7 @@ var BasicInsertTests = []InsertTest{
 			NewPeopleRow(11, "Selma", "Bouvier", false, 40, 7),
 		),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 	},
 	{
 		Name: "insert ignore partial columns multiple rows null constraint failure",
@@ -199,7 +197,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery:  "select id, first_name, last_name, is_married, age, rating from people where id > 6 ORDER BY id",
 		ExpectedRows: ToSqlRows(PeopleTestSchema, NewPeopleRow(8, "Milhouse", "Van Houten", false, 8, 3.5)),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 		SkipOnSqlEngine: true,
 	},
 	{
@@ -213,7 +211,7 @@ var BasicInsertTests = []InsertTest{
 			NewPeopleRow(8, "Milhouse", "Van Houten", false, 8, 8.5),
 		),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 		SkipOnSqlEngine: true,
 	},
 	{
@@ -224,13 +222,13 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery:  "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(PeopleTestSchema, NewPeopleRow(7, "Maggie", "Simpson", false, 1, 5.1)),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 		SkipOnSqlEngine: true,
 	},
 	{
 		Name:        "insert partial columns multiple rows null pk",
 		InsertQuery: "insert into people (id, first_name, last_name) values (0, 'Bart', 'Simpson'), (1, 'Homer', null)",
-		ExpectedErr: "column <last_name> received nil but is non-nullable",
+		ExpectedErr: "column name 'last_name' is non-nullable but attempted to set a value of null",
 	},
 	{
 		Name:        "insert partial columns multiple rows duplicate",
@@ -239,9 +237,9 @@ var BasicInsertTests = []InsertTest{
 	},
 	{
 		Name: "insert partial columns existing pk",
-		AdditionalSetup: CreateTableWithRowsFn("temppeople",
-			NewSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind),
-			[]types.Value{types.Int(2), types.String("Bart"), types.String("Simpson")}),
+		AdditionalSetup: ExecuteSetupSQL(context.Background(), `
+			CREATE TABLE temppeople (id bigint primary key, first_name varchar(1023), last_name varchar(1023));
+			INSERT INTO temppeople VALUES (2, 'Bart', 'Simpson');`),
 		InsertQuery: "insert into temppeople (id, first_name, last_name) values (2, 'Bart', 'Simpson')",
 		ExpectedErr: "duplicate primary key",
 	},
@@ -252,7 +250,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("100"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("100"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -263,15 +261,9 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(true), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(1), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-	},
-	{
-		Name: "type mismatch int -> uuid",
-		InsertQuery: `insert into people (id, first_name, last_name, is_married, age, uuid) values
-					(7, "Maggie", "Simpson", false, 1, 100)`,
-		ExpectedErr: "Type mismatch",
 	},
 	{
 		Name: "type mismatch string -> int",
@@ -280,7 +272,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -291,7 +283,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -302,15 +294,9 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, num_episodes from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "num_episodes")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Uint(100)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Uint(100)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "num_episodes")),
-	},
-	{
-		Name: "type mismatch string -> uuid",
-		InsertQuery: `insert into people (id, first_name, last_name, is_married, age, uuid) values
-					(7, "Maggie", "Simpson", false, 1, "a uuid but idk what im doing")`,
-		ExpectedErr: "Type mismatch",
 	},
 	{
 		Name: "type mismatch float -> string",
@@ -319,7 +305,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("8.1"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("8.1"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -330,7 +316,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(1), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -341,7 +327,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -352,7 +338,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 1 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(1), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(1), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -363,7 +349,7 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Bool(false), types.Int(1), types.Float(1.0)),
+			NewResultSetRow(types.Int(7), types.String("Maggie"), types.String("Simpson"), types.Int(0), types.Int(1), types.Float(1.0)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
 	},
@@ -374,15 +360,9 @@ var BasicInsertTests = []InsertTest{
 		SelectQuery: "select id, first_name, last_name, is_married, age, rating from people where id = 7 ORDER BY id",
 		ExpectedRows: ToSqlRows(
 			CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-			NewResultSetRow(types.Int(7), types.String("true"), types.String("Simpson" /*"West"*/), types.Bool(false), types.Int(1), types.Float(5.1)),
+			NewResultSetRow(types.Int(7), types.String("1"), types.String("Simpson" /*"West"*/), types.Int(0), types.Int(1), types.Float(5.1)),
 		),
 		ExpectedSchema: CompressSchema(SubsetSchema(PeopleTestSchema, "id", "first_name", "last_name", "is_married", "age", "rating")),
-	},
-	{
-		Name: "type mismatch bool -> uuid",
-		InsertQuery: `insert into people (id, first_name, last_name, is_married, age, uuid) values
-					(7, "Maggie", "Simpson", false, 1, true)`,
-		ExpectedErr: "Type mismatch",
 	},
 }
 
@@ -396,23 +376,17 @@ func TestExecuteInsert(t *testing.T) {
 
 var systemTableInsertTests = []InsertTest{
 	{
-		Name: "insert into dolt_docs",
-		AdditionalSetup: CreateTableFn("dolt_docs",
-			doltdocs.DocsSchema,
-			NewRow(types.String("LICENSE.md"), types.String("A license"))),
-		InsertQuery: "insert into dolt_docs (doc_name, doc_text) values ('README.md', 'Some text')",
-		ExpectedErr: "cannot insert into table",
+		Name:            "insert into dolt_docs",
+		AdditionalSetup: CreateTableFn("dolt_docs", doltdb.DocsSchema, ""),
+		InsertQuery:     "insert into dolt_docs (doc_name, doc_text) values ('README.md', 'Some text')",
+		SelectQuery:     "select * from dolt_docs",
+		ExpectedRows:    []sql.Row{{"README.md", "Some text"}},
+		ExpectedSchema:  CompressSchema(doltdb.DocsSchema),
 	},
 	{
 		Name: "insert into dolt_query_catalog",
-		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName,
-			dtables.DoltQueryCatalogSchema,
-			NewRowWithSchema(dtables.DoltQueryCatalogSchema,
-				types.String("existingEntry"),
-				types.Uint(2),
-				types.String("example"),
-				types.String("select 2+2 from dual"),
-				types.String("description"))),
+		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName, dtables.DoltQueryCatalogSchema,
+			"INSERT INTO dolt_query_catalog VALUES ('existingEntry', 2, 'example', 'select 2+2 from dual', 'description')"),
 		InsertQuery: "insert into dolt_query_catalog (id, display_order, name, query, description) values ('abc123', 1, 'example', 'select 1+1 from dual', 'description')",
 		SelectQuery: "select * from dolt_query_catalog ORDER BY id",
 		ExpectedRows: ToSqlRows(CompressSchema(dtables.DoltQueryCatalogSchema),
@@ -423,13 +397,9 @@ var systemTableInsertTests = []InsertTest{
 	},
 	{
 		Name:            "insert into dolt_schemas",
-		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName, SchemasTableSchema()),
-		InsertQuery:     "insert into dolt_schemas (id, type, name, fragment) values (1, 'view', 'name', 'select 2+2 from dual')",
-		SelectQuery:     "select * from dolt_schemas ORDER BY id",
-		ExpectedRows: ToSqlRows(CompressSchema(SchemasTableSchema()),
-			NewRow(types.String("view"), types.String("name"), types.String("select 2+2 from dual"), types.Int(1)),
-		),
-		ExpectedSchema: CompressSchema(SchemasTableSchema()),
+		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName, SchemaTableSchema(), ""),
+		InsertQuery:     "insert into dolt_schemas (type, name, fragment) values ('view', 'name', 'create view name as select 2+2 from dual')",
+		ExpectedErr:     "table doesn't support INSERT INTO",
 	},
 }
 
@@ -456,18 +426,19 @@ func testInsertQuery(t *testing.T, test InsertTest) {
 		t.Skip("Skipping test broken on SQL engine")
 	}
 
-	dEnv := dtestutils.CreateTestEnv()
-	CreateEmptyTestDatabase(dEnv, t)
+	dEnv, err := CreateEmptyTestDatabase()
+	require.NoError(t, err)
+	defer dEnv.DoltDB.Close()
 
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
 	}
 
-	var err error
 	root, _ := dEnv.WorkingRoot(context.Background())
 	root, err = executeModify(t, context.Background(), dEnv, root, test.InsertQuery)
 	if len(test.ExpectedErr) > 0 {
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), test.ExpectedErr)
 		return
 	} else {
 		require.NoError(t, err)

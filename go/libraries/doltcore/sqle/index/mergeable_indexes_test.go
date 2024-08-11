@@ -15,20 +15,20 @@
 package index_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/parse"
 	"github.com/dolthub/go-mysql-server/sql/plan"
+	"github.com/dolthub/go-mysql-server/sql/planbuilder"
+	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/libraries/doltcore/table/typed/noms"
+	"github.com/dolthub/dolt/go/store/types"
 )
 
 // This tests mergeable indexes by using the SQL engine and intercepting specific calls. This way, we can verify that
@@ -36,7 +36,11 @@ import (
 // they're converted into a format that Noms understands to verify that they were handled correctly. Lastly, we ensure
 // that the final output is as expected.
 func TestMergeableIndexes(t *testing.T) {
-	engine, denv, root, db, indexTuples := setupIndexes(t, "test", `INSERT INTO test VALUES
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // this test is specific to Noms ranges
+	}
+
+	engine, sqlCtx, indexTuples := setupIndexes(t, "test", `INSERT INTO test VALUES
 		(-3, NULL, NULL),
 		(-2, NULL, NULL),
 		(-1, NULL, NULL),
@@ -101,7 +105,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 = 11 OR v1 != 11",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -332,14 +336,14 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 <> 11 OR v1 <> 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -364,28 +368,28 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15 OR v1 != 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 <> 11 OR v1 <> 15 OR v1 <> 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 != 11 OR v1 != 15 AND v1 != 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 <> 11 OR v1 <> 15 AND v1 <> 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -427,7 +431,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15 OR v1 > 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -473,7 +477,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15 OR v1 >= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -504,7 +508,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 < 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -519,21 +523,21 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 != 11 OR v1 != 15 AND v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 != 11 AND v1 != 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -549,7 +553,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 <= 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -564,21 +568,21 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 != 11 OR v1 != 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 != 11 OR v1 != 15 AND v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			"v1 != 11 AND v1 != 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -678,7 +682,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 OR v1 < 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -692,7 +696,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 OR v1 > 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -706,7 +710,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 AND v1 > 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -720,7 +724,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 OR v1 <= 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -734,7 +738,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 OR v1 > 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -748,7 +752,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 > 11 AND v1 > 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -819,7 +823,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 OR v1 < 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -833,7 +837,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 OR v1 >= 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -847,7 +851,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 AND v1 >= 15 OR v1 < 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -861,7 +865,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 OR v1 <= 15",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -875,7 +879,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 OR v1 >= 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -889,7 +893,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 >= 11 AND v1 >= 15 OR v1 <= 19",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -1125,7 +1129,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 BETWEEN 11 AND 15 OR v1 != 13",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -1178,7 +1182,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v1 IN (11, 12, 13) OR v1 != 12",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -1258,7 +1262,7 @@ func TestMergeableIndexes(t *testing.T) {
 		{
 			"v2 = 21 OR v2 != 21",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
@@ -1310,24 +1314,14 @@ func TestMergeableIndexes(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.whereStmt, func(t *testing.T) {
-			ctx := context.Background()
-			sqlCtx := NewTestSQLCtx(ctx)
-			session := dsess.DSessFromSess(sqlCtx.Session)
-			dbState := getDbState(t, db, denv)
-			err := session.AddDB(sqlCtx, dbState)
-			require.NoError(t, err)
-			sqlCtx.SetCurrentDatabase(db.Name())
-			err = session.SetRoot(sqlCtx, db.Name(), root)
-			require.NoError(t, err)
-
 			query := fmt.Sprintf(`SELECT pk FROM test WHERE %s ORDER BY 1`, test.whereStmt)
 
 			finalRanges, err := ReadRangesFromQuery(sqlCtx, engine, query)
 			require.NoError(t, err)
 
-			_, iter, err := engine.Query(sqlCtx, query)
+			_, iter, _, err := engine.Query(sqlCtx, query)
 			require.NoError(t, err)
-			res, err := sql.RowIterToRows(sqlCtx, nil, iter)
+			res, err := sql.RowIterToRows(sqlCtx, iter)
 			require.NoError(t, err)
 
 			if assert.Equal(t, len(test.pks), len(res)) {
@@ -1356,6 +1350,8 @@ func TestMergeableIndexes(t *testing.T) {
 						require.FailNow(t, fmt.Sprintf("Expected: `%v`\nActual:   `%v`", test.finalRanges, finalRanges))
 					}
 				}
+			} else {
+				t.Logf("%v != %v", test.finalRanges, finalRanges)
 			}
 		})
 	}
@@ -1370,7 +1366,11 @@ func TestMergeableIndexes(t *testing.T) {
 // ranges may be incorrect.
 // TODO: disassociate NULL ranges from value ranges and fix the intermediate ranges (finalRanges).
 func TestMergeableIndexesNulls(t *testing.T) {
-	engine, denv, root, db, indexTuples := setupIndexes(t, "test", `INSERT INTO test VALUES
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // this test is specific to Noms ranges
+	}
+
+	engine, sqlCtx, indexTuples := setupIndexes(t, "test", `INSERT INTO test VALUES
 		(0, 10, 20),
 		(1, 11, 21),
 		(2, NULL, NULL),
@@ -1391,21 +1391,21 @@ func TestMergeableIndexesNulls(t *testing.T) {
 		{
 			"v1 IS NULL",
 			[]*noms.ReadRange{
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
+				index.NullRange(),
 			},
 			[]int64{2, 4, 6},
 		},
 		{
 			"v1 IS NULL OR v1 IS NULL",
 			[]*noms.ReadRange{
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
+				index.NullRange(),
 			},
 			[]int64{2, 4, 6},
 		},
 		{
 			"v1 IS NULL AND v1 IS NULL",
 			[]*noms.ReadRange{
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
+				index.NullRange(),
 			},
 			[]int64{2, 4, 6},
 		},
@@ -1413,7 +1413,7 @@ func TestMergeableIndexesNulls(t *testing.T) {
 			"v1 IS NULL OR v1 = 11",
 			[]*noms.ReadRange{
 				index.ClosedRange(idxv1.tuple(11), idxv1.tuple(11)),
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
+				index.NullRange(),
 			},
 			[]int64{1, 2, 4, 6},
 		},
@@ -1421,13 +1421,14 @@ func TestMergeableIndexesNulls(t *testing.T) {
 			"v1 IS NULL OR v1 < 16",
 			[]*noms.ReadRange{
 				index.LessThanRange(idxv1.tuple(16)),
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
+				index.NullRange(),
 			},
 			[]int64{0, 1, 2, 3, 4, 5, 6},
 		},
 		{
 			"v1 IS NULL OR v1 > 16",
 			[]*noms.ReadRange{
+				index.NullRange(),
 				index.GreaterThanRange(idxv1.tuple(16)),
 			},
 			[]int64{2, 4, 6, 7, 8, 9},
@@ -1439,9 +1440,7 @@ func TestMergeableIndexesNulls(t *testing.T) {
 		},
 		{
 			"v1 IS NULL AND v1 > 16",
-			[]*noms.ReadRange{
-				index.ClosedRange(idxv1.nilTuple(), idxv1.nilTuple()),
-			},
+			[]*noms.ReadRange{},
 			[]int64{},
 		},
 		{
@@ -1459,8 +1458,7 @@ func TestMergeableIndexesNulls(t *testing.T) {
 		{
 			"v1 IS NOT NULL",
 			[]*noms.ReadRange{
-				index.LessThanRange(idxv1.nilTuple()),
-				index.GreaterThanRange(idxv1.nilTuple()),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 3, 5, 7, 8, 9},
 		},
@@ -1479,23 +1477,21 @@ func TestMergeableIndexesNulls(t *testing.T) {
 		{
 			"v1 IS NOT NULL OR v1 = 15",
 			[]*noms.ReadRange{
-				index.LessThanRange(idxv1.nilTuple()),
-				index.GreaterThanRange(idxv1.nilTuple()),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 3, 5, 7, 8, 9},
 		},
 		{
 			"v1 IS NOT NULL OR v1 > 16",
 			[]*noms.ReadRange{
-				index.AllRange(),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 3, 5, 7, 8, 9},
 		},
 		{
 			"v1 IS NOT NULL OR v1 < 16",
 			[]*noms.ReadRange{
-				index.LessThanRange(idxv1.nilTuple()),
-				index.GreaterThanRange(idxv1.nilTuple()),
+				index.NotNullRange(),
 			},
 			[]int64{0, 1, 3, 5, 7, 8, 9},
 		},
@@ -1509,8 +1505,7 @@ func TestMergeableIndexesNulls(t *testing.T) {
 		{
 			"v1 IS NOT NULL AND v1 > 16",
 			[]*noms.ReadRange{
-				index.OpenRange(idxv1.tuple(16), idxv1.nilTuple()),
-				index.GreaterThanRange(idxv1.nilTuple()),
+				index.GreaterThanRange(idxv1.tuple(16)),
 			},
 			[]int64{7, 8, 9},
 		},
@@ -1525,25 +1520,15 @@ func TestMergeableIndexesNulls(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.whereStmt, func(t *testing.T) {
-			ctx := context.Background()
-			sqlCtx := NewTestSQLCtx(ctx)
-			session := dsess.DSessFromSess(sqlCtx.Session)
-			dbState := getDbState(t, db, denv)
-			err := session.AddDB(sqlCtx, dbState)
-			require.NoError(t, err)
-			sqlCtx.SetCurrentDatabase(db.Name())
-			err = session.SetRoot(sqlCtx, db.Name(), root)
-			require.NoError(t, err)
-
 			query := fmt.Sprintf(`SELECT pk FROM test WHERE %s ORDER BY 1`, test.whereStmt)
 
 			finalRanges, err := ReadRangesFromQuery(sqlCtx, engine, query)
 			require.NoError(t, err)
 
-			_, iter, err := engine.Query(sqlCtx, query)
+			_, iter, _, err := engine.Query(sqlCtx, query)
 			require.NoError(t, err)
 
-			res, err := sql.RowIterToRows(sqlCtx, nil, iter)
+			res, err := sql.RowIterToRows(sqlCtx, iter)
 			require.NoError(t, err)
 			if assert.Equal(t, len(test.pks), len(res)) {
 				for i, pk := range test.pks {
@@ -1571,24 +1556,27 @@ func TestMergeableIndexesNulls(t *testing.T) {
 						require.FailNow(t, fmt.Sprintf("Expected: `%v`\nActual:   `%v`", test.finalRanges, finalRanges))
 					}
 				}
+			} else {
+				t.Logf("%v != %v", test.finalRanges, finalRanges)
 			}
 		})
 	}
 }
 
 func ReadRangesFromQuery(ctx *sql.Context, eng *sqle.Engine, query string) ([]*noms.ReadRange, error) {
-	parsed, err := parse.Parse(ctx, query)
+	binder := planbuilder.New(ctx, eng.Analyzer.Catalog, eng.Parser)
+	parsed, _, _, qFlags, err := binder.Parse(query, false)
 	if err != nil {
 		return nil, err
 	}
 
-	analyzed, err := eng.Analyzer.Analyze(ctx, parsed, nil)
+	analyzed, err := eng.Analyzer.Analyze(ctx, parsed, nil, qFlags)
 	if err != nil {
 		return nil, err
 	}
 
 	var lookup sql.IndexLookup
-	plan.Inspect(analyzed, func(n sql.Node) bool {
+	transform.Inspect(analyzed, func(n sql.Node) bool {
 		switch node := n.(type) {
 		case *plan.IndexedTableAccess:
 			lookup = plan.GetIndexLookup(node)
@@ -1596,5 +1584,5 @@ func ReadRangesFromQuery(ctx *sql.Context, eng *sqle.Engine, query string) ([]*n
 		return true
 	})
 
-	return index.ReadRangesFromIndexLookup(lookup), nil
+	return index.NomsRangesFromIndexLookup(ctx, lookup)
 }

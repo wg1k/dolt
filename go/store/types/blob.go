@@ -45,7 +45,7 @@ func newBlob(seq sequence) Blob {
 }
 
 func NewEmptyBlob(vrw ValueReadWriter) (Blob, error) {
-	seq, err := newBlobLeafSequence(vrw, []byte{})
+	seq, err := newBlobLeafSequence(vrw.Format(), vrw, []byte{})
 
 	if err != nil {
 		return Blob{}, err
@@ -55,8 +55,8 @@ func NewEmptyBlob(vrw ValueReadWriter) (Blob, error) {
 }
 
 // Less implements the LesserValuable interface.
-func (b Blob) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
-	res, err := b.Compare(nbf, other)
+func (b Blob) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+	res, err := b.Compare(ctx, nbf, other)
 	if err != nil {
 		return false, err
 	}
@@ -64,10 +64,9 @@ func (b Blob) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	return res < 0, nil
 }
 
-func (b Blob) Compare(nbf *NomsBinFormat, other LesserValuable) (int, error) {
+func (b Blob) Compare(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (int, error) {
 	if b2, ok := other.(Blob); ok {
 		// Blobs can have an arbitrary length, so we compare in chunks rather than loading it entirely
-		ctx := context.Background()
 		b1Length := b.Len()
 		b2Length := b2.Len()
 		b1Reader := b.Reader(ctx)
@@ -307,10 +306,6 @@ func (b Blob) Kind() NomsKind {
 	return b.sequence.Kind()
 }
 
-func (b Blob) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
 type BlobReader struct {
 	b   Blob
 	pos int64
@@ -352,7 +347,7 @@ func newEmptyBlobChunker(ctx context.Context, vrw ValueReadWriter) (*sequenceChu
 }
 
 func makeBlobLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
-	return func(level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
+	return func(ctx context.Context, level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
 		d.PanicIfFalse(level == 0)
 		buff := make([]byte, len(items))
 
@@ -365,7 +360,7 @@ func makeBlobLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
 }
 
 func chunkBlobLeaf(vrw ValueReadWriter, buff []byte) (Collection, orderedKey, uint64, error) {
-	seq, err := newBlobLeafSequence(vrw, buff)
+	seq, err := newBlobLeafSequence(vrw.Format(), vrw, buff)
 
 	if err != nil {
 		return nil, orderedKey{}, 0, err

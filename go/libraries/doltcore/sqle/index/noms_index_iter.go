@@ -23,8 +23,8 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table/typed/noms"
 	"github.com/dolthub/dolt/go/libraries/utils/async"
-	"github.com/dolthub/dolt/go/libraries/utils/set"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -54,20 +54,9 @@ type indexLookupRowIterAdapter struct {
 }
 
 // NewIndexLookupRowIterAdapter returns a new indexLookupRowIterAdapter.
-func NewIndexLookupRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter nomsKeyIter) (*indexLookupRowIterAdapter, error) {
-	lookupTags := make(map[uint64]int)
-	for i, tag := range idx.Schema().GetPKCols().Tags {
-		lookupTags[tag] = i
-	}
+func NewIndexLookupRowIterAdapter(ctx *sql.Context, idx DoltIndex, durableState *durableIndexState, keyIter nomsKeyIter, columns []uint64) (*indexLookupRowIterAdapter, error) {
+	rows := durable.NomsMapFromIndex(durableState.Primary)
 
-	// handle keyless case, where no columns are pk's and rowIdTag is the only lookup tag
-	if len(lookupTags) == 0 {
-		lookupTags[schema.KeylessRowIdTag] = 0
-	}
-
-	rows := durable.NomsMapFromIndex(idx.TableData())
-
-	conv := NewKVToSqlRowConverterForCols(idx.Format(), idx.Schema())
 	resBuf := resultBufferPool.Get().(*async.RingBuffer)
 	epoch := resBuf.Reset()
 
@@ -77,8 +66,8 @@ func NewIndexLookupRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter nomsK
 		idx:        idx,
 		keyIter:    keyIter,
 		tableRows:  rows,
-		conv:       conv,
-		lookupTags: lookupTags,
+		conv:       idx.sqlRowConverter(durableState, columns),
+		lookupTags: idx.lookupTags(durableState),
 		cancelF:    cancelF,
 		resultBuf:  resBuf,
 	}
@@ -148,10 +137,14 @@ func (i *indexLookupRowIterAdapter) queueRows(ctx context.Context, epoch int) {
 		select {
 		case lookups.toLookupCh <- lookup:
 		case <-ctx.Done():
+			err := ctx.Err()
+			if err == nil {
+				err = io.EOF
+			}
 			i.resultBuf.Push(lookupResult{
 				idx: idx,
 				r:   nil,
-				err: ctx.Err(),
+				err: err,
 			}, epoch)
 
 			return
@@ -225,9 +218,9 @@ func (i *indexLookupRowIterAdapter) processKey(ctx context.Context, indexKey typ
 	return sqlRow, nil
 }
 
-type coveringIndexRowIterAdapter struct {
+type CoveringIndexRowIterAdapter struct {
 	idx       DoltIndex
-	keyIter   nomsKeyIter
+	rr        *noms.NomsRangeReader
 	conv      *KVToSqlRowConverter
 	ctx       *sql.Context
 	pkCols    *schema.ColCollection
@@ -235,17 +228,31 @@ type coveringIndexRowIterAdapter struct {
 	nbf       *types.NomsBinFormat
 }
 
-func NewCoveringIndexRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter nomsKeyIter, resultCols []string) *coveringIndexRowIterAdapter {
+func NewCoveringIndexRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter *noms.NomsRangeReader, resultCols []uint64) *CoveringIndexRowIterAdapter {
 	idxCols := idx.IndexSchema().GetPKCols()
 	tblPKCols := idx.Schema().GetPKCols()
 	sch := idx.Schema()
-	cols := sch.GetAllCols().GetColumns()
-	tagToSqlColIdx := make(map[uint64]int)
+	allCols := sch.GetAllCols().GetColumns()
+	cols := make([]schema.Column, 0)
+	for _, col := range allCols {
+		for _, tag := range resultCols {
+			if col.Tag == tag {
+				cols = append(cols, col)
+			}
+		}
 
-	resultColSet := set.NewCaseInsensitiveStrSet(resultCols)
+	}
+	tagToSqlColIdx := make(map[uint64]int)
+	isPrimaryKeyIdx := idx.ID() == "PRIMARY"
+
+	resultColSet := make(map[uint64]bool)
+	for _, k := range resultCols {
+		resultColSet[k] = true
+	}
 	for i, col := range cols {
 		_, partOfIdxKey := idxCols.GetByNameCaseInsensitive(col.Name)
-		if partOfIdxKey && (len(resultCols) == 0 || resultColSet.Contains(col.Name)) {
+		// Either this is a primary key index or the key is a part of the index and this part of the result column set.
+		if (partOfIdxKey || isPrimaryKeyIdx) && (len(resultCols) == 0 || resultColSet[col.Tag]) {
 			tagToSqlColIdx[col.Tag] = i
 		}
 	}
@@ -258,9 +265,9 @@ func NewCoveringIndexRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter nom
 		}
 	}
 
-	return &coveringIndexRowIterAdapter{
+	return &CoveringIndexRowIterAdapter{
 		idx:       idx,
-		keyIter:   keyIter,
+		rr:        keyIter,
 		conv:      NewKVToSqlRowConverter(idx.Format(), tagToSqlColIdx, cols, len(cols)),
 		ctx:       ctx,
 		pkCols:    sch.GetPKCols(),
@@ -270,16 +277,16 @@ func NewCoveringIndexRowIterAdapter(ctx *sql.Context, idx DoltIndex, keyIter nom
 }
 
 // Next returns the next row from the iterator.
-func (ci *coveringIndexRowIterAdapter) Next(ctx *sql.Context) (sql.Row, error) {
-	key, err := ci.keyIter.ReadKey(ctx)
+func (ci *CoveringIndexRowIterAdapter) Next(ctx *sql.Context) (sql.Row, error) {
+	key, value, err := ci.rr.ReadKV(ctx)
 
 	if err != nil {
 		return nil, err
 	}
 
-	return ci.conv.ConvertKVTuplesToSqlRow(key, types.Tuple{})
+	return ci.conv.ConvertKVTuplesToSqlRow(key, value)
 }
 
-func (ci *coveringIndexRowIterAdapter) Close(*sql.Context) error {
+func (ci *CoveringIndexRowIterAdapter) Close(*sql.Context) error {
 	return nil
 }

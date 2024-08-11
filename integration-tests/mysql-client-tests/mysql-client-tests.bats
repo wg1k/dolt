@@ -1,3 +1,6 @@
+#!/usr/bin/env bats
+load $BATS_TEST_DIRNAME/helpers.bash
+
 # MySQL client tests are set up to test Dolt as a MySQL server and
 # standard MySQL Clients in a wide array of languages. I used BATS because
 # it was easy to set up the Dolt piece using the command line.
@@ -8,31 +11,18 @@
 # gotchas, we can add tests for that specific language.
 
 setup() {
-    REPO_NAME="dolt_repo_$$"
-    mkdir $REPO_NAME	
-    cd $REPO_NAME
-
-    dolt init
-
-    dolt sql -q "CREATE TABLE mysqldump_table(pk int)"
-    dolt sql -q "INSERT INTO mysqldump_table VALUES (1);"
-    dolt sql -q "CREATE TABLE warehouse(warehouse_id int primary key, warehouse_name longtext)"
-    dolt sql -q "INSERT into warehouse VALUES (1, 'UPS'), (2, 'TV'), (3, 'Table');"
-
-    let PORT="$$ % (65536-1024) + 1024"
-    USER="dolt"
-    dolt sql-server --host 0.0.0.0 --port=$PORT --user=$USER --loglevel=trace &
-    SERVER_PID=$!
-    # Give the server a chance to start
-    sleep 1
-
-    export MYSQL_PWD=""
+    setup_dolt_repo
 }
 
 teardown() {
     cd ..
-    kill $SERVER_PID
-    rm -rf $REPO_NAME
+    teardown_dolt_repo
+
+    # Check if postgresql is still running. If so stop it
+    active=$(service postgresql status)
+    if echo "$active" | grep "online"; then
+        service postgresql stop
+    fi
 }
 
 @test "go go-sql-drive/mysql test" {
@@ -41,15 +31,15 @@ teardown() {
 }
 
 @test "python mysql.connector client" {
-    python3 $BATS_TEST_DIRNAME/python/mysql.connector-test.py $USER $PORT $REPO_NAME
+    python3.8 $BATS_TEST_DIRNAME/python/mysql.connector-test.py $USER $PORT $REPO_NAME
 }
 
 @test "python pymysql client" {
-    python3 $BATS_TEST_DIRNAME/python/pymysql-test.py $USER $PORT $REPO_NAME
+    python3.8 $BATS_TEST_DIRNAME/python/pymysql-test.py $USER $PORT $REPO_NAME
 }
 
 @test "python sqlachemy client" {
-    python3 $BATS_TEST_DIRNAME/python/sqlalchemy-test.py $USER $PORT $REPO_NAME
+    python3.8 $BATS_TEST_DIRNAME/python/sqlalchemy-test.py $USER $PORT $REPO_NAME
 }
 
 @test "mysql-connector-java client" {
@@ -59,6 +49,11 @@ teardown() {
 
 @test "node mysql client" {
     node $BATS_TEST_DIRNAME/node/index.js $USER $PORT $REPO_NAME
+    node $BATS_TEST_DIRNAME/node/knex.js $USER $PORT $REPO_NAME
+}
+
+@test "node mysql client, hosted workbench stability" {
+    node $BATS_TEST_DIRNAME/node/workbench.js $USER $PORT $REPO_NAME $BATS_TEST_DIRNAME/node/testdata
 }
 
 @test "c mysql connector" {
@@ -103,6 +98,10 @@ cmake ..
 
 @test "ruby ruby/mysql test" {
     ruby $BATS_TEST_DIRNAME/ruby/ruby-mysql-test.rb $USER $PORT $REPO_NAME
+}
+
+@test "ruby mysql2 test" {
+    ruby $BATS_TEST_DIRNAME/ruby/mysql2-test.rb $USER $PORT $REPO_NAME
 }
 
 @test "elixir myxql test" {
@@ -158,5 +157,23 @@ EOF" -m "postgres"
 }
 
 @test "R RMariaDB client" {
+    skip "Error loading RMariaDB library"
+    # ex: https://github.com/dolthub/dolt/actions/runs/4428743682/jobs/7770282852
     Rscript $BATS_TEST_DIRNAME/r/rmariadb-test.r $USER $PORT $REPO_NAME
 }
+
+@test "rust mysql client" {
+    cd $BATS_TEST_DIRNAME/rust
+    cargo run --bin mysql_connector_test $USER $PORT $REPO_NAME
+}
+
+@test "php mysqli mysql client" {
+    cd $BATS_TEST_DIRNAME/php
+    php mysqli_connector_test.php $USER $PORT $REPO_NAME
+}
+
+@test "php pdo mysql client" {
+    cd $BATS_TEST_DIRNAME/php
+    php pdo_connector_test.php $USER $PORT $REPO_NAME
+}
+

@@ -30,12 +30,12 @@ import (
 
 func TestInsertIntoQueryCatalogTable(t *testing.T) {
 	dEnv := dtestutils.CreateTestEnv()
-	sqle.CreateTestDatabase(dEnv, t)
+	defer dEnv.DoltDB.Close()
 
 	ctx := context.Background()
 	root, _ := dEnv.WorkingRoot(ctx)
 
-	_, ok, err := root.GetTable(ctx, doltdb.DoltQueryCatalogTableName)
+	_, ok, err := root.GetTable(ctx, doltdb.TableName{Name: doltdb.DoltQueryCatalogTableName})
 	require.NoError(t, err)
 	require.False(t, ok)
 
@@ -51,14 +51,14 @@ func TestInsertIntoQueryCatalogTable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, sq, retrieved)
 
-	_, ok, err = root.GetTable(ctx, doltdb.DoltQueryCatalogTableName)
+	_, ok, err = root.GetTable(ctx, doltdb.TableName{Name: doltdb.DoltQueryCatalogTableName})
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	err = dEnv.UpdateWorkingRoot(ctx, root)
 	require.NoError(t, err)
 
-	rows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, "select display_order, query, name, description from "+doltdb.DoltQueryCatalogTableName)
+	rows, err := sqle.ExecuteSelect(dEnv, root, "select display_order, query, name, description from "+doltdb.DoltQueryCatalogTableName)
 	require.NoError(t, err)
 	expectedRows := []sql.Row{
 		{uint64(1), "select 1 from dual", "name", "description"},
@@ -81,7 +81,7 @@ func TestInsertIntoQueryCatalogTable(t *testing.T) {
 	err = dEnv.UpdateWorkingRoot(ctx, root)
 	require.NoError(t, err)
 
-	rows, err = sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, "select display_order, query, name, description from "+doltdb.DoltQueryCatalogTableName+" order by display_order")
+	rows, err = sqle.ExecuteSelect(dEnv, root, "select display_order, query, name, description from "+doltdb.DoltQueryCatalogTableName+" order by display_order")
 	require.NoError(t, err)
 	expectedRows = []sql.Row{
 		{uint64(1), "select 1 from dual", "name", "description"},
@@ -90,7 +90,7 @@ func TestInsertIntoQueryCatalogTable(t *testing.T) {
 
 	assert.Equal(t, expectedRows, rows)
 
-	rows, err = sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, "select id from "+doltdb.DoltQueryCatalogTableName)
+	rows, err = sqle.ExecuteSelect(dEnv, root, "select id from "+doltdb.DoltQueryCatalogTableName)
 	require.NoError(t, err)
 	for _, r := range rows {
 		assert.NotEmpty(t, r)

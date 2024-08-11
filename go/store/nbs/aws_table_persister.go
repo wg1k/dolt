@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"sort"
@@ -33,9 +34,12 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 
 	"github.com/dolthub/dolt/go/store/atomicerr"
 	"github.com/dolthub/dolt/go/store/chunks"
+	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/util/verbose"
 )
 
@@ -44,55 +48,59 @@ const (
 	maxS3PartSize = 64 * 1 << 20 // 64MiB
 	maxS3Parts    = 10000
 
-	// Disable persisting tables in DynamoDB.  This is currently unused by
-	// Dolthub and keeping it requires provisioning DynamoDB throughout for
-	// the noop reads.
-	maxDynamoChunks   = 0
-	maxDynamoItemSize = 0
-
 	defaultS3PartSize = minS3PartSize // smallest allowed by S3 allows for most throughput
 )
 
 type awsTablePersister struct {
-	s3         s3svc
-	bucket     string
-	rl         chan struct{}
-	ddb        *ddbTableStore
-	limits     awsLimits
-	indexCache *indexCache
-	ns         string
-	parseIndex indexParserF
+	s3     s3iface.S3API
+	bucket string
+	rl     chan struct{}
+	limits awsLimits
+	ns     string
+	q      MemoryQuotaProvider
 }
+
+var _ tablePersister = awsTablePersister{}
+var _ tableFilePersister = awsTablePersister{}
 
 type awsLimits struct {
 	partTarget, partMin, partMax uint64
-	itemMax                      int
-	chunkMax                     uint32
 }
 
-func (al awsLimits) tableFitsInDynamo(name addr, dataLen int, chunkCount uint32) bool {
-	calcItemSize := func(n addr, dataLen int) int {
-		return len(dbAttr) + len(tablePrefix) + len(n.String()) + len(dataAttr) + dataLen
-	}
-	return chunkCount <= al.chunkMax && calcItemSize(name, dataLen) < al.itemMax
-}
-
-func (al awsLimits) tableMayBeInDynamo(chunkCount uint32) bool {
-	return chunkCount <= al.chunkMax
-}
-
-func (s3p awsTablePersister) Open(ctx context.Context, name addr, chunkCount uint32, stats *Stats) (chunkSource, error) {
+func (s3p awsTablePersister) Open(ctx context.Context, name hash.Hash, chunkCount uint32, stats *Stats) (chunkSource, error) {
 	return newAWSChunkSource(
 		ctx,
-		s3p.ddb,
 		&s3ObjectReader{s3: s3p.s3, bucket: s3p.bucket, readRl: s3p.rl, ns: s3p.ns},
 		s3p.limits,
 		name,
 		chunkCount,
-		s3p.indexCache,
+		s3p.q,
 		stats,
-		s3p.parseIndex,
 	)
+}
+
+func (s3p awsTablePersister) Exists(ctx context.Context, name hash.Hash, chunkCount uint32, stats *Stats) (bool, error) {
+	return tableExistsInChunkSource(
+		ctx,
+		&s3ObjectReader{s3: s3p.s3, bucket: s3p.bucket, readRl: s3p.rl, ns: s3p.ns},
+		s3p.limits,
+		name,
+		chunkCount,
+		s3p.q,
+		stats,
+	)
+}
+
+func (s3p awsTablePersister) CopyTableFile(ctx context.Context, r io.Reader, fileId string, fileSz uint64, chunkCount uint32) error {
+	return s3p.multipartUpload(ctx, r, fileSz, fileId)
+}
+
+func (s3p awsTablePersister) Path() string {
+	return s3p.bucket
+}
+
+func (s3p awsTablePersister) AccessMode() chunks.ExclusiveAccessMode {
+	return chunks.ExclusiveAccessMode_Shared
 }
 
 type s3UploadedPart struct {
@@ -118,40 +126,26 @@ func (s3p awsTablePersister) Persist(ctx context.Context, mt *memTable, haver ch
 		return emptyChunkSource{}, nil
 	}
 
-	if s3p.limits.tableFitsInDynamo(name, len(data), chunkCount) {
-		err := s3p.ddb.Write(ctx, name, data)
-
-		if err != nil {
-			return nil, err
-		}
-
-		return newReaderFromIndexData(s3p.indexCache, data, name, &dynamoTableReaderAt{ddb: s3p.ddb, h: name}, s3BlockSize)
-	}
-
-	err = s3p.multipartUpload(ctx, data, name.String())
+	err = s3p.multipartUpload(ctx, bytes.NewReader(data), uint64(len(data)), name.String())
 
 	if err != nil {
 		return emptyChunkSource{}, err
 	}
 
 	tra := &s3TableReaderAt{&s3ObjectReader{s3: s3p.s3, bucket: s3p.bucket, readRl: s3p.rl, ns: s3p.ns}, name}
-	return newReaderFromIndexData(s3p.indexCache, data, name, tra, s3BlockSize)
+	return newReaderFromIndexData(ctx, s3p.q, data, name, tra, s3BlockSize)
 }
 
-func (s3p awsTablePersister) multipartUpload(ctx context.Context, data []byte, key string) error {
-	uploadID, err := s3p.startMultipartUpload(ctx, key)
-
-	if err != nil {
-		return err
-	}
-
-	multipartUpload, err := s3p.uploadParts(ctx, data, key, uploadID)
-	if err != nil {
-		_ = s3p.abortMultipartUpload(ctx, key, uploadID)
-		return err
-	}
-
-	return s3p.completeMultipartUpload(ctx, key, uploadID, multipartUpload)
+func (s3p awsTablePersister) multipartUpload(ctx context.Context, r io.Reader, sz uint64, key string) error {
+	uploader := s3manager.NewUploaderWithClient(s3p.s3, func(u *s3manager.Uploader) {
+		u.PartSize = int64(s3p.limits.partTarget)
+	})
+	_, err := uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(s3p.bucket),
+		Key:    aws.String(s3p.key(key)),
+		Body:   r,
+	})
+	return err
 }
 
 func (s3p awsTablePersister) startMultipartUpload(ctx context.Context, key string) (string, error) {
@@ -188,85 +182,6 @@ func (s3p awsTablePersister) completeMultipartUpload(ctx context.Context, key, u
 	return err
 }
 
-func (s3p awsTablePersister) uploadParts(ctx context.Context, data []byte, key, uploadID string) (*s3.CompletedMultipartUpload, error) {
-	sent, failed, done := make(chan s3UploadedPart), make(chan error), make(chan struct{})
-
-	numParts := getNumParts(uint64(len(data)), s3p.limits.partTarget)
-
-	if numParts > maxS3Parts {
-		return nil, errors.New("exceeded maximum parts")
-	}
-
-	var wg sync.WaitGroup
-	sendPart := func(partNum, start, end uint64) {
-		if s3p.rl != nil {
-			s3p.rl <- struct{}{}
-			defer func() { <-s3p.rl }()
-		}
-		defer wg.Done()
-
-		// Check if upload has been terminated
-		select {
-		case <-done:
-			return
-		default:
-		}
-		// Upload the desired part
-		if partNum == numParts { // If this is the last part, make sure it includes any overflow
-			end = uint64(len(data))
-		}
-		etag, err := s3p.uploadPart(ctx, data[start:end], key, uploadID, int64(partNum))
-		if err != nil {
-			failed <- err
-			return
-		}
-		// Try to send along part info. In the case that the upload was aborted, reading from done allows this worker to exit correctly.
-		select {
-		case sent <- s3UploadedPart{int64(partNum), etag}:
-		case <-done:
-			return
-		}
-	}
-	for i := uint64(0); i < numParts; i++ {
-		wg.Add(1)
-		partNum := i + 1 // Parts are 1-indexed
-		start, end := i*s3p.limits.partTarget, (i+1)*s3p.limits.partTarget
-		go sendPart(partNum, start, end)
-	}
-	go func() {
-		wg.Wait()
-		close(sent)
-		close(failed)
-	}()
-
-	multipartUpload := &s3.CompletedMultipartUpload{}
-	var firstFailure error
-	for cont := true; cont; {
-		select {
-		case sentPart, open := <-sent:
-			if open {
-				multipartUpload.Parts = append(multipartUpload.Parts, &s3.CompletedPart{
-					ETag:       aws.String(sentPart.etag),
-					PartNumber: aws.Int64(sentPart.idx),
-				})
-			}
-			cont = open
-
-		case err := <-failed:
-			if err != nil && firstFailure == nil { // nil err may happen when failed gets closed
-				firstFailure = err
-				close(done)
-			}
-		}
-	}
-
-	if firstFailure == nil {
-		close(done)
-	}
-	sort.Sort(partsByPartNum(multipartUpload.Parts))
-	return multipartUpload, firstFailure
-}
-
 func getNumParts(dataLen, minPartSize uint64) uint64 {
 	numParts := dataLen / minPartSize
 	if numParts == 0 {
@@ -289,28 +204,28 @@ func (s partsByPartNum) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-func (s3p awsTablePersister) ConjoinAll(ctx context.Context, sources chunkSources, stats *Stats) (chunkSource, error) {
-	plan, err := planConjoin(sources, stats)
-
+func (s3p awsTablePersister) ConjoinAll(ctx context.Context, sources chunkSources, stats *Stats) (chunkSource, cleanupFunc, error) {
+	plan, err := planRangeCopyConjoin(sources, stats)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if plan.chunkCount == 0 {
-		return emptyChunkSource{}, nil
+		return emptyChunkSource{}, nil, nil
 	}
 	t1 := time.Now()
 	name := nameFromSuffixes(plan.suffixes())
 	err = s3p.executeCompactionPlan(ctx, plan, name.String())
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	verbose.Logger(ctx).Sugar().Debugf("Compacted table of %d Kb in %s", plan.totalCompressedData/1024, time.Since(t1))
 
 	tra := &s3TableReaderAt{&s3ObjectReader{s3: s3p.s3, bucket: s3p.bucket, readRl: s3p.rl, ns: s3p.ns}, name}
-	return newReaderFromIndexData(s3p.indexCache, plan.mergedIndex, name, tra, s3BlockSize)
+	cs, err := newReaderFromIndexData(ctx, s3p.q, plan.mergedIndex, name, tra, s3BlockSize)
+	return cs, func() {}, err
 }
 
 func (s3p awsTablePersister) executeCompactionPlan(ctx context.Context, plan compactionPlan, key string) error {
@@ -348,9 +263,9 @@ func (s3p awsTablePersister) assembleTable(ctx context.Context, plan compactionP
 		readWg.Add(1)
 		go func(m manualPart) {
 			defer readWg.Done()
-			n, _ := m.srcR.Read(buff[m.dstStart:m.dstEnd])
-			if int64(n) < m.dstEnd-m.dstStart {
-				ae.SetIfError(errors.New("failed to read all the table data"))
+			err := m.run(ctx, buff)
+			if err != nil {
+				ae.SetIfError(fmt.Errorf("failed to read conjoin table data: %w", err))
 			}
 		}(man)
 	}
@@ -463,8 +378,18 @@ type copyPart struct {
 }
 
 type manualPart struct {
-	srcR             io.Reader
-	dstStart, dstEnd int64
+	src        chunkSource
+	start, end int64
+}
+
+func (mp manualPart) run(ctx context.Context, buff []byte) error {
+	reader, _, err := mp.src.reader(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	_, err = io.ReadFull(reader, buff[mp.start:mp.end])
+	return err
 }
 
 // dividePlan assumes that plan.sources (which is of type chunkSourcesByDescendingDataSize) is correctly sorted by descending data size.
@@ -483,12 +408,7 @@ func dividePlan(ctx context.Context, plan compactionPlan, minPartSize, maxPartSi
 			break
 		}
 		if sws.dataLen <= maxPartSize {
-			h, err := sws.source.hash()
-
-			if err != nil {
-				return nil, nil, nil, err
-			}
-
+			h := sws.source.hash()
 			copies = append(copies, copyPart{h.String(), 0, int64(sws.dataLen)})
 			continue
 		}
@@ -498,12 +418,7 @@ func dividePlan(ctx context.Context, plan compactionPlan, minPartSize, maxPartSi
 
 		var srcStart int64
 		for _, length := range lens {
-			h, err := sws.source.hash()
-
-			if err != nil {
-				return nil, nil, nil, err
-			}
-
+			h := sws.source.hash()
 			copies = append(copies, copyPart{h.String(), srcStart, length})
 			srcStart += length
 		}
@@ -511,13 +426,7 @@ func dividePlan(ctx context.Context, plan compactionPlan, minPartSize, maxPartSi
 	var offset int64
 	for ; i < len(plan.sources.sws); i++ {
 		sws := plan.sources.sws[i]
-		rdr, err := sws.source.reader(ctx)
-
-		if err != nil {
-			return nil, nil, nil, err
-		}
-
-		manuals = append(manuals, manualPart{rdr, offset, offset + int64(sws.dataLen)})
+		manuals = append(manuals, manualPart{sws.source, offset, offset + int64(sws.dataLen)})
 		offset += int64(sws.dataLen)
 		buffSize += sws.dataLen
 	}
@@ -574,6 +483,10 @@ func (s3p awsTablePersister) uploadPart(ctx context.Context, data []byte, key, u
 	return
 }
 
-func (s3p awsTablePersister) PruneTableFiles(ctx context.Context, contents manifestContents) error {
+func (s3p awsTablePersister) PruneTableFiles(ctx context.Context, keeper func() []hash.Hash, t time.Time) error {
 	return chunks.ErrUnsupportedOperation
+}
+
+func (s3p awsTablePersister) Close() error {
+	return nil
 }

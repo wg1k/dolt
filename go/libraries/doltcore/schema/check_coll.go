@@ -33,8 +33,12 @@ type CheckCollection interface {
 	DropCheck(name string) error
 	// AllChecks returns all the checks in the collection
 	AllChecks() []Check
+	// Equals returns whether the provided check collection is equal or not.
+	Equals(other CheckCollection) bool
 	// Count returns the size of the collection
 	Count() int
+	// Copy returns a copy of the collection safe to modify without affecting the original
+	Copy() CheckCollection
 }
 
 type check struct {
@@ -95,6 +99,26 @@ func (c *checkCollection) AllChecks() []Check {
 	return checks
 }
 
+func (c *checkCollection) Equals(other CheckCollection) bool {
+
+	o := other.(*checkCollection)
+	if len(c.checks) != len(o.checks) {
+		return false
+	}
+
+	for i := range c.checks {
+		a := c.checks[i]
+		b := o.checks[i]
+		if a.name != b.name ||
+			a.expression != b.expression ||
+			a.enforced != b.enforced {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (c *checkCollection) Count() int {
 	return len(c.checks)
 }
@@ -103,4 +127,21 @@ func NewCheckCollection() CheckCollection {
 	return &checkCollection{
 		checks: make([]check, 0),
 	}
+}
+
+func NewCheck(name, expression string, enforced bool) check {
+	return check{
+		name:       name,
+		expression: expression,
+		enforced:   enforced,
+	}
+}
+
+func (c checkCollection) Copy() CheckCollection {
+	checks := make([]check, len(c.checks))
+	for i, check := range c.checks {
+		checks[i] = NewCheck(check.name, check.expression, check.enforced)
+	}
+
+	return &c
 }

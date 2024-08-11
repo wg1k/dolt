@@ -17,38 +17,35 @@ package typeinfo
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
-	"github.com/dolthub/dolt/go/store/geometry"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 // This is a dolt implementation of the MySQL type Point, thus most of the functionality
 // within is directly reliant on the go-mysql-server implementation.
 type pointType struct {
-	sqlPointType sql.PointType
+	sqlPointType gmstypes.PointType
 }
 
 var _ TypeInfo = (*pointType)(nil)
 
-var PointType = &pointType{sql.PointType{}}
-
-// ConvertTypesPointToSQLPoint basically makes a deep copy of sql.Point
-func ConvertTypesPointToSQLPoint(p types.Point) sql.Point {
-	return sql.Point{SRID: p.SRID, X: p.X, Y: p.Y}
-}
+var PointType = &pointType{gmstypes.PointType{}}
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *pointType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
-	// Expect a types.Point, return a sql.Point
-	if val, ok := v.(types.Point); ok {
-		return ConvertTypesPointToSQLPoint(val), nil
-	}
 	// Check for null
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
 	}
+	// Expect a types.Point, return a sql.Point
+	if val, ok := v.(types.Point); ok {
+		return types.ConvertTypesPointToSQLPoint(val), nil
+	}
+
 	return nil, fmt.Errorf(`"%v" cannot convert NomsKind "%v" to a value`, ti.String(), v.Kind())
 }
 
@@ -69,12 +66,6 @@ func (ti *pointType) ReadFrom(nbf *types.NomsBinFormat, reader types.CodecReader
 	}
 }
 
-// TODO: define constants for WKB?
-
-func ConvertSQLPointToTypesPoint(p sql.Point) types.Point {
-	return types.Point{SRID: p.SRID, X: p.X, Y: p.Y}
-}
-
 // ConvertValueToNomsValue implements TypeInfo interface.
 func (ti *pointType) ConvertValueToNomsValue(ctx context.Context, vrw types.ValueReadWriter, v interface{}) (types.Value, error) {
 	// Check for null
@@ -83,12 +74,12 @@ func (ti *pointType) ConvertValueToNomsValue(ctx context.Context, vrw types.Valu
 	}
 
 	// Convert to sql.PointType
-	point, err := ti.sqlPointType.Convert(v)
+	point, _, err := ti.sqlPointType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
 
-	return ConvertSQLPointToTypesPoint(point.(sql.Point)), nil
+	return types.ConvertSQLPointToTypesPoint(point.(gmstypes.Point)), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -96,17 +87,17 @@ func (ti *pointType) Equals(other TypeInfo) bool {
 	if other == nil {
 		return false
 	}
-	_, ok := other.(*pointType)
-	return ok
+	if o, ok := other.(*pointType); ok {
+		// if either ti or other has defined SRID, then check SRID value; otherwise,
+		return (!ti.sqlPointType.DefinedSRID && !o.sqlPointType.DefinedSRID) || ti.sqlPointType.SRID == o.sqlPointType.SRID
+	}
+	return false
 }
 
 // FormatValue implements TypeInfo interface.
 func (ti *pointType) FormatValue(v types.Value) (*string, error) {
 	if val, ok := v.(types.Point); ok {
-		buf := make([]byte, geometry.EWKBHeaderSize+geometry.PointSize)
-		types.WriteEWKBHeader(val, buf[:geometry.EWKBHeaderSize])
-		types.WriteEWKBPointData(val, buf[geometry.EWKBHeaderSize:])
-		resStr := string(buf)
+		resStr := string(types.SerializePoint(val))
 		return &resStr, nil
 	}
 	if _, ok := v.(types.Null); ok || v == nil {
@@ -123,7 +114,8 @@ func (ti *pointType) GetTypeIdentifier() Identifier {
 
 // GetTypeParams implements TypeInfo interface.
 func (ti *pointType) GetTypeParams() map[string]string {
-	return map[string]string{}
+	return map[string]string{"SRID": strconv.FormatUint(uint64(ti.sqlPointType.SRID), 10),
+		"DefinedSRID": strconv.FormatBool(ti.sqlPointType.DefinedSRID)}
 }
 
 // IsValid implements TypeInfo interface.
@@ -144,7 +136,7 @@ func (ti *pointType) NomsKind() types.NomsKind {
 
 // Promote implements TypeInfo interface.
 func (ti *pointType) Promote() TypeInfo {
-	return &pointType{ti.sqlPointType.Promote().(sql.PointType)}
+	return &pointType{ti.sqlPointType.Promote().(gmstypes.PointType)}
 }
 
 // String implements TypeInfo interface.
@@ -176,6 +168,10 @@ func pointTypeConverter(ctx context.Context, src *pointType, destTi TypeInfo) (t
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *intType:
@@ -184,8 +180,14 @@ func pointTypeConverter(ctx context.Context, src *pointType, destTi TypeInfo) (t
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
-		return identityTypeConverter, false, nil
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *polygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *setType:
@@ -205,4 +207,30 @@ func pointTypeConverter(ctx context.Context, src *pointType, destTi TypeInfo) (t
 	default:
 		return nil, false, UnhandledTypeConversion.New(src.String(), destTi.String())
 	}
+}
+
+func CreatePointTypeFromParams(params map[string]string) (TypeInfo, error) {
+	var (
+		err     error
+		sridVal uint64
+		def     bool
+	)
+	if s, ok := params["SRID"]; ok {
+		sridVal, err = strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if d, ok := params["DefinedSRID"]; ok {
+		def, err = strconv.ParseBool(d)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return CreatePointTypeFromSqlPointType(gmstypes.PointType{SRID: uint32(sridVal), DefinedSRID: def}), nil
+}
+
+func CreatePointTypeFromSqlPointType(sqlPointType gmstypes.PointType) TypeInfo {
+	return &pointType{sqlPointType: sqlPointType}
 }

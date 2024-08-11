@@ -17,6 +17,7 @@ package noms
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -30,28 +31,40 @@ import (
 type InRangeCheck interface {
 	// Check is a call made as the reader reads through values to check that the next value either being read is valid
 	// and whether it should be skipped or returned.
-	Check(ctx context.Context, tuple types.Tuple) (valid bool, skip bool, err error)
+	Check(ctx context.Context, vr types.ValueReader, tuple types.Tuple) (valid bool, skip bool, err error)
 }
 
 // InRangeCheckAlways will always return that the given tuple is valid and not to be skipped.
 type InRangeCheckAlways struct{}
 
-func (InRangeCheckAlways) Check(_ context.Context, _ types.Tuple) (valid bool, skip bool, err error) {
+func (InRangeCheckAlways) Check(context.Context, types.ValueReader, types.Tuple) (valid bool, skip bool, err error) {
 	return true, false, nil
+}
+
+func (InRangeCheckAlways) String() string {
+	return "Always"
 }
 
 // InRangeCheckNever will always return that the given tuple is not valid.
 type InRangeCheckNever struct{}
 
-func (InRangeCheckNever) Check(_ context.Context, _ types.Tuple) (valid bool, skip bool, err error) {
+func (InRangeCheckNever) Check(context.Context, types.ValueReader, types.Tuple) (valid bool, skip bool, err error) {
 	return false, false, nil
+}
+
+func (InRangeCheckNever) String() string {
+	return "Never"
 }
 
 // InRangeCheckPartial will check if the given tuple contains the aliased tuple as a partial key.
 type InRangeCheckPartial types.Tuple
 
-func (ircp InRangeCheckPartial) Check(_ context.Context, t types.Tuple) (valid bool, skip bool, err error) {
+func (ircp InRangeCheckPartial) Check(_ context.Context, vr types.ValueReader, t types.Tuple) (valid bool, skip bool, err error) {
 	return t.StartsWith(types.Tuple(ircp)), false, nil
+}
+
+func (ircp InRangeCheckPartial) String() string {
+	return fmt.Sprintf("StartsWith(%v)", types.Tuple(ircp).HumanReadableString())
 }
 
 // ReadRange represents a range of values to be read
@@ -64,6 +77,10 @@ type ReadRange struct {
 	Reverse bool
 	// Check is a callb made as the reader reads through values to check that the next value being read is in the range.
 	Check InRangeCheck
+}
+
+func (rr *ReadRange) String() string {
+	return fmt.Sprintf("ReadRange[Start: %v, Inclusive: %t, Reverse %t, Check: %v]", rr.Start.HumanReadableString(), rr.Inclusive, rr.Reverse, rr.Check)
 }
 
 // NewRangeEndingAt creates a range with a starting key which will be iterated in reverse
@@ -108,6 +125,7 @@ func NewRangeStartingAfter(key types.Tuple, inRangeCheck InRangeCheck) *ReadRang
 
 // NomsRangeReader reads values in one or more ranges from a map
 type NomsRangeReader struct {
+	vr          types.ValueReader
 	sch         schema.Schema
 	m           types.Map
 	ranges      []*ReadRange
@@ -118,8 +136,9 @@ type NomsRangeReader struct {
 }
 
 // NewNomsRangeReader creates a NomsRangeReader
-func NewNomsRangeReader(sch schema.Schema, m types.Map, ranges []*ReadRange) *NomsRangeReader {
+func NewNomsRangeReader(vr types.ValueReader, sch schema.Schema, m types.Map, ranges []*ReadRange) *NomsRangeReader {
 	return &NomsRangeReader{
+		vr,
 		sch,
 		m,
 		ranges,
@@ -155,8 +174,6 @@ func (nrr *NomsRangeReader) ReadKey(ctx context.Context) (types.Tuple, error) {
 }
 
 func (nrr *NomsRangeReader) ReadKV(ctx context.Context) (types.Tuple, types.Tuple, error) {
-	nbf := nrr.m.Format()
-
 	var err error
 	var k types.Tuple
 	var v types.Tuple
@@ -188,7 +205,7 @@ func (nrr *NomsRangeReader) ReadKV(ctx context.Context) (types.Tuple, types.Tupl
 
 			if err == nil && !r.Inclusive {
 				var res int
-				res, err = r.Start.Compare(nbf, k)
+				res, err = r.Start.Compare(ctx, nrr.vr.Format(), k)
 				if err == nil && res == 0 {
 					k, v, err = nrr.itr.NextTuple(ctx)
 				}
@@ -202,7 +219,7 @@ func (nrr *NomsRangeReader) ReadKV(ctx context.Context) (types.Tuple, types.Tupl
 		}
 
 		if err != io.EOF {
-			valid, skip, err := nrr.currCheck.Check(ctx, k)
+			valid, skip, err := nrr.currCheck.Check(ctx, nrr.vr, k)
 			if err != nil {
 				return types.Tuple{}, types.Tuple{}, err
 			}

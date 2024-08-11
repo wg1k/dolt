@@ -17,11 +17,13 @@ package encoding
 import (
 	"context"
 	"errors"
-	"fmt"
+	"math/rand"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +31,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
+	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/constants"
 	"github.com/dolthub/dolt/go/store/marshal"
 	"github.com/dolthub/dolt/go/store/types"
@@ -36,7 +39,7 @@ import (
 
 func createTestSchema() schema.Schema {
 	columns := []schema.Column{
-		schema.NewColumn("id", 4, types.UUIDKind, true, schema.NotNullConstraint{}),
+		schema.NewColumn("id", 4, types.InlineBlobKind, true, schema.NotNullConstraint{}),
 		schema.NewColumn("first", 1, types.StringKind, false),
 		schema.NewColumn("last", 2, types.StringKind, false, schema.NotNullConstraint{}),
 		schema.NewColumn("age", 3, types.UintKind, false),
@@ -44,109 +47,97 @@ func createTestSchema() schema.Schema {
 
 	colColl := schema.NewColCollection(columns...)
 	sch := schema.MustSchemaFromCols(colColl)
-	_, _ = sch.Indexes().AddIndexByColTags("idx_age", []uint64{3}, schema.IndexProperties{IsUnique: false, Comment: ""})
+	_, _ = sch.Indexes().AddIndexByColTags("idx_age", []uint64{3}, nil, schema.IndexProperties{IsUnique: false, Comment: ""})
 	return sch
 }
 
 func TestNomsMarshalling(t *testing.T) {
 	tSchema := createTestSchema()
-	_, vrw, err := dbfactory.MemFactory{}.CreateDB(context.Background(), types.Format_Default, nil, nil)
+	_, vrw, _, err := dbfactory.MemFactory{}.CreateDB(context.Background(), types.Format_Default, nil, nil)
 
 	if err != nil {
 		t.Fatal("Could not create in mem noms db.")
 	}
 
-	val, err := MarshalSchemaAsNomsValue(context.Background(), vrw, tSchema)
+	val, err := MarshalSchema(context.Background(), vrw, tSchema)
 
 	if err != nil {
 		t.Fatal("Failed to marshal Schema as a types.Value.")
 	}
 
-	unMarshalled, err := UnmarshalSchemaNomsValue(context.Background(), types.Format_Default, val)
+	unMarshalled, err := UnmarshalSchema(context.Background(), types.Format_Default, val)
 
 	if err != nil {
 		t.Fatal("Failed to unmarshal types.Value as Schema")
 	}
 
-	if !reflect.DeepEqual(tSchema, unMarshalled) {
+	if !assert.Equal(t, tSchema, unMarshalled) {
 		t.Error("Value different after marshalling and unmarshalling.")
 	}
 
-	validated, err := validateUnmarshaledNomsValue(context.Background(), types.Format_Default, val)
-
-	if err != nil {
-		t.Fatal(fmt.Sprintf("Failed compatibility test. Schema could not be unmarshalled with mirror type, error: %s", err.Error()))
+	// this validation step only makes sense for Noms encoded schemas
+	if !types.Format_Default.UsesFlatbuffers() {
+		validated, err := validateUnmarshaledNomsValue(context.Background(), types.Format_Default, val)
+		assert.NoError(t, err,
+			"Failed compatibility test. Schema could not be unmarshalled with mirror type, error: %v", err)
+		if !assert.Equal(t, tSchema, validated) {
+			t.Error("Value different after marshalling and unmarshalling.")
+		}
 	}
-
-	if !reflect.DeepEqual(tSchema, validated) {
-		t.Error("Value different after marshalling and unmarshalling.")
-	}
-
-	tSuperSchema, err := schema.NewSuperSchema(tSchema)
-	require.NoError(t, err)
-
-	ssVal, err := MarshalSuperSchemaAsNomsValue(context.Background(), vrw, tSuperSchema)
-	require.NoError(t, err)
-
-	unMarshalledSS, err := UnmarshalSuperSchemaNomsValue(context.Background(), types.Format_Default, ssVal)
-	require.NoError(t, err)
-
-	if !reflect.DeepEqual(tSuperSchema, unMarshalledSS) {
-		t.Error("Value different after marshalling and unmarshalling.")
-	}
-
 }
 
-func TestTypeInfoMarshalling(t *testing.T) {
+func getSqlTypes() []sql.Type {
 	//TODO: determine the storage format for BINARY
 	//TODO: determine the storage format for BLOB
 	//TODO: determine the storage format for LONGBLOB
 	//TODO: determine the storage format for MEDIUMBLOB
 	//TODO: determine the storage format for TINYBLOB
 	//TODO: determine the storage format for VARBINARY
-	sqlTypes := []sql.Type{
-		sql.Int64,  //BIGINT
-		sql.Uint64, //BIGINT UNSIGNED
+	return []sql.Type{
+		gmstypes.Int64,  //BIGINT
+		gmstypes.Uint64, //BIGINT UNSIGNED
 		//sql.MustCreateBinary(sqltypes.Binary, 10), //BINARY(10)
-		sql.MustCreateBitType(10), //BIT(10)
+		gmstypes.MustCreateBitType(10), //BIT(10)
 		//sql.Blob, //BLOB
-		sql.Boolean, //BOOLEAN
-		sql.MustCreateStringWithDefaults(sqltypes.Char, 10), //CHAR(10)
-		sql.Date,                        //DATE
-		sql.Datetime,                    //DATETIME
-		sql.MustCreateDecimalType(9, 5), //DECIMAL(9, 5)
-		sql.Float64,                     //DOUBLE
-		sql.MustCreateEnumType([]string{"a", "b", "c"}, sql.Collation_Default), //ENUM('a','b','c')
-		sql.Float32, //FLOAT
-		sql.Int32,   //INT
-		sql.Uint32,  //INT UNSIGNED
+		gmstypes.Boolean, //BOOLEAN
+		gmstypes.MustCreateStringWithDefaults(sqltypes.Char, 10), //CHAR(10)
+		gmstypes.Date,     //DATE
+		gmstypes.Datetime, //DATETIME
+		gmstypes.MustCreateColumnDecimalType(9, 5), //DECIMAL(9, 5)
+		gmstypes.Float64, //DOUBLE
+		gmstypes.MustCreateEnumType([]string{"a", "b", "c"}, sql.Collation_Default), //ENUM('a','b','c')
+		gmstypes.Float32, //FLOAT
+		gmstypes.Int32,   //INT
+		gmstypes.Uint32,  //INT UNSIGNED
 		//sql.LongBlob, //LONGBLOB
-		sql.LongText, //LONGTEXT
+		gmstypes.LongText, //LONGTEXT
 		//sql.MediumBlob, //MEDIUMBLOB
-		sql.Int24,      //MEDIUMINT
-		sql.Uint24,     //MEDIUMINT UNSIGNED
-		sql.MediumText, //MEDIUMTEXT
-		sql.MustCreateSetType([]string{"a", "b", "c"}, sql.Collation_Default), //SET('a','b','c')
-		sql.Int16,     //SMALLINT
-		sql.Uint16,    //SMALLINT UNSIGNED
-		sql.Text,      //TEXT
-		sql.Time,      //TIME
-		sql.Timestamp, //TIMESTAMP
+		gmstypes.Int24,      //MEDIUMINT
+		gmstypes.Uint24,     //MEDIUMINT UNSIGNED
+		gmstypes.MediumText, //MEDIUMTEXT
+		gmstypes.MustCreateSetType([]string{"a", "b", "c"}, sql.Collation_Default), //SET('a','b','c')
+		gmstypes.Int16,     //SMALLINT
+		gmstypes.Uint16,    //SMALLINT UNSIGNED
+		gmstypes.Text,      //TEXT
+		gmstypes.Time,      //TIME
+		gmstypes.Timestamp, //TIMESTAMP
 		//sql.TinyBlob, //TINYBLOB
-		sql.Int8,     //TINYINT
-		sql.Uint8,    //TINYINT UNSIGNED
-		sql.TinyText, //TINYTEXT
+		gmstypes.Int8,     //TINYINT
+		gmstypes.Uint8,    //TINYINT UNSIGNED
+		gmstypes.TinyText, //TINYTEXT
 		//sql.MustCreateBinary(sqltypes.VarBinary, 10), //VARBINARY(10)
-		sql.MustCreateStringWithDefaults(sqltypes.VarChar, 10),                //VARCHAR(10)
-		sql.MustCreateString(sqltypes.VarChar, 10, sql.Collation_utf8mb3_bin), //VARCHAR(10) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin
-		sql.Year, //YEAR
+		gmstypes.MustCreateStringWithDefaults(sqltypes.VarChar, 10),                //VARCHAR(10)
+		gmstypes.MustCreateString(sqltypes.VarChar, 10, sql.Collation_utf8mb3_bin), //VARCHAR(10) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin
+		gmstypes.Year, //YEAR
 	}
+}
 
-	for _, sqlType := range sqlTypes {
+func TestTypeInfoMarshalling(t *testing.T) {
+	for _, sqlType := range getSqlTypes() {
 		t.Run(sqlType.String(), func(t *testing.T) {
 			ti, err := typeinfo.FromSqlType(sqlType)
 			require.NoError(t, err)
-			col, err := schema.NewColumnWithTypeInfo("pk", 1, ti, true, "", false, "")
+			col, err := schema.NewColumnWithTypeInfo("pk", 1, ti, true, "", false, "", schema.NotNullConstraint{})
 			require.NoError(t, err)
 			colColl := schema.NewColCollection(col)
 			originalSch, err := schema.SchemaFromCols(colColl)
@@ -154,11 +145,11 @@ func TestTypeInfoMarshalling(t *testing.T) {
 
 			nbf, err := types.GetFormatForVersionString(constants.FormatDefaultString)
 			require.NoError(t, err)
-			_, vrw, err := dbfactory.MemFactory{}.CreateDB(context.Background(), nbf, nil, nil)
+			_, vrw, _, err := dbfactory.MemFactory{}.CreateDB(context.Background(), nbf, nil, nil)
 			require.NoError(t, err)
-			val, err := MarshalSchemaAsNomsValue(context.Background(), vrw, originalSch)
+			val, err := MarshalSchema(context.Background(), vrw, originalSch)
 			require.NoError(t, err)
-			unmarshalledSch, err := UnmarshalSchemaNomsValue(context.Background(), nbf, val)
+			unmarshalledSch, err := UnmarshalSchema(context.Background(), nbf, val)
 			require.NoError(t, err)
 			ok := schema.SchemasAreEqual(originalSch, unmarshalledSch)
 			assert.True(t, ok)
@@ -224,6 +215,7 @@ type testEncodedIndex struct {
 type testSchemaData struct {
 	Columns         []testEncodedColumn `noms:"columns" json:"columns"`
 	IndexCollection []testEncodedIndex  `noms:"idxColl,omitempty" json:"idxColl,omitempty"`
+	Collation       schema.Collation    `noms:"collation,omitempty" json:"collation,omitempty"`
 }
 
 func (tec testEncodedColumn) decodeColumn() (schema.Column, error) {
@@ -261,13 +253,78 @@ func (tsd testSchemaData) decodeSchema() (schema.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	sch.SetCollation(tsd.Collation)
 
 	for _, encodedIndex := range tsd.IndexCollection {
-		_, err = sch.Indexes().AddIndexByColTags(encodedIndex.Name, encodedIndex.Tags, schema.IndexProperties{IsUnique: encodedIndex.Unique, Comment: encodedIndex.Comment})
+		_, err = sch.Indexes().AddIndexByColTags(encodedIndex.Name, encodedIndex.Tags, nil, schema.IndexProperties{IsUnique: encodedIndex.Unique, Comment: encodedIndex.Comment})
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return sch, nil
+}
+
+func TestSchemaMarshalling(t *testing.T) {
+	ctx := context.Background()
+	nbf := types.Format_Default
+	vrw := getTestVRW(nbf)
+	schemas := getSchemas(t, 1000)
+	for _, sch := range schemas {
+		v, err := MarshalSchema(ctx, vrw, sch)
+		require.NoError(t, err)
+		s, err := UnmarshalSchema(ctx, nbf, v)
+		require.NoError(t, err)
+		assert.Equal(t, sch, s)
+	}
+}
+
+func getTypeinfo(t *testing.T) (ti []typeinfo.TypeInfo) {
+	st := getSqlTypes()
+	ti = make([]typeinfo.TypeInfo, len(st))
+	for i := range st {
+		var err error
+		ti[i], err = typeinfo.FromSqlType(st[i])
+		require.NoError(t, err)
+	}
+	return
+}
+
+func getColumns(t *testing.T) (cols []schema.Column) {
+	ti := getTypeinfo(t)
+	cols = make([]schema.Column, len(ti))
+	var err error
+	for i := range cols {
+		name := "col" + strconv.Itoa(i)
+		tag := uint64(i)
+		cols[i], err = schema.NewColumnWithTypeInfo(name, tag, ti[i], false, "", false, "")
+		require.NoError(t, err)
+	}
+	return
+}
+
+func getSchemas(t *testing.T, n int) (schemas []schema.Schema) {
+	cols := getColumns(t)
+	schemas = make([]schema.Schema, n)
+	var err error
+	for i := range schemas {
+		rand.Shuffle(len(cols), func(i, j int) {
+			cols[i], cols[j] = cols[j], cols[i]
+		})
+		k := rand.Intn(len(cols)-1) + 1
+		cc := make([]schema.Column, k)
+		copy(cc, cols)
+		cc[0].IsPartOfPK = true
+		cc[0].Constraints = []schema.ColConstraint{schema.NotNullConstraint{}}
+		schemas[i], err = schema.SchemaFromCols(
+			schema.NewColCollection(cc...))
+		require.NoError(t, err)
+	}
+	return
+}
+
+func getTestVRW(nbf *types.NomsBinFormat) types.ValueReadWriter {
+	ts := &chunks.TestStorage{}
+	cs := ts.NewViewWithFormat(nbf.VersionString())
+	return types.NewValueStore(cs)
 }

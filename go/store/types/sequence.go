@@ -46,8 +46,8 @@ type sequence interface {
 	isLeaf() bool
 	Kind() NomsKind
 	Len() uint64
-	Less(nbf *NomsBinFormat, other LesserValuable) (bool, error)
-	Compare(nbf *NomsBinFormat, other LesserValuable) (int, error)
+	Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error)
+	Compare(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (int, error)
 	numLeaves() uint64
 	seqLen() int
 	treeLevel() uint64
@@ -55,7 +55,7 @@ type sequence interface {
 	valueReadWriter() ValueReadWriter
 	valuesSlice(from, to uint64) ([]Value, error)
 	kvTuples(from, to uint64, dest []Tuple) ([]Tuple, error)
-	WalkRefs(nbf *NomsBinFormat, cb RefCallback) error
+	walkRefs(nbf *NomsBinFormat, cb RefCallback) error
 	writeTo(nomsWriter, *NomsBinFormat) error
 }
 
@@ -71,8 +71,11 @@ type sequenceImpl struct {
 	len uint64
 }
 
-func newSequenceImpl(vrw ValueReadWriter, buff []byte, offsets []uint32, len uint64) sequenceImpl {
-	return sequenceImpl{valueImpl{vrw, vrw.Format(), buff, offsets}, len}
+func newSequenceImpl(nbf *NomsBinFormat, vrw ValueReadWriter, buff []byte, offsets []uint32, len uint64) sequenceImpl {
+	if vrw != nil {
+		d.PanicIfFalse(nbf == vrw.Format())
+	}
+	return sequenceImpl{valueImpl{vrw, nbf, buff, offsets}, len}
 }
 
 func (seq sequenceImpl) decoderSkipToValues() (valueDecoder, uint64) {

@@ -25,13 +25,16 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
-	"github.com/dolthub/dolt/go/libraries/utils/config"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 )
 
 type indexComp int
@@ -171,15 +174,15 @@ var typesTests = []struct {
 }
 
 var (
-	typesTableRow1 = sql.Row{int32(-3), uint64(1), forceParseTime("2020-05-14 12:00:00"), "-3.30000", "a", -3.3, "a", "-00:03:03", "a", int16(1980)}
-	typesTableRow2 = sql.Row{int32(-1), uint64(2), forceParseTime("2020-05-14 12:00:01"), "-1.10000", "b", -1.1, "a,b", "-00:01:01", "b", int16(1990)}
-	typesTableRow3 = sql.Row{int32(0), uint64(3), forceParseTime("2020-05-14 12:00:02"), "0.00000", "c", 0.0, "c", "00:00:00", "c", int16(2000)}
-	typesTableRow4 = sql.Row{int32(1), uint64(4), forceParseTime("2020-05-14 12:00:03"), "1.10000", "d", 1.1, "a,c", "00:01:01", "d", int16(2010)}
-	typesTableRow5 = sql.Row{int32(3), uint64(5), forceParseTime("2020-05-14 12:00:04"), "3.30000", "e", 3.3, "b,c", "00:03:03", "e", int16(2020)}
+	typesTableRow1 = sql.Row{int32(-3), uint64(1), mustTime("2020-05-14 12:00:00"), mustDecimal("-3.30000"), uint16(2), -3.3, uint64(1), types.Timespan(-183000000), "a", int16(1980)}
+	typesTableRow2 = sql.Row{int32(-1), uint64(2), mustTime("2020-05-14 12:00:01"), mustDecimal("-1.10000"), uint16(3), -1.1, uint64(3), types.Timespan(-61000000), "b", int16(1990)}
+	typesTableRow3 = sql.Row{int32(0), uint64(3), mustTime("2020-05-14 12:00:02"), mustDecimal("0.00000"), uint16(4), 0.0, uint64(4), types.Timespan(0), "c", int16(2000)}
+	typesTableRow4 = sql.Row{int32(1), uint64(4), mustTime("2020-05-14 12:00:03"), mustDecimal("1.10000"), uint16(5), 1.1, uint64(5), types.Timespan(61000000), "d", int16(2010)}
+	typesTableRow5 = sql.Row{int32(3), uint64(5), mustTime("2020-05-14 12:00:04"), mustDecimal("3.30000"), uint16(6), 3.3, uint64(6), types.Timespan(183000000), "e", int16(2020)}
 )
 
 func TestDoltIndexEqual(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []doltIndexTestCase{
 		{
@@ -293,15 +296,16 @@ func TestDoltIndexEqual(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v", test.indexName, test.keys), func(t *testing.T) {
+			ctx := sql.NewEmptyContext()
 			idx, ok := indexMap[test.indexName]
 			require.True(t, ok)
-			testDoltIndex(t, test.keys, test.expectedRows, idx, indexComp_Eq)
+			testDoltIndex(t, ctx, root, test.keys, test.expectedRows, idx, indexComp_Eq)
 		})
 	}
 }
 
 func TestDoltIndexGreaterThan(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []struct {
 		indexName    string
@@ -434,15 +438,16 @@ func TestDoltIndexGreaterThan(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v", test.indexName, test.keys), func(t *testing.T) {
+			ctx := sql.NewEmptyContext()
 			index, ok := indexMap[test.indexName]
 			require.True(t, ok)
-			testDoltIndex(t, test.keys, test.expectedRows, index, indexComp_Gt)
+			testDoltIndex(t, ctx, root, test.keys, test.expectedRows, index, indexComp_Gt)
 		})
 	}
 }
 
 func TestDoltIndexGreaterThanOrEqual(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []struct {
 		indexName    string
@@ -571,15 +576,16 @@ func TestDoltIndexGreaterThanOrEqual(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v", test.indexName, test.keys), func(t *testing.T) {
+			ctx := sql.NewEmptyContext()
 			index, ok := indexMap[test.indexName]
 			require.True(t, ok)
-			testDoltIndex(t, test.keys, test.expectedRows, index, indexComp_GtE)
+			testDoltIndex(t, ctx, root, test.keys, test.expectedRows, index, indexComp_GtE)
 		})
 	}
 }
 
 func TestDoltIndexLessThan(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []struct {
 		indexName    string
@@ -717,15 +723,16 @@ func TestDoltIndexLessThan(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v", test.indexName, test.keys), func(t *testing.T) {
+			ctx := sql.NewEmptyContext()
 			index, ok := indexMap[test.indexName]
 			require.True(t, ok)
-			testDoltIndex(t, test.keys, test.expectedRows, index, indexComp_Lt)
+			testDoltIndex(t, ctx, root, test.keys, test.expectedRows, index, indexComp_Lt)
 		})
 	}
 }
 
 func TestDoltIndexLessThanOrEqual(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []struct {
 		indexName    string
@@ -864,15 +871,16 @@ func TestDoltIndexLessThanOrEqual(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v", test.indexName, test.keys), func(t *testing.T) {
+			ctx := sql.NewEmptyContext()
 			index, ok := indexMap[test.indexName]
 			require.True(t, ok)
-			testDoltIndex(t, test.keys, test.expectedRows, index, indexComp_LtE)
+			testDoltIndex(t, ctx, root, test.keys, test.expectedRows, index, indexComp_LtE)
 		})
 	}
 }
 
 func TestDoltIndexBetween(t *testing.T) {
-	indexMap := doltIndexSetup(t)
+	root, indexMap := doltIndexSetup(t)
 
 	tests := []doltIndexBetweenTestCase{
 		{
@@ -1042,21 +1050,29 @@ func TestDoltIndexBetween(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s|%v%v", test.indexName, test.greaterThanOrEqual, test.lessThanOrEqual), func(t *testing.T) {
-			ctx := NewTestSQLCtx(context.Background())
+			ctx := sql.NewEmptyContext()
+
 			idx, ok := indexMap[test.indexName]
 			require.True(t, ok)
 
 			expectedRows := convertSqlRowToInt64(test.expectedRows)
 
 			exprs := idx.Expressions()
-			sqlIndex := sql.NewIndexBuilder(ctx, idx)
+			sqlIndex := sql.NewIndexBuilder(idx)
 			for i := range test.greaterThanOrEqual {
 				sqlIndex = sqlIndex.GreaterOrEqual(ctx, exprs[i], test.greaterThanOrEqual[i]).LessOrEqual(ctx, exprs[i], test.lessThanOrEqual[i])
 			}
 			indexLookup, err := sqlIndex.Build(ctx)
 			require.NoError(t, err)
 
-			indexIter, err := index.RowIterForIndexLookup(ctx, indexLookup, nil)
+			pkSch, err := sqlutil.FromDoltSchema("", "fake_table", idx.Schema())
+			require.NoError(t, err)
+
+			dt, ok, err := root.GetTable(ctx, doltdb.TableName{Name: idx.Table()})
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			indexIter, err := index.RowIterForIndexLookup(ctx, NoCacheTableable{dt}, indexLookup, pkSch, nil)
 			require.NoError(t, err)
 
 			var readRows []sql.Row
@@ -1066,9 +1082,21 @@ func TestDoltIndexBetween(t *testing.T) {
 			}
 			require.Equal(t, io.EOF, err)
 
-			requireUnorderedRowsEqual(t, expectedRows, readRows)
+			requireUnorderedRowsEqual(t, pkSch.Schema, expectedRows, readRows)
 		})
 	}
+}
+
+type NoCacheTableable struct {
+	dt *doltdb.Table
+}
+
+func (t NoCacheTableable) DoltTable(ctx *sql.Context) (*doltdb.Table, error) {
+	return t.dt, nil
+}
+
+func (t NoCacheTableable) DataCacheKey(ctx *sql.Context) (doltdb.DataCacheKey, bool, error) {
+	return doltdb.DataCacheKey{}, false, nil
 }
 
 type rowSlice struct {
@@ -1159,6 +1187,19 @@ func (r *rowSlice) Less(i, j int) bool {
 	return false
 }
 
+func (r *rowSlice) equals(other *rowSlice, sch sql.Schema) bool {
+	if len(r.rows) != len(other.rows) {
+		return false
+	}
+	for i := range r.rows {
+		ok, err := r.rows[i].Equals(other.rows[i], sch)
+		if err != nil || !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func signedCompare(n1 int64, c interface{}) (int, error) {
 	var n2 int64
 	switch typedVal := c.(type) {
@@ -1238,7 +1279,7 @@ func (r *rowSlice) Swap(i, j int) {
 	r.rows[i], r.rows[j] = r.rows[j], r.rows[i]
 }
 
-func requireUnorderedRowsEqual(t *testing.T, rows1, rows2 []sql.Row) {
+func requireUnorderedRowsEqual(t *testing.T, s sql.Schema, rows1, rows2 []sql.Row) {
 	slice1 := &rowSlice{rows: rows1}
 	sort.Stable(slice1)
 	require.NoError(t, slice1.sortErr)
@@ -1247,13 +1288,13 @@ func requireUnorderedRowsEqual(t *testing.T, rows1, rows2 []sql.Row) {
 	sort.Stable(slice2)
 	require.NoError(t, slice2.sortErr)
 
-	require.Equal(t, rows1, rows2)
+	assert.True(t, slice1.equals(slice2, s))
 }
 
-func testDoltIndex(t *testing.T, keys []interface{}, expectedRows []sql.Row, idx sql.Index, cmp indexComp) {
-	ctx := NewTestSQLCtx(context.Background())
+func testDoltIndex(t *testing.T, ctx *sql.Context, root doltdb.RootValue, keys []interface{}, expectedRows []sql.Row, idx index.DoltIndex, cmp indexComp) {
+	ctx = sql.NewEmptyContext()
 	exprs := idx.Expressions()
-	builder := sql.NewIndexBuilder(sql.NewEmptyContext(), idx)
+	builder := sql.NewIndexBuilder(idx)
 	for i, key := range keys {
 		switch cmp {
 		case indexComp_Eq:
@@ -1275,7 +1316,14 @@ func testDoltIndex(t *testing.T, keys []interface{}, expectedRows []sql.Row, idx
 	indexLookup, err := builder.Build(ctx)
 	require.NoError(t, err)
 
-	indexIter, err := index.RowIterForIndexLookup(ctx, indexLookup, nil)
+	dt, ok, err := root.GetTable(ctx, doltdb.TableName{Name: idx.Table()})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	pkSch, err := sqlutil.FromDoltSchema("", "fake_table", idx.Schema())
+	require.NoError(t, err)
+
+	indexIter, err := index.RowIterForIndexLookup(ctx, NoCacheTableable{dt}, indexLookup, pkSch, nil)
 	require.NoError(t, err)
 
 	var readRows []sql.Row
@@ -1285,17 +1333,17 @@ func testDoltIndex(t *testing.T, keys []interface{}, expectedRows []sql.Row, idx
 	}
 	require.Equal(t, io.EOF, err)
 
-	requireUnorderedRowsEqual(t, convertSqlRowToInt64(expectedRows), readRows)
+	requireUnorderedRowsEqual(t, pkSch.Schema, convertSqlRowToInt64(expectedRows), readRows)
 }
 
-func doltIndexSetup(t *testing.T) map[string]index.DoltIndex {
-	ctx := NewTestSQLCtx(context.Background())
+func doltIndexSetup(t *testing.T) (doltdb.RootValue, map[string]index.DoltIndex) {
+	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
 	root, err := dEnv.WorkingRoot(ctx)
 	if err != nil {
 		panic(err)
 	}
-	root, err = sqle.ExecuteSql(t, dEnv, root, `
+	root, err = sqle.ExecuteSql(dEnv, root, `
 CREATE TABLE onepk (
   pk1 BIGINT PRIMARY KEY,
   v1 BIGINT,
@@ -1345,7 +1393,7 @@ INSERT INTO types VALUES (1, 4, '2020-05-14 12:00:03', 1.1, 'd', 1.1, 'a,c', '00
 
 	dbname := "dolt"
 	for _, name := range []string{"onepk", "twopk", "types"} {
-		tbl, ok, err := root.GetTable(ctx, name)
+		tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: name})
 		require.NoError(t, err)
 		require.True(t, ok)
 
@@ -1361,23 +1409,23 @@ INSERT INTO types VALUES (1, 4, '2020-05-14 12:00:03', 1.1, 'd', 1.1, 'a,c', '00
 		}
 	}
 
-	return indexMap
+	return root, indexMap
 }
 
-func NewTestSQLCtx(ctx context.Context) *sql.Context {
-	session := dsess.DefaultSession()
-	s := session.NewDoltSession(config.NewMapConfig(make(map[string]string)))
-	sqlCtx := sql.NewContext(
-		ctx,
-		sql.WithSession(s),
-	).WithCurrentDB("dolt")
-
-	return sqlCtx
+func mustTime(timeString string) time.Time {
+	t, err := time.Parse("2006-01-02 15:04:05", timeString)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
 
-func forceParseTime(timeString string) time.Time {
-	tim, _ := time.Parse("2006-01-02 15:04:05", timeString)
-	return tim
+func mustDecimal(s string) decimal.Decimal {
+	d, err := decimal.NewFromString(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
 }
 
 func convertSqlRowToInt64(sqlRows []sql.Row) []sql.Row {
@@ -1408,4 +1456,70 @@ func convertSqlRowToInt64(sqlRows []sql.Row) []sql.Row {
 		newSqlRows[i] = newSqlRow
 	}
 	return newSqlRows
+}
+
+func TestSplitNullsFromRange(t *testing.T) {
+	t.Run("EmptyRange", func(t *testing.T) {
+		r, err := index.SplitNullsFromRange(sql.Range{})
+		assert.NoError(t, err)
+		assert.NotNil(t, r)
+		assert.Len(t, r, 1)
+		assert.Len(t, r[0], 0)
+	})
+
+	t.Run("ThreeColumnNoNullsRange", func(t *testing.T) {
+		r := sql.Range{sql.LessThanRangeColumnExpr(10, types.Int8), sql.GreaterThanRangeColumnExpr(16, types.Int8), sql.NotNullRangeColumnExpr(types.Int8)}
+		rs, err := index.SplitNullsFromRange(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, rs)
+		assert.Len(t, rs, 1)
+		assert.Len(t, rs[0], 3)
+		assert.Equal(t, r, rs[0])
+	})
+
+	t.Run("LastColumnOnlyNull", func(t *testing.T) {
+		r := sql.Range{sql.LessThanRangeColumnExpr(10, types.Int8), sql.GreaterThanRangeColumnExpr(16, types.Int8), sql.NullRangeColumnExpr(types.Int8)}
+		rs, err := index.SplitNullsFromRange(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, rs)
+		assert.Len(t, rs, 1)
+		assert.Len(t, rs[0], 3)
+		assert.Equal(t, r, rs[0])
+	})
+
+	t.Run("LastColumnAll", func(t *testing.T) {
+		r := sql.Range{sql.LessThanRangeColumnExpr(10, types.Int8), sql.GreaterThanRangeColumnExpr(16, types.Int8), sql.AllRangeColumnExpr(types.Int8)}
+		rs, err := index.SplitNullsFromRange(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, rs)
+		assert.Len(t, rs, 2)
+		assert.Len(t, rs[0], 3)
+		assert.Len(t, rs[1], 3)
+		assert.Equal(t, r[:2], rs[0][:2])
+		assert.Equal(t, r[:2], rs[1][:2])
+		assert.Equal(t, sql.NullRangeColumnExpr(types.Int8), rs[0][2])
+		assert.Equal(t, sql.NotNullRangeColumnExpr(types.Int8), rs[1][2])
+	})
+
+	t.Run("FirstColumnAll", func(t *testing.T) {
+		r := sql.Range{sql.AllRangeColumnExpr(types.Int8), sql.LessThanRangeColumnExpr(10, types.Int8), sql.GreaterThanRangeColumnExpr(16, types.Int8)}
+		rs, err := index.SplitNullsFromRange(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, rs)
+		assert.Len(t, rs, 2)
+		assert.Len(t, rs[0], 3)
+		assert.Len(t, rs[1], 3)
+		assert.Equal(t, r[1:], rs[0][1:])
+		assert.Equal(t, r[1:], rs[1][1:])
+		assert.Equal(t, sql.NullRangeColumnExpr(types.Int8), rs[0][0])
+		assert.Equal(t, sql.NotNullRangeColumnExpr(types.Int8), rs[1][0])
+	})
+
+	t.Run("AllColumnAll", func(t *testing.T) {
+		r := sql.Range{sql.AllRangeColumnExpr(types.Int8), sql.AllRangeColumnExpr(types.Int8), sql.AllRangeColumnExpr(types.Int8)}
+		rs, err := index.SplitNullsFromRange(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, rs)
+		assert.Len(t, rs, 8)
+	})
 }

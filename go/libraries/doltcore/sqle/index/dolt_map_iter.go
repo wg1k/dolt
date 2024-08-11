@@ -82,15 +82,25 @@ func getValLocations(tagToSqlColIdx map[uint64]int, cols []schema.Column) (int, 
 }
 
 // NewKVToSqlRowConverterForCols returns a KVToSqlConverter instance based on the list of columns passed in
-func NewKVToSqlRowConverterForCols(nbf *types.NomsBinFormat, sch schema.Schema) *KVToSqlRowConverter {
-	cols := sch.GetAllCols().GetColumns()
-
+func NewKVToSqlRowConverterForCols(nbf *types.NomsBinFormat, sch schema.Schema, columns []uint64) *KVToSqlRowConverter {
+	allCols := sch.GetAllCols().GetColumns()
 	tagToSqlColIdx := make(map[uint64]int)
-	for i, col := range cols {
-		tagToSqlColIdx[col.Tag] = i
+	var outCols []schema.Column
+	if len(columns) > 0 {
+		outCols = make([]schema.Column, len(columns))
+		for i, tag := range columns {
+			schIdx := sch.GetAllCols().TagToIdx[tag]
+			outCols[i] = allCols[schIdx]
+			tagToSqlColIdx[tag] = i
+		}
+	} else {
+		outCols = allCols
+		for i, col := range allCols {
+			tagToSqlColIdx[col.Tag] = i
+		}
 	}
 
-	return NewKVToSqlRowConverter(nbf, tagToSqlColIdx, cols, len(cols))
+	return NewKVToSqlRowConverter(nbf, tagToSqlColIdx, outCols, len(outCols))
 }
 
 // ConvertKVToSqlRow returns a sql.Row generated from the key and value provided.
@@ -115,7 +125,7 @@ func (conv *KVToSqlRowConverter) ConvertKVToSqlRow(k, v types.Value) (sql.Row, e
 	return conv.ConvertKVTuplesToSqlRow(keyTup, valTup)
 }
 
-// ConvertKVToSqlRow returns a sql.Row generated from the key and value provided.
+// ConvertKVTuplesToSqlRow returns a sql.Row generated from the key and value provided.
 func (conv *KVToSqlRowConverter) ConvertKVTuplesToSqlRow(k, v types.Tuple) (sql.Row, error) {
 	tupItr := types.TupleItrPool.Get().(*types.TupleIterator)
 	defer types.TupleItrPool.Put(tupItr)
@@ -231,7 +241,6 @@ func NewDoltMapIter(keyValGet KVGetFunc, closeKVGetter func() error, conv *KVToS
 // Next returns the next sql.Row until all rows are returned at which point (nil, io.EOF) is returned.
 func (dmi *DoltMapIter) Next(ctx *sql.Context) (sql.Row, error) {
 	k, v, err := dmi.kvGet(ctx)
-
 	if err != nil {
 		return nil, err
 	}

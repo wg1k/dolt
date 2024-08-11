@@ -23,7 +23,8 @@ echo '
     "template": {
       "metadata": {
         "labels": {
-          "k8s-liquidata-inc-monitored-job": "created-by-static-config"
+          "k8s-liquidata-inc-monitored-job": "created-by-static-config",
+          "app": "fuzzer"
         }
       },
       "spec": {
@@ -42,7 +43,7 @@ echo '
               "--bucket=dolt-fuzzer-runs",
               "--region=us-west-2",
               "--version-gate-job",
-              "--fuzzer-args=merge, --cycles=5"
+              "--fuzzer-args=basic, --cycles=5"
             ]
           }
         ],

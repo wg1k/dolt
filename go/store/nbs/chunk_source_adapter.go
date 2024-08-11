@@ -14,32 +14,25 @@
 
 package nbs
 
+import (
+	"context"
+
+	"github.com/dolthub/dolt/go/store/hash"
+)
+
 type chunkSourceAdapter struct {
 	tableReader
-	h addr
+	h hash.Hash
 }
 
-func (csa chunkSourceAdapter) hash() (addr, error) {
-	return csa.h, nil
+func (csa chunkSourceAdapter) hash() hash.Hash {
+	return csa.h
 }
 
-func newReaderFromIndexData(indexCache *indexCache, idxData []byte, name addr, tra tableReaderAt, blockSize uint64) (cs chunkSource, err error) {
-	index, err := parseTableIndexByCopy(idxData)
-
+func newReaderFromIndexData(ctx context.Context, q MemoryQuotaProvider, idxData []byte, name hash.Hash, tra tableReaderAt, blockSize uint64) (cs chunkSource, err error) {
+	index, err := parseTableIndexByCopy(ctx, idxData, q)
 	if err != nil {
 		return nil, err
-	}
-
-	if indexCache != nil {
-		indexCache.lockEntry(name)
-		defer func() {
-			unlockErr := indexCache.unlockEntry(name)
-
-			if err == nil {
-				err = unlockErr
-			}
-		}()
-		indexCache.put(name, index)
 	}
 
 	tr, err := newTableReader(index, tra, blockSize)
@@ -49,12 +42,12 @@ func newReaderFromIndexData(indexCache *indexCache, idxData []byte, name addr, t
 	return &chunkSourceAdapter{tr, name}, nil
 }
 
-func (csa chunkSourceAdapter) Close() error {
-	return csa.tableReader.Close()
+func (csa chunkSourceAdapter) close() error {
+	return csa.tableReader.close()
 }
 
-func (csa chunkSourceAdapter) Clone() (chunkSource, error) {
-	tr, err := csa.tableReader.Clone()
+func (csa chunkSourceAdapter) clone() (chunkSource, error) {
+	tr, err := csa.tableReader.clone()
 	if err != nil {
 		return &chunkSourceAdapter{}, err
 	}

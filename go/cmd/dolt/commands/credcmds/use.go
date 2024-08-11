@@ -16,7 +16,6 @@ package credcmds
 
 import (
 	"context"
-	"io"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands"
@@ -26,6 +25,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"github.com/dolthub/dolt/go/libraries/utils/config"
 )
 
 var useDocs = cli.CommandDocumentationContent{
@@ -52,10 +52,9 @@ func (cmd UseCmd) Description() string {
 	return useDocs.ShortDesc
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd UseCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd UseCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, useDocs, ap))
+	return cli.NewCommandDocumentation(useDocs, ap)
 }
 
 // RequiresRepo should return false if this interface is implemented, and the command does not have the requirement
@@ -70,14 +69,14 @@ func (cmd UseCmd) EventType() eventsapi.ClientEventType {
 }
 
 func (cmd UseCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 1)
 	return ap
 }
 
 // Exec executes the command
-func (cmd UseCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd UseCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, useDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, useDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 	args = apr.Args
 	if len(args) != 1 {
@@ -97,7 +96,7 @@ func (cmd UseCmd) Exec(ctx context.Context, commandStr string, args []string, dE
 				if !hasGCfg {
 					panic("global config not found.  Should create it here if this is a thing.")
 				}
-				err := gcfg.SetStrings(map[string]string{env.UserCreds: cred.KeyIDBase32Str()})
+				err := gcfg.SetStrings(map[string]string{config.UserCreds: cred.KeyIDBase32Str()})
 				if err != nil {
 					verr = errhand.BuildDError("error: updating user credentials in config").AddCause(err).Build()
 				}

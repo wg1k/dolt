@@ -53,19 +53,20 @@ var rowMap = []map[string]interface{}{
 	{"b": []string{"1", "2", "3"}},
 }
 
-func createRootAndFS() (*doltdb.DoltDB, *doltdb.RootValue, filesys.Filesys) {
+func createRootAndFS() (*doltdb.DoltDB, doltdb.RootValue, filesys.Filesys) {
 
 	testHomeDir := "/user/bheni"
 	workingDir := "/user/bheni/datasets/states"
 	initialDirs := []string{testHomeDir, workingDir}
 	fs := filesys.NewInMemFS(initialDirs, nil, workingDir)
-	fs.WriteFile(testSchemaFileName, []byte(testSchema))
+	fs.WriteFile(testSchemaFileName, []byte(testSchema), os.ModePerm)
 	ddb, _ := doltdb.LoadDoltDB(context.Background(), types.Format_Default, doltdb.InMemDoltDB, filesys.LocalFS)
 	ddb.WriteEmptyRepo(context.Background(), "master", "billy bob", "bigbillieb@fake.horse")
 
 	cs, _ := doltdb.NewCommitSpec("master")
-	commit, _ := ddb.Resolve(context.Background(), cs, nil)
-	root, err := commit.GetRootValue()
+	optCmt, _ := ddb.Resolve(context.Background(), cs, nil)
+	commit, _ := optCmt.ToCommit()
+	root, err := commit.GetRootValue(context.Background())
 
 	if err != nil {
 		panic(err)
@@ -134,7 +135,8 @@ func TestExists(t *testing.T) {
 		//NewDataLocation("file.nbf", ""),
 	}
 
-	_, root, fs := createRootAndFS()
+	ddb, root, fs := createRootAndFS()
+	defer ddb.Close()
 
 	for _, loc := range testLocations {
 		t.Run(loc.String(), func(t *testing.T) {
@@ -145,7 +147,7 @@ func TestExists(t *testing.T) {
 			}
 
 			if fileVal, isFile := loc.(FileDataLocation); isFile {
-				err := fs.WriteFile(fileVal.Path, []byte("test"))
+				err := fs.WriteFile(fileVal.Path, []byte("test"), os.ModePerm)
 				assert.NoError(t, err)
 			}
 
@@ -159,6 +161,14 @@ func TestExists(t *testing.T) {
 }
 
 type testDataMoverOptions struct{}
+
+func (t testDataMoverOptions) IsBatched() bool {
+	return false
+}
+
+func (t testDataMoverOptions) IsAutocommitOff() bool {
+	return false
+}
 
 func (t testDataMoverOptions) WritesToTable() bool {
 	return true
@@ -180,14 +190,15 @@ func TestCreateRdWr(t *testing.T) {
 	}{
 		{NewDataLocation("file.csv", ""), reflect.TypeOf((*csv.CSVReader)(nil)).Elem(), reflect.TypeOf((*csv.CSVWriter)(nil)).Elem()},
 		{NewDataLocation("file.psv", ""), reflect.TypeOf((*csv.CSVReader)(nil)).Elem(), reflect.TypeOf((*csv.CSVWriter)(nil)).Elem()},
-		{NewDataLocation("file.json", ""), reflect.TypeOf((*json.JSONReader)(nil)).Elem(), reflect.TypeOf((*json.JSONWriter)(nil)).Elem()},
+		{NewDataLocation("file.json", ""), reflect.TypeOf((*json.JSONReader)(nil)).Elem(), reflect.TypeOf((*json.RowWriter)(nil)).Elem()},
 		//{NewDataLocation("file.nbf", ""), reflect.TypeOf((*nbf.NBFReader)(nil)).Elem(), reflect.TypeOf((*nbf.NBFWriter)(nil)).Elem()},
 	}
 
 	dEnv := dtestutils.CreateTestEnv()
+	defer dEnv.DoltDB.Close()
 	root, err := dEnv.WorkingRoot(context.Background())
 	require.NoError(t, err)
-	dEnv.FS.WriteFile(testSchemaFileName, []byte(testSchema))
+	dEnv.FS.WriteFile(testSchemaFileName, []byte(testSchema), os.ModePerm)
 
 	mvOpts := &testDataMoverOptions{}
 
@@ -196,7 +207,11 @@ func TestCreateRdWr(t *testing.T) {
 
 		loc := test.dl
 
-		opts := editor.Options{Deaf: dEnv.DbEaFactory()}
+		tmpDir, tdErr := dEnv.TempTableFilesDir()
+		if tdErr != nil {
+			t.Fatal("Unexpected error accessing .dolt directory.", tdErr)
+		}
+		opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: tmpDir}
 
 		filePath, fpErr := dEnv.FS.Abs(strings.Split(loc.String(), ":")[1])
 		if fpErr != nil {
@@ -226,7 +241,7 @@ func TestCreateRdWr(t *testing.T) {
 			t.Fatal("Failed to write data. bad:", numBad, err)
 		}
 
-		rd, _, err := loc.NewReader(context.Background(), root, dEnv.FS, JSONOptions{TableName: testTableName, SchFile: testSchemaFileName})
+		rd, _, err := loc.NewReader(context.Background(), dEnv, JSONOptions{TableName: testTableName, SchFile: testSchemaFileName})
 
 		if err != nil {
 			t.Fatal("Unexpected error creating reader", err)

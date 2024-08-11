@@ -16,81 +16,99 @@ package dtestutils
 
 import (
 	"context"
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	"os"
+	"path/filepath"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
+	"github.com/dolthub/dolt/go/libraries/utils/config"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 const (
-	TestHomeDir = "/user/bheni"
-	WorkingDir  = "/user/bheni/datasets/states"
+	TestHomeDirPrefix = "/user/dolt/"
+	WorkingDirPrefix  = "/user/dolt/datasets/"
 )
 
-func testHomeDirFunc() (string, error) {
-	return TestHomeDir, nil
+// CreateTestEnv creates a new DoltEnv suitable for testing. The CreateTestEnvWithName
+// function should generally be preferred over this method, especially when working
+// with tests using multiple databases within a MultiRepoEnv.
+func CreateTestEnv() *env.DoltEnv {
+	return CreateTestEnvWithName("test")
 }
 
-func CreateTestEnv() *env.DoltEnv {
+// CreateTestEnvForLocalFilesystem creates a new DoltEnv for testing, using a local FS, instead of an in-memory
+// filesystem, for persisting files. This is useful for tests that require a disk-based filesystem and will not
+// work correctly with an in-memory filesystem and in-memory blob store (e.g. dolt_undrop() tests).
+func CreateTestEnvForLocalFilesystem() *env.DoltEnv {
+	tempDir, err := os.MkdirTemp(os.TempDir(), "dolt-*")
+	if err != nil {
+		panic(err)
+	}
+
+	fs, err := filesys.LocalFilesysWithWorkingDir(tempDir)
+	if err != nil {
+		panic(err)
+	}
+
+	err = fs.MkDirs("test")
+	if err != nil {
+		panic(err)
+	}
+
+	fs, err = fs.WithWorkingDir("test")
+	if err != nil {
+		panic(err)
+	}
+
+	homeDir := filepath.Join(tempDir, "home")
+	err = fs.MkDirs("home")
+	if err != nil {
+		panic(err)
+	}
+	homeDirFunc := func() (string, error) { return homeDir, nil }
+
+	return createTestEnvWithNameAndFilesystem("test", fs, homeDirFunc)
+}
+
+// CreateTestEnvWithName creates a new DoltEnv suitable for testing and uses
+// the specified name to distinguish it from other test envs. This function
+// should generally be preferred over CreateTestEnv, especially when working with
+// tests using multiple databases within a MultiRepoEnv.
+func CreateTestEnvWithName(envName string) *env.DoltEnv {
+	initialDirs := []string{TestHomeDirPrefix + envName, WorkingDirPrefix + envName}
+	fs := filesys.NewInMemFS(initialDirs, nil, WorkingDirPrefix+envName)
+	homeDirFunc := func() (string, error) { return TestHomeDirPrefix + envName, nil }
+
+	return createTestEnvWithNameAndFilesystem(envName, fs, homeDirFunc)
+}
+
+// createTestEnvWithNameAndFilesystem creates a Dolt environment for testing, using the |envName| for the name, the
+// specified |fs| for persisting files, and |homeDirFunc| for finding the location to load global Dolt configuration.
+func createTestEnvWithNameAndFilesystem(envName string, fs filesys.Filesys, homeDirFunc func() (string, error)) *env.DoltEnv {
 	const name = "billy bob"
 	const email = "bigbillieb@fake.horse"
-	initialDirs := []string{TestHomeDir, WorkingDir}
-	fs := filesys.NewInMemFS(initialDirs, nil, WorkingDir)
-	dEnv := env.Load(context.Background(), testHomeDirFunc, fs, doltdb.InMemDoltDB, "test")
+
+	var urlStr string
+	_, isInMemFs := fs.(*filesys.InMemFS)
+	if isInMemFs {
+		urlStr = doltdb.InMemDoltDB + envName
+	} else {
+		urlStr = doltdb.LocalDirDoltDB
+	}
+
+	dEnv := env.Load(context.Background(), homeDirFunc, fs, urlStr, "test")
 	cfg, _ := dEnv.Config.GetConfig(env.GlobalConfig)
 	cfg.SetStrings(map[string]string{
-		env.UserNameKey:  name,
-		env.UserEmailKey: email,
+		config.UserNameKey:  name,
+		config.UserEmailKey: email,
 	})
-	err := dEnv.InitRepo(context.Background(), types.Format_Default, name, email, env.DefaultInitBranch)
 
+	err := dEnv.InitRepo(context.Background(), types.Format_Default, name, email, env.DefaultInitBranch)
 	if err != nil {
 		panic("Failed to initialize environment:" + err.Error())
 	}
-
-	return dEnv
-}
-
-func CreateEnvWithSeedData(t *testing.T) *env.DoltEnv {
-	dEnv := CreateTestEnv()
-	imt, sch := CreateTestDataTable(true)
-
-	ctx := context.Background()
-	vrw := dEnv.DoltDB.ValueReadWriter()
-
-	rowMap, err := types.NewMap(ctx, vrw)
-	require.NoError(t, err)
-	me := rowMap.Edit()
-	for i := 0; i < imt.NumRows(); i++ {
-		r, err := imt.GetRow(i)
-		require.NoError(t, err)
-		k, v := r.NomsMapKey(sch), r.NomsMapValue(sch)
-		me.Set(k, v)
-	}
-	rowMap, err = me.Map(ctx)
-	require.NoError(t, err)
-
-	ai := sch.Indexes().AllIndexes()
-	sch.Indexes().Merge(ai...)
-
-	tbl, err := doltdb.NewNomsTable(ctx, vrw, sch, rowMap, nil, nil)
-	require.NoError(t, err)
-	tbl, err = editor.RebuildAllIndexes(ctx, tbl, editor.TestEditorOptions(vrw))
-	require.NoError(t, err)
-
-	sch, err = tbl.GetSchema(ctx)
-	require.NoError(t, err)
-	rows, err := tbl.GetNomsRowData(ctx)
-	require.NoError(t, err)
-	indexes, err := tbl.GetIndexSet(ctx)
-	require.NoError(t, err)
-	err = putTableToWorking(ctx, dEnv, sch, rows, indexes, TableName, nil)
-	require.NoError(t, err)
 
 	return dEnv
 }

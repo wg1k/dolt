@@ -16,25 +16,26 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dustin/go-humanize"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
-	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/libraries/doltcore/remotestorage"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
-	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/datas/pull"
 )
 
@@ -45,6 +46,8 @@ var pushDocs = cli.CommandDocumentationContent{
 When the command line does not specify where to push with the {{.LessThan}}remote{{.GreaterThan}} argument, an attempt is made to infer the remote.  If only one remote exists it will be used, if multiple remotes exists, a remote named 'origin' will be attempted.  If there is more than one remote, and none of them are named 'origin' then the command will fail and you will need to specify the correct remote explicitly.
 
 When the command line does not specify what to push with {{.LessThan}}refspec{{.GreaterThan}}... then the current branch will be used.
+
+A remote's branch can be deleted by pushing an empty source ref: ` + "`dolt push origin :branch`" + `
 
 When neither the command-line does not specify what to push, the default behavior is used, which corresponds to the current branch being pushed to the corresponding upstream branch, but as a safety measure, the push is aborted if the upstream branch does not have the same name as the local one.
 `,
@@ -66,17 +69,13 @@ func (cmd PushCmd) Description() string {
 	return "Push to a dolt remote."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd PushCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd PushCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, pushDocs, ap))
+	return cli.NewCommandDocumentation(pushDocs, ap)
 }
 
 func (cmd PushCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsFlag(cli.SetUpstreamFlag, "u", "For every branch that is up to date or successfully pushed, add upstream (tracking) reference, used by argument-less {{.EmphasisLeft}}dolt pull{{.EmphasisRight}} and other commands.")
-	ap.SupportsFlag(cli.ForceFlag, "f", "Update the remote with local history, overwriting any conflicting history in the remote.")
-	return ap
+	return cli.CreatePushArgParser()
 }
 
 // EventType returns the type of the event to log
@@ -85,202 +84,168 @@ func (cmd PushCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd PushCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd PushCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, pushDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, pushDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	opts, err := env.NewPushOpts(ctx, apr, dEnv.RepoStateReader(), dEnv.DoltDB, apr.Contains(cli.ForceFlag), apr.Contains(cli.SetUpstreamFlag))
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
 	if err != nil {
-		var verr errhand.VerboseError
-		switch err {
-		case env.ErrNoUpstreamForBranch:
-			currentBranch := dEnv.RepoStateReader().CWBHeadRef()
-			remoteName := "<remote>"
-			if defRemote, verr := env.GetDefaultRemote(dEnv.RepoStateReader()); verr == nil {
-				remoteName = defRemote.Name
-			}
-			verr = errhand.BuildDError("fatal: The current branch " + currentBranch.GetPath() + " has no upstream branch.\n" +
-				"To push the current branch and set the remote as upstream, use\n" +
-				"\tdolt push --set-upstream " + remoteName + " " + currentBranch.GetPath()).Build()
-		case env.ErrInvalidSetUpstreamArgs:
-			verr = errhand.BuildDError("error: --set-upstream requires <remote> and <refspec> params.").SetPrintUsage().Build()
-		default:
-			verr = errhand.VerboseErrorFromError(err)
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+	if closeFunc != nil {
+		defer closeFunc()
+	}
+
+	query, err := constructInterpolatedDoltPushQuery(apr)
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+
+	errChan := make(chan error)
+	go func() {
+		defer close(errChan)
+		_, rowIter, _, err := queryist.Query(sqlCtx, query)
+		if err != nil {
+			errChan <- err
+			return
 		}
-		return HandleVErrAndExitCode(verr, usage)
+
+		sqlRows, err := sql.RowIterToRows(sqlCtx, rowIter)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		printPushResult(sqlRows)
+	}()
+
+	spinner := TextSpinner{}
+	if !apr.Contains(cli.SilentFlag) {
+		cli.Print(spinner.next() + " Uploading...")
+		defer func() {
+			cli.DeleteAndPrint(len(" Uploading...")+1, "")
+		}()
+	}
+
+	for {
+		select {
+		case err = <-errChan:
+			return handlePushError(err, usage)
+		case <-ctx.Done():
+			if ctx.Err() != nil {
+				switch ctx.Err() {
+				case context.DeadlineExceeded:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("timeout exceeded")), usage)
+				case context.Canceled:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("push cancelled by force")), usage)
+				default:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("error cancelling context: "+ctx.Err().Error())), usage)
+				}
+			}
+			return HandleVErrAndExitCode(nil, usage)
+		case <-time.After(time.Millisecond * 50):
+			if !apr.Contains(cli.SilentFlag) {
+				cli.DeleteAndPrint(len(" Uploading...")+1, spinner.next()+" Uploading...")
+			}
+		}
+	}
+}
+
+// constructInterpolatedDoltPushQuery generates the sql query necessary to call the DOLT_PUSH() function
+// Also interpolates this query to prevent sql injection.
+func constructInterpolatedDoltPushQuery(apr *argparser.ArgParseResults) (string, error) {
+	var params []interface{}
+	var args []string
+
+	if user, hasUser := apr.GetValue(cli.UserFlag); hasUser {
+		args = append(args, "'--user'")
+		args = append(args, "?")
+		params = append(params, user)
+	}
+
+	if setUpstream := apr.Contains(cli.SetUpstreamFlag); setUpstream {
+		args = append(args, "'--set-upstream'")
+	}
+	if force := apr.Contains(cli.ForceFlag); force {
+		args = append(args, "'--force'")
+	}
+	if all := apr.Contains(cli.AllFlag); all {
+		args = append(args, fmt.Sprintf("'--%s'", cli.AllFlag))
+	}
+	for _, arg := range apr.Args {
+		args = append(args, "?")
+		params = append(params, arg)
+	}
+
+	query := fmt.Sprintf("call dolt_push(%s)", strings.Join(args, ", "))
+	interpolatedQuery, err := dbr.InterpolateForDialect(query, params, dialect.MySQL)
+	if err != nil {
+		return "", err
+	}
+
+	return interpolatedQuery, nil
+}
+
+// printPushResult prints the appropriate message for the given push output.
+// This function is called only when error is nil.
+func printPushResult(rows []sql.Row) {
+	if len(rows[0]) > 1 {
+		cli.Println(rows[0][1].(string))
+	}
+}
+
+// handlePushError prints the appropriate error message and returns the exit code
+func handlePushError(err error, usage cli.UsagePrinter) int {
+	if err == nil {
+		return 0
 	}
 
 	var verr errhand.VerboseError
-	err = actions.DoPush(ctx, dEnv.RepoStateReader(), dEnv.RepoStateWriter(), dEnv.DoltDB, dEnv.TempTableFilesDir(), opts, buildProgStarter(defaultLanguage), stopProgFuncs)
-	if err != nil {
-		verr = printInfoForPushError(err, opts.Remote, opts.DestRef, opts.RemoteRef)
-	}
-
-	if opts.SetUpstream {
-		err := dEnv.RepoState.Save(dEnv.FS)
-		if err != nil {
-			err = fmt.Errorf("%w; %s", actions.ErrFailedToSaveRepoState, err.Error())
+	switch err {
+	case actions.ErrUnknownPushErr:
+		s, ok := status.FromError(err)
+		if ok && s.Code() == codes.PermissionDenied {
+			cli.Println("hint: have you logged into DoltHub using 'dolt login'?")
+			cli.Println("hint: check that user.email in 'dolt config --list' has write perms to DoltHub repo")
 		}
+		if rpcErr, ok := err.(*remotestorage.RpcError); ok {
+			verr = errhand.BuildDError("error: push failed").AddCause(err).AddDetails(rpcErr.FullDetails()).Build()
+		} else {
+			verr = errhand.BuildDError("error: push failed").AddCause(err).Build()
+		}
+	default:
+		verr = errhand.VerboseErrorFromError(err)
 	}
 
 	return HandleVErrAndExitCode(verr, usage)
 }
 
-const minUpdate = 100 * time.Millisecond
+func pullerProgFunc(ctx context.Context, statsCh chan pull.Stats, language progLanguage) {
+	p := cli.NewEphemeralPrinter()
 
-var spinnerSeq = []rune{'|', '/', '-', '\\'}
-
-type TextSpinner struct {
-	seqPos     int
-	lastUpdate time.Time
-}
-
-func printInfoForPushError(err error, remote env.Remote, destRef, remoteRef ref.DoltRef) errhand.VerboseError {
-	switch err {
-	case doltdb.ErrUpToDate:
-		cli.Println("Everything up-to-date")
-	case doltdb.ErrIsAhead, actions.ErrCantFF, datas.ErrMergeNeeded:
-		cli.Printf("To %s\n", remote.Url)
-		cli.Printf("! [rejected]          %s -> %s (non-fast-forward)\n", destRef.String(), remoteRef.String())
-		cli.Printf("error: failed to push some refs to '%s'\n", remote.Url)
-		cli.Println("hint: Updates were rejected because the tip of your current branch is behind")
-		cli.Println("hint: its remote counterpart. Integrate the remote changes (e.g.")
-		cli.Println("hint: 'dolt pull ...') before pushing again.")
-		return errhand.BuildDError("").Build()
-	case actions.ErrUnknownPushErr:
-		status, ok := status.FromError(err)
-		if ok && status.Code() == codes.PermissionDenied {
-			cli.Println("hint: have you logged into DoltHub using 'dolt login'?")
-			cli.Println("hint: check that user.email in 'dolt config --list' has write perms to DoltHub repo")
-		}
-		if rpcErr, ok := err.(*remotestorage.RpcError); ok {
-			return errhand.BuildDError("error: push failed").AddCause(err).AddDetails(rpcErr.FullDetails()).Build()
-		} else {
-			return errhand.BuildDError("error: push failed").AddCause(err).Build()
-		}
-	default:
-		return errhand.BuildDError("error: push failed").AddCause(err).Build()
-	}
-	return nil
-}
-
-func (ts *TextSpinner) next() string {
-	now := time.Now()
-	if now.Sub(ts.lastUpdate) > minUpdate {
-		ts.seqPos = (ts.seqPos + 1) % len(spinnerSeq)
-		ts.lastUpdate = now
-	}
-
-	return string([]rune{spinnerSeq[ts.seqPos]})
-}
-
-func pullerProgFunc(ctx context.Context, pullerEventCh chan pull.PullerEvent, language progLanguage) {
-	var pos int
-	var currentTreeLevel int
-	var percentBuffered float64
-	var tableFilesClosed int
-	var filesTransfered int
-	var ts TextSpinner
-
-	uploadRate := ""
-
-	for evt := range pullerEventCh {
-		if ctx.Err() != nil {
-			return
-		}
-		switch evt.EventType {
-		case pull.NewLevelTWEvent:
-			if evt.TWEventDetails.TreeLevel != 1 {
-				currentTreeLevel = evt.TWEventDetails.TreeLevel
-				percentBuffered = 0
-			}
-		case pull.DestDBHasTWEvent:
-			if evt.TWEventDetails.TreeLevel != -1 {
-				currentTreeLevel = evt.TWEventDetails.TreeLevel
-			}
-
-		case pull.LevelUpdateTWEvent:
-			if evt.TWEventDetails.TreeLevel != -1 {
-				currentTreeLevel = evt.TWEventDetails.TreeLevel
-				toBuffer := evt.TWEventDetails.ChunksInLevel - evt.TWEventDetails.ChunksAlreadyHad
-
-				if toBuffer > 0 {
-					percentBuffered = 100 * float64(evt.TWEventDetails.ChunksBuffered) / float64(toBuffer)
-				}
-			}
-
-		case pull.LevelDoneTWEvent:
-
-		case pull.TableFileClosedEvent:
-			tableFilesClosed += 1
-
-		case pull.StartUploadTableFileEvent:
-
-		case pull.UploadTableFileUpdateEvent:
-			bps := float64(evt.TFEventDetails.Stats.Read) / evt.TFEventDetails.Stats.Elapsed.Seconds()
-			uploadRate = humanize.Bytes(uint64(bps)) + "/s"
-
-		case pull.EndUploadTableFileEvent:
-			filesTransfered += 1
-		}
-
-		if currentTreeLevel == -1 {
-			continue
-		}
-
-		var msg string
-		msg = fmt.Sprintf("%s Tree Level: %d, Percent Buffered: %.2f%%,", ts.next(), currentTreeLevel, percentBuffered)
-
-		if language == downloadLanguage {
-			msg = fmt.Sprintf("%s Files Written: %d", msg, filesTransfered)
-		} else {
-			if len(uploadRate) > 0 {
-				msg = fmt.Sprintf("%s Files Created: %d, Files Uploaded: %d, Current Upload Speed: %s", msg, tableFilesClosed, filesTransfered, uploadRate)
-			} else {
-				msg = fmt.Sprintf("%s Files Created: %d, Files Uploaded: %d", msg, tableFilesClosed, filesTransfered)
-			}
-		}
-
-		pos = cli.DeleteAndPrint(pos, msg)
-	}
-}
-
-func progFunc(ctx context.Context, progChan chan pull.PullProgress) {
-	var latest pull.PullProgress
-	last := time.Now().UnixNano() - 1
-	lenPrinted := 0
-	done := false
-	for !done {
-		if ctx.Err() != nil {
-			return
-		}
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case progress, ok := <-progChan:
+		case stats, ok := <-statsCh:
 			if !ok {
-				done = true
+				return
 			}
-			latest = progress
-		case <-time.After(250 * time.Millisecond):
-			break
-		}
-
-		nowUnix := time.Now().UnixNano()
-		deltaTime := time.Duration(nowUnix - last)
-		halfSec := 500 * time.Millisecond
-		if done || deltaTime > halfSec {
-			last = nowUnix
-			if latest.KnownCount > 0 {
-				progMsg := fmt.Sprintf("Counted chunks: %d, Buffered chunks: %d)", latest.KnownCount, latest.DoneCount)
-				lenPrinted = cli.DeleteAndPrint(lenPrinted, progMsg)
+			if language == downloadLanguage {
+				p.Printf("Downloaded %s chunks, %s @ %s/s.",
+					humanize.Comma(int64(stats.FetchedSourceChunks)),
+					humanize.Bytes(stats.FetchedSourceBytes),
+					humanize.SIWithDigits(stats.FetchedSourceBytesPerSec, 2, "B"),
+				)
+			} else {
+				p.Printf("Uploaded %s of %s @ %s/s.",
+					humanize.Bytes(stats.FinishedSendBytes),
+					humanize.Bytes(stats.BufferedSendBytes),
+					humanize.SIWithDigits(stats.SendBytesPerSec, 2, "B"),
+				)
 			}
+			p.Display()
 		}
-	}
-
-	if lenPrinted > 0 {
-		cli.Println()
 	}
 }
 
@@ -293,35 +258,22 @@ const (
 )
 
 func buildProgStarter(language progLanguage) actions.ProgStarter {
-	return func(ctx context.Context) (*sync.WaitGroup, chan pull.PullProgress, chan pull.PullerEvent) {
-		pullerEventCh := make(chan pull.PullerEvent, 128)
-		progChan := make(chan pull.PullProgress, 128)
+	return func(ctx context.Context) (*sync.WaitGroup, chan pull.Stats) {
+		statsCh := make(chan pull.Stats, 128)
 		wg := &sync.WaitGroup{}
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			progFunc(ctx, progChan)
+			pullerProgFunc(ctx, statsCh, language)
 		}()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			pullerProgFunc(ctx, pullerEventCh, language)
-		}()
-
-		return wg, progChan, pullerEventCh
+		return wg, statsCh
 	}
 }
 
-func stopProgFuncs(cancel context.CancelFunc, wg *sync.WaitGroup, progChan chan pull.PullProgress, pullerEventCh chan pull.PullerEvent) {
+func stopProgFuncs(cancel context.CancelFunc, wg *sync.WaitGroup, statsCh chan pull.Stats) {
 	cancel()
-	close(progChan)
-	close(pullerEventCh)
+	close(statsCh)
 	wg.Wait()
-}
-
-func bytesPerSec(bytes uint64, start time.Time) string {
-	bps := float64(bytes) / float64(time.Since(start).Seconds())
-	return humanize.Bytes(uint64(bps))
 }

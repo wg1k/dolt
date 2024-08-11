@@ -15,7 +15,6 @@
 package dtables
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -23,146 +22,91 @@ import (
 	"sync"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/expression"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/diff"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/rowconv"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
+const commitDiffDefaultRowCount = 1000
+
 var ErrExactlyOneToCommit = errors.New("dolt_commit_diff_* tables must be filtered to a single 'to_commit'")
 var ErrExactlyOneFromCommit = errors.New("dolt_commit_diff_* tables must be filtered to a single 'from_commit'")
-
-var _ sql.Table = (*CommitDiffTable)(nil)
-var _ sql.FilteredTable = (*CommitDiffTable)(nil)
+var ErrInvalidCommitDiffTableArgs = errors.New("commit_diff_<table> requires one 'to_commit' and one 'from_commit'")
 
 type CommitDiffTable struct {
-	name              string
-	ddb               *doltdb.DoltDB
-	ss                *schema.SuperSchema
-	joiner            *rowconv.Joiner
-	sqlSch            sql.PrimaryKeySchema
-	workingRoot       *doltdb.RootValue
-	fromCommitFilter  *expression.Equals
-	toCommitFilter    *expression.Equals
+	name        string
+	dbName      string
+	ddb         *doltdb.DoltDB
+	joiner      *rowconv.Joiner
+	sqlSch      sql.PrimaryKeySchema
+	workingRoot doltdb.RootValue
+	stagedRoot  doltdb.RootValue
+	// toCommit and fromCommit are set via the
+	// sql.IndexAddressable interface
+	toCommit          string
+	fromCommit        string
 	requiredFilterErr error
+	targetSchema      schema.Schema
 }
 
-func NewCommitDiffTable(ctx *sql.Context, tblName string, ddb *doltdb.DoltDB, root *doltdb.RootValue) (sql.Table, error) {
-	tblName, ok, err := root.ResolveTableName(ctx, tblName)
+var _ sql.Table = (*CommitDiffTable)(nil)
+var _ sql.IndexAddressable = (*CommitDiffTable)(nil)
+var _ sql.StatisticsTable = (*CommitDiffTable)(nil)
+
+func NewCommitDiffTable(ctx *sql.Context, dbName, tblName string, ddb *doltdb.DoltDB, wRoot, sRoot doltdb.RootValue) (sql.Table, error) {
+	diffTblName := doltdb.DoltCommitDiffTablePrefix + tblName
+
+	// TODO: schema
+	table, _, ok, err := doltdb.GetTableInsensitive(ctx, wRoot, doltdb.TableName{Name: tblName})
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, sql.ErrTableNotFound.New(doltdb.DoltCommitDiffTablePrefix + tblName)
-	}
-
-	diffTblName := doltdb.DoltCommitDiffTablePrefix + tblName
-	ss, err := calcSuperDuperSchema(ctx, ddb, root, tblName)
-	if err != nil {
-		return nil, err
-	}
-
-	_ = ss.AddColumn(schema.NewColumn("commit", schema.DiffCommitTag, types.StringKind, false))
-	_ = ss.AddColumn(schema.NewColumn("commit_date", schema.DiffCommitDateTag, types.TimestampKind, false))
-
-	sch, err := ss.GenerateSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	if sch.GetAllCols().Size() <= 1 {
 		return nil, sql.ErrTableNotFound.New(diffTblName)
 	}
 
-	j, err := rowconv.NewJoiner(
-		[]rowconv.NamedSchema{{Name: diff.To, Sch: sch}, {Name: diff.From, Sch: sch}},
-		map[string]rowconv.ColNamingFunc{
-			diff.To:   toNamer,
-			diff.From: fromNamer,
-		})
+	sch, err := table.GetSchema(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	sqlSch, err := sqlutil.FromDoltSchema(diffTblName, j.GetSchema())
+	diffTableSchema, j, err := GetDiffTableSchemaAndJoiner(ddb.Format(), sch, sch)
 	if err != nil {
 		return nil, err
 	}
 
-	sqlSch.Schema = append(sqlSch.Schema, &sql.Column{
-		Name:     diffTypeColName,
-		Type:     sql.Text,
-		Nullable: false,
-		Source:   diffTblName,
-	})
+	sqlSch, err := sqlutil.FromDoltSchema(dbName, diffTblName, diffTableSchema)
+	if err != nil {
+		return nil, err
+	}
 
 	return &CommitDiffTable{
-		name:        tblName,
-		ddb:         ddb,
-		workingRoot: root,
-		ss:          ss,
-		joiner:      j,
-		sqlSch:      sqlSch,
+		dbName:       dbName,
+		name:         tblName,
+		ddb:          ddb,
+		workingRoot:  wRoot,
+		stagedRoot:   sRoot,
+		joiner:       j,
+		sqlSch:       sqlSch,
+		targetSchema: sch,
 	}, nil
 }
 
-func calcSuperDuperSchema(ctx context.Context, ddb *doltdb.DoltDB, working *doltdb.RootValue, tblName string) (*schema.SuperSchema, error) {
-	refs, err := ddb.GetBranches(ctx)
-
+func (dt *CommitDiffTable) DataLength(ctx *sql.Context) (uint64, error) {
+	numBytesPerRow := schema.SchemaAvgLength(dt.Schema())
+	numRows, _, err := dt.RowCount(ctx)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
+	return numBytesPerRow * numRows, nil
+}
 
-	var superSchemas []*schema.SuperSchema
-	ss, found, err := working.GetSuperSchema(ctx, tblName)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if found {
-		superSchemas = append(superSchemas, ss)
-	}
-
-	for _, ref := range refs {
-		cm, err := ddb.ResolveCommitRef(ctx, ref)
-
-		if err != nil {
-			return nil, err
-		}
-
-		cmRoot, err := cm.GetRootValue()
-
-		if err != nil {
-			return nil, err
-		}
-
-		ss, found, err = cmRoot.GetSuperSchema(ctx, tblName)
-
-		if err != nil {
-			return nil, err
-		}
-
-		if found {
-			superSchemas = append(superSchemas, ss)
-		}
-	}
-
-	if len(superSchemas) == 0 {
-		return nil, sql.ErrTableNotFound.New(tblName)
-	}
-
-	superDuperSchema, err := schema.SuperSchemaUnion(superSchemas...)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return superDuperSchema, nil
+func (dt *CommitDiffTable) RowCount(_ *sql.Context) (uint64, bool, error) {
+	return commitDiffDefaultRowCount, false, nil
 }
 
 func (dt *CommitDiffTable) Name() string {
@@ -175,6 +119,113 @@ func (dt *CommitDiffTable) String() string {
 
 func (dt *CommitDiffTable) Schema() sql.Schema {
 	return dt.sqlSch.Schema
+}
+
+// Collation implements the sql.Table interface.
+func (dt *CommitDiffTable) Collation() sql.CollationID {
+	return sql.Collation_Default
+}
+
+// GetIndexes implements sql.IndexAddressable
+func (dt *CommitDiffTable) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
+	return []sql.Index{index.DoltToFromCommitIndex(dt.name)}, nil
+}
+
+// IndexedAccess implements sql.IndexAddressable
+func (dt *CommitDiffTable) IndexedAccess(lookup sql.IndexLookup) sql.IndexedTable {
+	nt := *dt
+	return &nt
+}
+
+func (dt *CommitDiffTable) PreciseMatch() bool {
+	return false
+}
+
+// RequiredPredicates implements sql.IndexRequired
+func (dt *CommitDiffTable) RequiredPredicates() []string {
+	return []string{"to_commit", "from_commit"}
+}
+
+func (dt *CommitDiffTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
+	return nil, fmt.Errorf("error querying table %s: %w", dt.Name(), ErrExactlyOneToCommit)
+}
+
+func (dt *CommitDiffTable) LookupPartitions(ctx *sql.Context, i sql.IndexLookup) (sql.PartitionIter, error) {
+	if len(i.Ranges) != 1 || len(i.Ranges[0]) != 2 {
+		return nil, ErrInvalidCommitDiffTableArgs
+	}
+	to := i.Ranges[0][0]
+	from := i.Ranges[0][1]
+	switch to.UpperBound.(type) {
+	case sql.Above, sql.Below:
+	default:
+		return nil, ErrInvalidCommitDiffTableArgs
+	}
+	switch from.UpperBound.(type) {
+	case sql.Above, sql.Below:
+	default:
+		return nil, ErrInvalidCommitDiffTableArgs
+	}
+	toCommit, _, err := to.Typ.Convert(sql.GetRangeCutKey(to.UpperBound))
+	if err != nil {
+		return nil, err
+	}
+	var ok bool
+	dt.toCommit, ok = toCommit.(string)
+	if !ok {
+		return nil, fmt.Errorf("to_commit must be string, found %T", toCommit)
+	}
+	fromCommit, _, err := from.Typ.Convert(sql.GetRangeCutKey(from.UpperBound))
+	if err != nil {
+		return nil, err
+	}
+	dt.fromCommit, ok = fromCommit.(string)
+	if !ok {
+		return nil, fmt.Errorf("from_commit must be string, found %T", fromCommit)
+	}
+
+	toRoot, toHash, toDate, err := dt.rootValForHash(ctx, dt.toCommit)
+	if err != nil {
+		return nil, err
+	}
+
+	fromRoot, fromHash, fromDate, err := dt.rootValForHash(ctx, dt.fromCommit)
+	if err != nil {
+		return nil, err
+	}
+
+	toTable, _, _, err := doltdb.GetTableInsensitive(ctx, toRoot, doltdb.TableName{Name: dt.name})
+	if err != nil {
+		return nil, err
+	}
+
+	fromTable, _, _, err := doltdb.GetTableInsensitive(ctx, fromRoot, doltdb.TableName{Name: dt.name})
+	if err != nil {
+		return nil, err
+	}
+
+	dp := DiffPartition{
+		to:       toTable,
+		from:     fromTable,
+		toName:   toHash,
+		fromName: fromHash,
+		toDate:   toDate,
+		fromDate: fromDate,
+		toSch:    dt.targetSchema,
+		fromSch:  dt.targetSchema,
+	}
+
+	isDiffable, err := dp.isDiffablePartition(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isDiffable {
+		ctx.Warn(PrimaryKeyChangeWarningCode, fmt.Sprintf(PrimaryKeyChangeWarning, dp.fromName, dp.toName))
+		return NewSliceOfPartitionsItr([]sql.Partition{}), nil
+	}
+
+	return NewSliceOfPartitionsItr([]sql.Partition{dp}), nil
 }
 
 type SliceOfPartitionsItr struct {
@@ -208,100 +259,35 @@ func (itr *SliceOfPartitionsItr) Close(*sql.Context) error {
 	return nil
 }
 
-func (dt *CommitDiffTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
-	if dt.requiredFilterErr != nil {
-		return nil, fmt.Errorf("error querying table %s: %w", dt.Name(), dt.requiredFilterErr)
-	} else if dt.toCommitFilter == nil {
-		return nil, fmt.Errorf("error querying table %s: %w", dt.Name(), ErrExactlyOneToCommit)
-	} else if dt.fromCommitFilter == nil {
-		return nil, fmt.Errorf("error querying table %s: %w", dt.Name(), ErrExactlyOneFromCommit)
-	}
-
-	toRoot, toName, toDate, err := dt.rootValForFilter(ctx, dt.toCommitFilter)
-
-	if err != nil {
-		return nil, err
-	}
-
-	fromRoot, fromName, fromDate, err := dt.rootValForFilter(ctx, dt.fromCommitFilter)
-
-	if err != nil {
-		return nil, err
-	}
-
-	toTable, _, err := toRoot.GetTable(ctx, dt.name)
-
-	if err != nil {
-		return nil, err
-	}
-
-	fromTable, _, err := fromRoot.GetTable(ctx, dt.name)
-
-	dp := diffPartition{
-		to:       toTable,
-		from:     fromTable,
-		toName:   toName,
-		fromName: fromName,
-		toDate:   toDate,
-		fromDate: fromDate,
-	}
-
-	isDiffable, err := dp.isDiffablePartition(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if !isDiffable {
-		ctx.Warn(PrimaryKeyChangeWarningCode, fmt.Sprintf(PrimaryKeyChangeWarning, dp.fromName, dp.toName))
-		return NewSliceOfPartitionsItr([]sql.Partition{}), nil
-	}
-
-	return NewSliceOfPartitionsItr([]sql.Partition{dp}), nil
-}
-
-func (dt *CommitDiffTable) rootValForFilter(ctx *sql.Context, eqFilter *expression.Equals) (*doltdb.RootValue, string, *types.Timestamp, error) {
-	gf, nonGF := eqFilter.Left(), eqFilter.Right()
-	if _, ok := gf.(*expression.GetField); !ok {
-		nonGF, gf = eqFilter.Left(), eqFilter.Right()
-	}
-
-	val, err := nonGF.Eval(ctx, nil)
-
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	hashStr, ok := val.(string)
-
-	if !ok {
-		return nil, "", nil, fmt.Errorf("received '%v' when expecting commit hash string", val)
-	}
-
-	var root *doltdb.RootValue
+func (dt *CommitDiffTable) rootValForHash(ctx *sql.Context, hashStr string) (doltdb.RootValue, string, *types.Timestamp, error) {
+	var root doltdb.RootValue
 	var commitTime *types.Timestamp
-	if strings.ToLower(hashStr) == "working" {
+	if strings.EqualFold(hashStr, doltdb.Working) {
 		root = dt.workingRoot
+	} else if strings.EqualFold(hashStr, doltdb.Staged) {
+		root = dt.stagedRoot
 	} else {
 		cs, err := doltdb.NewCommitSpec(hashStr)
+		if err != nil {
+			return nil, "", nil, err
+		}
+
+		optCmt, err := dt.ddb.Resolve(ctx, cs, nil)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		cm, ok := optCmt.ToCommit()
+		if !ok {
+			return nil, "", nil, doltdb.ErrGhostCommitEncountered
+		}
+
+		root, err = cm.GetRootValue(ctx)
 
 		if err != nil {
 			return nil, "", nil, err
 		}
 
-		cm, err := dt.ddb.Resolve(ctx, cs, nil)
-
-		if err != nil {
-			return nil, "", nil, err
-		}
-
-		root, err = cm.GetRootValue()
-
-		if err != nil {
-			return nil, "", nil, err
-		}
-
-		meta, err := cm.GetCommitMeta()
+		meta, err := cm.GetCommitMeta(ctx)
 
 		if err != nil {
 			return nil, "", nil, err
@@ -314,61 +300,7 @@ func (dt *CommitDiffTable) rootValForFilter(ctx *sql.Context, eqFilter *expressi
 	return root, hashStr, commitTime, nil
 }
 
-// HandledFilters returns the list of filters that will be handled by the table itself
-func (dt *CommitDiffTable) HandledFilters(filters []sql.Expression) []sql.Expression {
-	var commitFilters []sql.Expression
-	for _, filter := range filters {
-		isCommitFilter := false
-
-		if eqFilter, isEquality := filter.(*expression.Equals); isEquality {
-			for _, e := range []sql.Expression{eqFilter.Left(), eqFilter.Right()} {
-				if val, ok := e.(*expression.GetField); ok {
-					switch strings.ToLower(val.Name()) {
-					case toCommit:
-						if dt.toCommitFilter != nil {
-							dt.requiredFilterErr = ErrExactlyOneToCommit
-						}
-
-						isCommitFilter = true
-						dt.toCommitFilter = eqFilter
-					case fromCommit:
-						if dt.fromCommitFilter != nil {
-							dt.requiredFilterErr = ErrExactlyOneFromCommit
-						}
-
-						isCommitFilter = true
-						dt.fromCommitFilter = eqFilter
-					}
-				}
-			}
-		}
-
-		if isCommitFilter {
-			commitFilters = append(commitFilters, filter)
-		}
-	}
-
-	return commitFilters
-}
-
-// Filters returns the list of filters that are applied to this table.
-func (dt *CommitDiffTable) Filters() []sql.Expression {
-	if dt.toCommitFilter == nil || dt.fromCommitFilter == nil {
-		return nil
-	}
-
-	return []sql.Expression{dt.toCommitFilter, dt.fromCommitFilter}
-}
-
-// WithFilters returns a new sql.Table instance with the filters applied
-func (dt *CommitDiffTable) WithFilters(ctx *sql.Context, filters []sql.Expression) sql.Table {
-	return dt
-}
-
 func (dt *CommitDiffTable) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter, error) {
-	dp := part.(diffPartition)
-	// TODO: commit_diff_table reuses diffPartition from diff_table and we've switched diff_table over
-	//       to a new format. After we switch commit_diff_table over to the same new format, we can
-	//       remove this getLegacyRowIter method.
-	return dp.getLegacyRowIter(ctx, dt.ddb, dt.ss, dt.joiner)
+	dp := part.(DiffPartition)
+	return dp.GetRowIter(ctx, dt.ddb, dt.joiner, sql.IndexLookup{})
 }

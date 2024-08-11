@@ -17,65 +17,58 @@ package val
 import (
 	"math"
 
+	"github.com/dolthub/dolt/go/store/hash"
+
 	"github.com/dolthub/dolt/go/store/pool"
 )
 
 const (
-	MaxTupleFields            = 4096
-	MaxTupleDataSize ByteSize = math.MaxUint16
+	MaxTupleFields          = 4096
+	countSize      ByteSize = 2
+	nodeCountSize           = uint64Size
+	treeLevelSize           = uint8Size
 
-	countSize ByteSize = 2
+	// MaxTupleDataSize is the maximum KV length considering the extra
+	// flatbuffer metadata required to serialize the message. This number
+	// implicitly checks the "last row" size that will append chunk level
+	// metadata. Key and value offsets per field are excluded from this number.
+	// (uint16) - (field count) - (content hash) - (node count) - (tree level)
+	MaxTupleDataSize ByteSize = math.MaxUint16 - countSize - hash.ByteLen - nodeCountSize - treeLevelSize
 )
 
-// todo(andy): update comment
-// Tuples are byte slices containing field values and a footer. Tuples only
-//   contain Values for non-NULL Fields. Value i contains the data for ith non-
-//   NULL Field. Values are packed contiguously from the front of the Tuple. The
-//   footer contains offsets, a member mask, and a field count. offsets enable
-//   random access to Values. The member mask enables NULL-compaction for Values.
+// A Tuple is a vector of fields encoded as a byte slice. Key-Value Tuple pairs
+// are used to store row data within clustered and secondary indexes in Dolt.
 //
-//   Tuples read and write Values as byte slices. (De)serialization is delegated
-//   to Tuple Descriptors, which know a Tuple's schema and associated encodings.
-//   When reading and writing Values, NULLs are encoded as nil byte slices. Note
-//   that these are not the same as zero-length byte slices. An empty string may
-//   be encoded as a zero-length byte slice and will be distinct from a NULL
-//   string both logically and semantically.
+// The encoding format for Tuples starts with field values packed contiguously from
+// the front of the Tuple, followed by field offsets, and finally a field count:
 //
-//   Tuple:
-//   +---------+---------+-----+---------+---------+-------------+-------------+
-//   | Value 0 | Value 1 | ... | Value K | offsets | Member Mask | Field Count |
-//   +---------+---------+-----+---------+---------+-------------+-------------+
+//	+---------+---------+-----+---------+----------+-----+----------+-------+
+//	| Value 0 | Value 1 | ... | Value K | Offset 1 | ... | Offset K | Count |
+//	+---------+---------+-----+---------+----------+-----+----------+-------+
 //
-//   offsets:
-//     The offset array contains a uint16 for each non-NULL field after field 0.
-//     Offset i encodes the distance to the ith Value from the front of the Tuple.
-//     The size of the offset array is 2*(K-1) bytes, where K is the number of
-//     Values in the Tuple.
-//   +----------+----------+-----+----------+
-//   | Offset 1 | Offset 2 | ... | Offset K |
-//   +----------+----------+-----+----------+
+// Field offsets encode the byte-offset from the front of the Tuple to the beginning
+// of the corresponding field in the Tuple. The offset for the first field is always
+// zero and is therefor omitted. Offsets and the field count are little-endian
+// encoded uint16 values.
 //
-//   Member Mask:
-//     The member mask is a bit-array encoding field membership in Tuples. Fields
-//     with non-NULL values are present, and encoded as 1, NULL fields are absent
-//     and encoded as 0. The size of the bit array is math.Ceil(N/8) bytes, where
-//     N is the number of Fields in the Tuple.
-//   +------------+-------------+-----+
-//   | Bits 0 - 7 | Bits 8 - 15 | ... |
-//   +------------+-------------+-----+
+// Tuples read and write field values as byte slices. Interpreting these encoded
+// values is left up to TupleDesc which knows about a Tuple's schema and associated
+// field encodings. Zero-length fields are interpreted as NULL values, all non-NULL
+// values must be encoded with non-zero length. For this reason, variable-length
+// strings are encoded with a NUL terminator (see codec.go).
 //
-//   Field Count:
-//      The field fieldCount is a uint16 containing the number of fields in the
-//     	Tuple, it is stored in 2 bytes.
-//   +----------------------+
-//   | Field Count (uint16) |
-//   +----------------------+
-
+// Accessing the ith field where i > count will return a NULL value. This allows us
+// to implicitly add nullable columns to the end of a schema without needing to
+// rewrite index storage. However, because Dolt storage in content-addressed, we
+// must have a single canonical encoding for any given Tuple. For this reason, the
+// NULL suffix of a Tuple is explicitly truncated and the field count reduced.
 type Tuple []byte
 
 var EmptyTuple = Tuple([]byte{0, 0})
 
 func NewTuple(pool pool.BuffPool, values ...[]byte) Tuple {
+	values = trimNullSuffix(values)
+
 	var count int
 	var pos ByteSize
 	for _, v := range values {
@@ -111,7 +104,18 @@ func NewTuple(pool pool.BuffPool, values ...[]byte) Tuple {
 	return tup
 }
 
-func CloneTuple(pool pool.BuffPool, tup Tuple) Tuple {
+func trimNullSuffix(values [][]byte) [][]byte {
+	n := len(values)
+	for i := len(values) - 1; i >= 0; i-- {
+		if values[i] != nil {
+			break
+		}
+		n--
+	}
+	return values[:n]
+}
+
+func cloneTuple(pool pool.BuffPool, tup Tuple) Tuple {
 	buf := pool.Get(uint64(len(tup)))
 	copy(buf, tup)
 	return buf
@@ -125,6 +129,29 @@ func allocateTuple(pool pool.BuffPool, bufSz ByteSize, fields int) (tup Tuple, o
 	offs = offsets(tup[bufSz : bufSz+offSz])
 
 	return
+}
+
+func (tup Tuple) GetOffset(i int) (int, bool) {
+	cnt := tup.Count()
+	if i >= cnt {
+		return 0, false
+	}
+
+	sz := ByteSize(len(tup))
+	split := sz - uint16Size*ByteSize(cnt)
+	offs := tup[split : sz-countSize]
+
+	start, stop := uint16(0), uint16(split)
+	if i*2 < len(offs) {
+		pos := i * 2
+		stop = ReadUint16(offs[pos : pos+2])
+	}
+	if i > 0 {
+		pos := (i - 1) * 2
+		start = ReadUint16(offs[pos : pos+2])
+	}
+
+	return int(start), start != stop
 }
 
 // GetField returns the value for field |i|.
@@ -141,11 +168,11 @@ func (tup Tuple) GetField(i int) []byte {
 	start, stop := uint16(0), uint16(split)
 	if i*2 < len(offs) {
 		pos := i * 2
-		stop = readUint16(offs[pos : pos+2])
+		stop = ReadUint16(offs[pos : pos+2])
 	}
 	if i > 0 {
 		pos := (i - 1) * 2
-		start = readUint16(offs[pos : pos+2])
+		start = ReadUint16(offs[pos : pos+2])
 	}
 
 	if start == stop {
@@ -155,15 +182,13 @@ func (tup Tuple) GetField(i int) []byte {
 	return tup[start:stop]
 }
 
-// GetManyFields takes a sorted slice of ordinals |indexes| and returns the requested
-// tuple fields. It populates field data into |slices| to avoid allocating.
-func (tup Tuple) GetManyFields(indexes []int, slices [][]byte) [][]byte {
-	return sliceManyFields(tup, indexes, slices)
+func (tup Tuple) FieldIsNull(i int) bool {
+	return tup.GetField(i) == nil
 }
 
 func (tup Tuple) Count() int {
 	sl := tup[len(tup)-int(countSize):]
-	return int(readUint16(sl))
+	return int(ReadUint16(sl))
 }
 
 func isNull(val []byte) bool {
@@ -176,55 +201,25 @@ func sizeOf(val []byte) ByteSize {
 
 func writeFieldCount(tup Tuple, count int) {
 	sl := tup[len(tup)-int(countSize):]
-	writeUint16(sl, uint16(count))
+	WriteUint16(sl, uint16(count))
 }
 
-func sliceManyFields(tuple Tuple, indexes []int, slices [][]byte) [][]byte {
-	cnt := tuple.Count()
-	sz := ByteSize(len(tuple))
-	split := sz - uint16Size*ByteSize(cnt)
+type offsets []byte
 
-	data := tuple[:split]
-	offs := offsets(tuple[split : sz-countSize])
-
-	// if count is 1, we assume |indexes| is [0]
-	if cnt == 1 {
-		slices[0] = data
-		if len(data) == 0 {
-			slices[0] = nil
-		}
-		return slices
+// offsetsSize returns the number of bytes needed to
+// store |fieldCount| offsets.
+func offsetsSize(count int) ByteSize {
+	if count == 0 {
+		return 0
 	}
+	return ByteSize((count - 1) * 2)
+}
 
-	subset := slices
-	// we don't have a "stop" offset for the last field
-	n := len(slices)
-	if indexes[n-1] == cnt-1 {
-		o := readUint16(offs[len(offs)-2:])
-		slices[n-1] = data[o:]
-		indexes = indexes[:n-1]
-		subset = subset[:n-1]
+// writeOffset writes offset |pos| at index |i|.
+func writeOffset(i int, off ByteSize, arr offsets) {
+	if i == 0 {
+		return
 	}
-
-	// we don't have a "start" offset for the first field
-	if len(indexes) > 0 && indexes[0] == 0 {
-		o := readUint16(offs[:2])
-		slices[0] = data[:o]
-		indexes = indexes[1:]
-		subset = subset[1:]
-	}
-
-	for i, k := range indexes {
-		start := readUint16(offs[(k-1)*2 : k*2])
-		stop := readUint16(offs[k*2 : (k+1)*2])
-		subset[i] = tuple[start:stop]
-	}
-
-	for i := range slices {
-		if len(slices[i]) == 0 {
-			slices[i] = nil
-		}
-	}
-
-	return slices
+	start := (i - 1) * 2
+	WriteUint16(arr[start:start+2], uint16(off))
 }

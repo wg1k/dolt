@@ -16,7 +16,6 @@ package cli
 
 import (
 	"context"
-	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,7 +60,7 @@ func (cmd *trackedCommand) Description() string {
 	return cmd.description
 }
 
-func (cmd *trackedCommand) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd *trackedCommand) Docs() *CommandDocumentation {
 	return nil
 }
 
@@ -69,7 +68,7 @@ func (cmd *trackedCommand) RequiresRepo() bool {
 	return false
 }
 
-func (cmd *trackedCommand) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd *trackedCommand) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx CliContext) int {
 	cmd.called = true
 	cmd.cmdStr = commandStr
 	cmd.args = args
@@ -134,7 +133,7 @@ func runCommand(root Command, commandLine string) int {
 		panic("Invalid test command line")
 	}
 
-	return root.Exec(context.Background(), appName, tokens[1:], nil)
+	return root.Exec(context.Background(), appName, tokens[1:], nil, nil)
 }
 
 func TestHasHelpFlag(t *testing.T) {

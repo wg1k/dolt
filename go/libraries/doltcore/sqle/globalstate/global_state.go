@@ -14,37 +14,16 @@
 
 package globalstate
 
-import (
-	"sync"
+import "github.com/dolthub/go-mysql-server/sql"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
-)
-
+// GlobalState is just a holding interface for pieces of global state, of which the auto increment tracking info is
+// the only example at the moment.
 type GlobalState interface {
-	GetAutoIncrementTracker(wsref ref.WorkingSetRef) AutoIncrementTracker
+	// AutoIncrementTracker returns the auto increment tracker for this global state.
+	AutoIncrementTracker(ctx *sql.Context) (AutoIncrementTracker, error)
 }
 
-func NewGlobalStateStore() GlobalState {
-	return &globalStateImpl{
-		trackerMap: make(map[ref.WorkingSetRef]AutoIncrementTracker),
-	}
-}
-
-type globalStateImpl struct {
-	trackerMap map[ref.WorkingSetRef]AutoIncrementTracker
-	mu         sync.Mutex
-}
-
-var _ GlobalState = (*globalStateImpl)(nil)
-
-func (g *globalStateImpl) GetAutoIncrementTracker(wsref ref.WorkingSetRef) AutoIncrementTracker {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	_, ok := g.trackerMap[wsref]
-	if !ok {
-		g.trackerMap[wsref] = NewAutoIncrementTracker()
-	}
-
-	return g.trackerMap[wsref]
+// GlobalStateProvider is an optional interface for databases that provide global state tracking
+type GlobalStateProvider interface {
+	GetGlobalState() GlobalState
 }

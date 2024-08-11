@@ -16,203 +16,273 @@ package benchmark
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
-	"strconv"
+	"sync"
 	"testing"
 
-	"github.com/dolthub/dolt/go/store/chunks"
-	"github.com/dolthub/dolt/go/store/pool"
-	"github.com/dolthub/dolt/go/store/prolly"
-	"github.com/dolthub/dolt/go/store/types"
+	"github.com/stretchr/testify/require"
+
 	"github.com/dolthub/dolt/go/store/val"
 )
 
-func BenchmarkAll(b *testing.B) {
-	benchmarkProllyMap(b, 10_000, 1)
-	benchmarkTypesMap(b, 10_000, 1)
-	benchmarkProllyMap(b, 100_000, 1)
-	benchmarkTypesMap(b, 100_000, 1)
+func BenchmarkMapGet(b *testing.B) {
+	b.Run("benchmark maps 10k", func(b *testing.B) {
+		benchmarkProllyMapGet(b, 10_000)
+		benchmarkTypesMapGet(b, 10_000)
+	})
+	b.Run("benchmark maps 100k", func(b *testing.B) {
+		benchmarkProllyMapGet(b, 100_000)
+		benchmarkTypesMapGet(b, 100_000)
+	})
+	b.Run("benchmark maps 1M", func(b *testing.B) {
+		benchmarkProllyMapGet(b, 1_000_000)
+		benchmarkTypesMapGet(b, 1_000_000)
+	})
 }
 
-func BenchmarkProllySmall(b *testing.B) {
-	benchmarkProllyMap(b, 10_000, 10)
+func BenchmarkStepMapGet(b *testing.B) {
+	b.Skip()
+	step := uint64(100_000)
+	for sz := step; sz < step*20; sz += step {
+		nm := fmt.Sprintf("benchmark maps %d", sz)
+		b.Run(nm, func(b *testing.B) {
+			benchmarkProllyMapGet(b, sz)
+			benchmarkTypesMapGet(b, sz)
+		})
+	}
 }
 
-func BenchmarkTypesSmall(b *testing.B) {
-	benchmarkTypesMap(b, 10_000, 10)
+func BenchmarkParallelMapGet(b *testing.B) {
+	b.Run("benchmark maps 10k", func(b *testing.B) {
+		benchmarkProllyMapGetParallel(b, 10_000)
+		benchmarkTypesMapGetParallel(b, 10_000)
+	})
+	b.Run("benchmark maps 100k", func(b *testing.B) {
+		benchmarkProllyMapGetParallel(b, 100_000)
+		benchmarkTypesMapGetParallel(b, 100_000)
+	})
+	b.Run("benchmark maps 1M", func(b *testing.B) {
+		benchmarkProllyMapGetParallel(b, 1_000_000)
+		benchmarkTypesMapGetParallel(b, 1_000_000)
+	})
 }
 
-func BenchmarkProllyMedium(b *testing.B) {
-	benchmarkProllyMap(b, 100_000, 1)
+func BenchmarkStepParallelMapGet(b *testing.B) {
+	b.Skip()
+	step := uint64(100_000)
+	for sz := step; sz < step*20; sz += step {
+		nm := fmt.Sprintf("benchmark maps parallel %d", sz)
+		b.Run(nm, func(b *testing.B) {
+			benchmarkProllyMapGetParallel(b, sz)
+			benchmarkTypesMapGetParallel(b, sz)
+		})
+	}
 }
 
-func BenchmarkTypesMedium(b *testing.B) {
-	benchmarkTypesMap(b, 100_000, 1)
+func BenchmarkGetLargeProlly(b *testing.B) {
+	benchmarkProllyMapGet(b, 1_000_000)
 }
 
-func BenchmarkProllyLarge(b *testing.B) {
-	benchmarkProllyMap(b, 1_000_000, 1)
+func BenchmarkGetLargeNoms(b *testing.B) {
+	benchmarkTypesMapGet(b, 1_000_000)
 }
 
-type prollyBench struct {
-	m    prolly.Map
-	tups [][2]val.Tuple
+func BenchmarkGetLargeBBolt(b *testing.B) {
+	benchmarkBBoltMapGet(b, 1_000_000)
 }
 
-type typesBench struct {
-	m    types.Map
-	tups [][2]types.Tuple
+func BenchmarkProllyParallelGetLarge(b *testing.B) {
+	benchmarkProllyMapGetParallel(b, 1_000_000)
 }
 
-func benchmarkProllyMap(b *testing.B, size, iters uint64) {
-	bench := generateProllyBench(size)
-	b.ReportAllocs()
+func BenchmarkNomsParallelGetLarge(b *testing.B) {
+	benchmarkTypesMapGetParallel(b, 1_000_000)
+}
+
+func benchmarkProllyMapGet(b *testing.B, size uint64) {
+	bench := generateProllyBench(b, size)
 	b.ResetTimer()
-
-	b.Run("benchmark prolly map", func(b *testing.B) {
+	b.Run("benchmark new format reads", func(b *testing.B) {
 		ctx := context.Background()
 
-		for k := uint64(0); k < iters; k++ {
-			for i := 0; i < len(bench.tups); i++ {
-				idx := rand.Uint64() % uint64(len(bench.tups))
-				key := bench.tups[idx][0]
+		for i := 0; i < b.N; i++ {
+			idx := rand.Uint64() % uint64(len(bench.tups))
+			key := bench.tups[idx][0]
+			_ = bench.m.Get(ctx, key, func(_, _ val.Tuple) (e error) {
+				return
+			})
+		}
+		b.ReportAllocs()
+	})
+}
 
+func benchmarkTypesMapGet(b *testing.B, size uint64) {
+	bench := generateTypesBench(b, size)
+	b.ResetTimer()
+	b.Run("benchmark old format reads", func(b *testing.B) {
+		ctx := context.Background()
+		for i := 0; i < b.N; i++ {
+			idx := rand.Uint64() % uint64(len(bench.tups))
+			_, _, _ = bench.m.MaybeGet(ctx, bench.tups[idx][0])
+		}
+		b.ReportAllocs()
+	})
+}
+
+func benchmarkBBoltMapGet(b *testing.B, size uint64) {
+	bench := generateBBoltBench(b, size)
+	b.ResetTimer()
+	b.Run("benchmark bbolt reads", func(b *testing.B) {
+		tx, err := bench.db.Begin(false)
+		require.NoError(b, err)
+		bck := tx.Bucket(bucket)
+
+		for i := 0; i < b.N; i++ {
+			idx := rand.Uint64() % uint64(len(bench.tups))
+			key := bench.tups[idx][0]
+			_ = bck.Get(key)
+		}
+		b.ReportAllocs()
+	})
+}
+
+func benchmarkProllyMapGetParallel(b *testing.B, size uint64) {
+	bench := generateProllyBench(b, size)
+	b.Run(fmt.Sprintf("benchmark new format %d", size), func(b *testing.B) {
+		b.RunParallel(func(b *testing.PB) {
+			ctx := context.Background()
+			rnd := rand.NewSource(0)
+			for b.Next() {
+				idx := int(rnd.Int63()) % len(bench.tups)
+				key := bench.tups[idx][0]
 				_ = bench.m.Get(ctx, key, func(_, _ val.Tuple) (e error) {
 					return
 				})
 			}
-			b.ReportAllocs()
-		}
+		})
+		b.ReportAllocs()
 	})
 }
 
-func benchmarkTypesMap(b *testing.B, size, iters uint64) {
-	bench := generateTypesBench(size)
+func benchmarkTypesMapGetParallel(b *testing.B, size uint64) {
+	bench := generateTypesBench(b, size)
+	b.Run(fmt.Sprintf("benchmark old format %d", size), func(b *testing.B) {
+		b.RunParallel(func(pb *testing.PB) {
+			ctx := context.Background()
+			rnd := rand.NewSource(0)
+			for pb.Next() {
+				idx := int(rnd.Int63()) % len(bench.tups)
+				_, _, _ = bench.m.MaybeGet(ctx, bench.tups[idx][0])
+			}
+		})
+		b.ReportAllocs()
+	})
+}
+
+const mapScale = 4096
+
+func BenchmarkGoMapGet(b *testing.B) {
+	b.Skip()
+	kv1 := makeGoMap(mapScale)
+	kv2 := makeSyncMap(mapScale)
 	b.ResetTimer()
 
-	s := strconv.Itoa(int(size))
-	b.Run("benchmark types map "+s, func(b *testing.B) {
-		for k := uint64(0); k < iters; k++ {
-			ctx := context.Background()
-			for i := 0; i < len(bench.tups); i++ {
-				idx := rand.Uint64() % uint64(len(bench.tups))
-				_, _, _ = bench.m.MaybeGet(ctx, bench.tups[idx][0])
-
-				//_, ok, err := bench.m.MaybeGet(ctx, bench.tups[idx][0])
-				//assert.NoError(b, err)
-				//assert.True(b, ok)
+	b.Run("test golang map", func(b *testing.B) {
+		for j := 0; j < b.N; j++ {
+			_, ok := kv1[uint64(j%mapScale)]
+			if !ok {
+				b.Fail()
 			}
 		}
+		b.ReportAllocs()
+	})
+	b.Run("test golang sync map", func(b *testing.B) {
+		for j := 0; j < b.N; j++ {
+			_, ok := kv2.Load(uint64(j % mapScale))
+			if !ok {
+				b.Fail()
+			}
+		}
+		b.ReportAllocs()
 	})
 }
 
-func generateProllyBench(size uint64) prollyBench {
-	ctx := context.Background()
-	ns := newTestNodeStore()
+func BenchmarkParallelGoMapGet(b *testing.B) {
+	b.Skip()
+	kv1 := makeGoMap(mapScale)
+	kv2 := makeSyncMap(mapScale)
+	b.ResetTimer()
 
-	kd := val.NewTupleDescriptor(
-		val.Type{Enc: val.Int64Enc, Nullable: false},
-	)
-	vd := val.NewTupleDescriptor(
-		val.Type{Enc: val.Int64Enc, Nullable: true},
-		val.Type{Enc: val.Int64Enc, Nullable: true},
-		val.Type{Enc: val.Int64Enc, Nullable: true},
-		val.Type{Enc: val.Int64Enc, Nullable: true},
-		val.Type{Enc: val.Int64Enc, Nullable: true},
-	)
-
-	tups := generateProllyTuples(kd, vd, size)
-
-	tt := make([]val.Tuple, 0, len(tups)*2)
-	for i := range tups {
-		tt = append(tt, tups[i][0], tups[i][1])
-	}
-
-	m, err := prolly.NewMapFromTuples(ctx, ns, kd, vd, tt...)
-	if err != nil {
-		panic(err)
-	}
-
-	return prollyBench{m: m, tups: tups}
+	b.Run("test golang map", func(b *testing.B) {
+		b.RunParallel(func(pb *testing.PB) {
+			j := 0
+			for pb.Next() {
+				_, _ = kv1[uint64(j%mapScale)]
+				j++
+			}
+		})
+		b.ReportAllocs()
+	})
+	b.Run("test golang sync map", func(b *testing.B) {
+		b.RunParallel(func(pb *testing.PB) {
+			v, _ := kv2.Load(uint64(1234))
+			tup := v.(val.Tuple)
+			j := 0
+			for pb.Next() {
+				k := uint64(j % mapScale)
+				if j%10 == 0 {
+					kv2.Store(k, tup)
+				} else {
+					_, _ = kv2.Load(k)
+				}
+				j++
+			}
+		})
+		b.ReportAllocs()
+	})
 }
 
-var shared = pool.NewBuffPool()
-
-func newTestNodeStore() prolly.NodeStore {
-	ts := &chunks.TestStorage{}
-	return prolly.NewNodeStore(ts.NewView())
-}
-
-func generateProllyTuples(kd, vd val.TupleDesc, size uint64) [][2]val.Tuple {
+func makeGoMap(scale uint64) map[uint64]val.Tuple {
 	src := rand.NewSource(0)
+	vb := val.NewTupleBuilder(val.NewTupleDescriptor(
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+	))
 
-	tups := make([][2]val.Tuple, size)
-	kb := val.NewTupleBuilder(kd)
-	vb := val.NewTupleBuilder(vd)
-
-	for i := range tups {
-		// key
-		kb.PutInt64(0, int64(i))
-		tups[i][0] = kb.Build(shared)
-
-		// val
+	kv := make(map[uint64]val.Tuple, scale)
+	for i := uint64(0); i < scale; i++ {
 		vb.PutInt64(0, src.Int63())
 		vb.PutInt64(1, src.Int63())
 		vb.PutInt64(2, src.Int63())
 		vb.PutInt64(3, src.Int63())
 		vb.PutInt64(4, src.Int63())
-		tups[i][1] = vb.Build(shared)
+		kv[i] = vb.Build(shared)
 	}
-
-	return tups
+	return kv
 }
 
-func generateTypesBench(size uint64) typesBench {
-	ctx := context.Background()
-	tups := generateTypesTuples(size)
-
-	tt := make([]types.Value, len(tups)*2)
-	for i := range tups {
-		tt[i*2] = tups[i][0]
-		tt[(i*2)+1] = tups[i][1]
-	}
-
-	m, err := types.NewMap(ctx, newTestVRW(), tt...)
-	if err != nil {
-		panic(err)
-	}
-
-	return typesBench{m: m, tups: tups}
-}
-
-func newTestVRW() types.ValueReadWriter {
-	ts := &chunks.TestStorage{}
-	return types.NewValueStore(ts.NewView())
-}
-
-func generateTypesTuples(size uint64) [][2]types.Tuple {
+func makeSyncMap(scale uint64) *sync.Map {
 	src := rand.NewSource(0)
+	vb := val.NewTupleBuilder(val.NewTupleDescriptor(
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+		val.Type{Enc: val.Int64Enc, Nullable: true},
+	))
+	kv := &sync.Map{}
 
-	// tags
-	t0, t1, t2 := types.Uint(0), types.Uint(1), types.Uint(2)
-	t3, t4, t5 := types.Uint(3), types.Uint(4), types.Uint(5)
-
-	tups := make([][2]types.Tuple, size)
-	for i := range tups {
-
-		// key
-		k := types.Int(i)
-		tups[i][0], _ = types.NewTuple(types.Format_Default, t0, k)
-
-		// val
-		var vv [5 * 2]types.Value
-		for i := 1; i < 10; i += 2 {
-			vv[i] = types.Uint(uint64(src.Int63()))
-		}
-		vv[0], vv[2], vv[4], vv[6], vv[8] = t1, t2, t3, t4, t5
-
-		tups[i][1], _ = types.NewTuple(types.Format_Default, vv[:]...)
+	for i := uint64(0); i < scale; i++ {
+		vb.PutInt64(0, src.Int63())
+		vb.PutInt64(1, src.Int63())
+		vb.PutInt64(2, src.Int63())
+		vb.PutInt64(3, src.Int63())
+		vb.PutInt64(4, src.Int63())
+		kv.Store(i, vb.Build(shared))
 	}
-
-	return tups
+	return kv
 }

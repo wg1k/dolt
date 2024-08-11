@@ -16,13 +16,10 @@ package types
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/dolthub/dolt/go/store/geometry"
 
 	"github.com/dolthub/dolt/go/store/hash"
 )
@@ -30,7 +27,7 @@ import (
 // Polygon is a Noms Value wrapper around a string.
 type Polygon struct {
 	SRID  uint32
-	Lines []Linestring
+	Lines []LineString
 }
 
 // Value interface
@@ -61,7 +58,7 @@ func (v Polygon) Equals(other Value) bool {
 	return true
 }
 
-func (v Polygon) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v Polygon) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	// Compare types
 	v2, ok := other.(Polygon)
 	if !ok {
@@ -83,7 +80,7 @@ func (v Polygon) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	// Compare each point until there is one that is less
 	for i := 0; i < n; i++ {
 		if !v.Lines[i].Equals(v2.Lines[i]) {
-			return v.Lines[i].Less(nbf, v2.Lines[i])
+			return v.Lines[i].Less(ctx, nbf, v2.Lines[i])
 		}
 	}
 	// Determine based off length
@@ -98,16 +95,7 @@ func (v Polygon) isPrimitive() bool {
 	return true
 }
 
-func (v Polygon) WalkValues(ctx context.Context, cb ValueCallback) error {
-	for _, l := range v.Lines {
-		if err := l.WalkValues(ctx, cb); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (v Polygon) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (v Polygon) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 
@@ -123,74 +111,40 @@ func (v Polygon) valueReadWriter() ValueReadWriter {
 	return nil
 }
 
-// WriteEWKBPolyData converts a Polygon into a byte array in EWKB format
-func WriteEWKBPolyData(p Polygon, buf []byte) {
-	// Write length of polygon
-	binary.LittleEndian.PutUint32(buf[:LengthSize], uint32(len(p.Lines)))
-	// Write each line
-	start, stop := 0, LengthSize
-	for _, l := range p.Lines {
-		start, stop = stop, stop+LengthSize+geometry.PointSize*len(l.Points)
-		WriteEWKBLineData(l, buf[start:stop])
-	}
-}
-
 func (v Polygon) writeTo(w nomsWriter, nbf *NomsBinFormat) error {
 	err := PolygonKind.writeTo(w, nbf)
 	if err != nil {
 		return err
 	}
 
-	// Calculate space for polygon buffer
-	size := 0
-	for _, l := range v.Lines {
-		size += LengthSize + geometry.PointSize*len(l.Points)
-	}
-
-	// Allocate buffer for poly
-	buf := make([]byte, geometry.EWKBHeaderSize+LengthSize+size)
-
-	// Write header and data to buffer
-	WriteEWKBHeader(v, buf)
-	WriteEWKBPolyData(v, buf[geometry.EWKBHeaderSize:])
-
-	w.writeString(string(buf))
+	w.writeString(string(SerializePolygon(v)))
 	return nil
-}
-
-// ParseEWKBPoly converts the data portions of a WKB polygon to Polygon
-// Very similar logic to the function in GMS
-func ParseEWKBPoly(buf []byte, srid uint32) Polygon {
-	// Read length of Polygon
-	numLines := binary.LittleEndian.Uint32(buf[:LengthSize])
-
-	// Parse lines
-	s := LengthSize
-	lines := make([]Linestring, numLines)
-	for i := uint32(0); i < numLines; i++ {
-		lines[i] = ParseEWKBLine(buf[s:], srid)
-		s += LengthSize * geometry.PointSize * len(lines[i].Points)
-	}
-
-	return Polygon{SRID: srid, Lines: lines}
 }
 
 func readPolygon(nbf *NomsBinFormat, b *valueDecoder) (Polygon, error) {
 	buf := []byte(b.ReadString())
-	srid, _, geomType := geometry.ParseEWKBHeader(buf)
-	if geomType != geometry.PolygonType {
+	srid, _, geomType, err := DeserializeEWKBHeader(buf)
+	if err != nil {
+		return Polygon{}, err
+	}
+	if geomType != WKBPolyID {
 		return Polygon{}, errors.New("not a polygon")
 	}
-	return ParseEWKBPoly(buf[geometry.EWKBHeaderSize:], srid), nil
+	buf = buf[EWKBHeaderSize:]
+	return DeserializeTypesPoly(buf, false, srid), nil
 }
 
 func (v Polygon) readFrom(nbf *NomsBinFormat, b *binaryNomsReader) (Value, error) {
 	buf := []byte(b.ReadString())
-	srid, _, geomType := geometry.ParseEWKBHeader(buf)
-	if geomType != geometry.PolygonType {
-		return nil, errors.New("not a polygon")
+	srid, _, geomType, err := DeserializeEWKBHeader(buf)
+	if err != nil {
+		return Polygon{}, err
 	}
-	return ParseEWKBPoly(buf[geometry.EWKBHeaderSize:], srid), nil
+	if geomType != WKBPolyID {
+		return Polygon{}, errors.New("not a polygon")
+	}
+	buf = buf[EWKBHeaderSize:]
+	return DeserializeTypesPoly(buf, false, srid), nil
 }
 
 func (v Polygon) skip(nbf *NomsBinFormat, b *binaryNomsReader) {

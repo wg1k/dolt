@@ -20,17 +20,20 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
+	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
+	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -83,711 +86,730 @@ func LoadedLocalLocation() *time.Location {
 }
 
 // BasicSelectTests cover basic select statement features and error handling
-var BasicSelectTests = []SelectTest{
-	{
-		Name:           "select * on primary key",
-		Query:          "select * from people where id = 2",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select * ",
-		Query:          "select * from people",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 1",
-		Query:          "select * from people limit 1",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 1 offset 0",
-		Query:          "select * from people limit 0,1",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 1 offset 1",
-		Query:          "select * from people limit 1 offset 1;",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 1 offset 5",
-		Query:          "select * from people limit 5,1",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 1 offset 6",
-		Query:          "select * from people limit 6,1",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 0",
-		Query:          "select * from people limit 0",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, limit 0 offset 0",
-		Query:          "select * from people limit 0,0",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:        "select *, limit -1",
-		Query:       "select * from people limit -1",
-		ExpectedErr: "Limit must be >= 0 if supplied",
-	},
-	{
-		Name:        "select *, offset -1",
-		Query:       "select * from people limit -1,1",
-		ExpectedErr: "Offset must be >= 0 if supplied",
-	},
-	{
-		Name:           "select *, limit 100",
-		Query:          "select * from people limit 100",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < int",
-		Query:          "select * from people where age < 40",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < int, limit 1",
-		Query:          "select * from people where age < 40 limit 1",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < int, limit 2",
-		Query:          "select * from people where age < 40 limit 2",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < int, limit 100",
-		Query:          "select * from people where age < 40 limit 100",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by int",
-		Query:          "select * from people order by id",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by int desc",
-		Query:          "select * from people order by id desc",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Moe, Lisa, Bart, Marge, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by float",
-		Query:          "select * from people order by rating",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Moe, Marge, Homer, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by string",
-		Query:          "select * from people order by first_name",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Bart, Homer, Lisa, Marge, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by string,string",
-		Query:          "select * from people order by last_name desc, first_name asc",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Bart, Homer, Lisa, Marge, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by with limit",
-		Query:          "select * from people order by first_name limit 2",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Bart),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, order by string,string with limit",
-		Query:          "select * from people order by last_name desc, first_name asc limit 2",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Bart),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where > int reversed",
-		Query:          "select * from people where 40 > age",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where <= int",
-		Query:          "select * from people where age <= 40",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where >= int reversed",
-		Query:          "select * from people where 40 >= age",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where > int",
-		Query:          "select * from people where age > 40",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < int reversed",
-		Query:          "select * from people where 40 < age",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where >= int",
-		Query:          "select * from people where age >= 40",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where <= int reversed",
-		Query:          "select * from people where 40 <= age",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where > string",
-		Query:          "select * from people where last_name > 'Simpson'",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < string",
-		Query:          "select * from people where last_name < 'Simpson'",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where = string",
-		Query:          "select * from people where last_name = 'Simpson'",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where > float",
-		Query:          "select * from people where rating > 8.0 order by id",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < float",
-		Query:          "select * from people where rating < 8.0",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where = float",
-		Query:          "select * from people where rating = 8.0",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where < float reversed",
-		Query:          "select * from people where 8.0 < rating",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where > float reversed",
-		Query:          "select * from people where 8.0 > rating",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where = float reversed",
-		Query:          "select * from people where 8.0 = rating",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where bool = ",
-		Query:          "select * from people where is_married = true",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where bool = false ",
-		Query:          "select * from people where is_married = false",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where bool <> ",
-		Query:          "select * from people where is_married <> false",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, where bool",
-		Query:          "select * from people where is_married",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, and clause",
-		Query:          "select * from people where is_married and age > 38",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, or clause",
-		Query:          "select * from people where is_married or age < 20",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause string",
-		Query:          "select * from people where first_name in ('Homer', 'Marge')",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause integer",
-		Query:          "select * from people where age in (-10, 40)",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause float",
-		Query:          "select * from people where rating in (-10.0, 8.5)",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause, mixed types",
-		Query:          "select * from people where first_name in ('Homer', 40)",
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-	},
-	{
-		Name:           "select *, in clause, mixed numeric types",
-		Query:          "select * from people where age in (-10.0, 40)",
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-	},
-	{
-		Name:           "select *, not in clause",
-		Query:          "select * from people where first_name not in ('Homer', 'Marge')",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause single element",
-		Query:          "select * from people where first_name in ('Homer')",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, in clause single type mismatch",
-		Query:          "select * from people where first_name in (1.0)",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is null clause ",
-		Query:          "select * from people where uuid is null",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is not null clause ",
-		Query:          "select * from people where uuid is not null",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is true clause ",
-		Query:          "select * from people where is_married is true",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is not true clause ",
-		Query:          "select * from people where is_married is not true",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is false clause ",
-		Query:          "select * from people where is_married is false",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is not false clause ",
-		Query:          "select * from people where is_married is not false",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, is true clause on non-bool column",
-		Query:          "select * from people where age is true",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, AllPeopleRows...),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "binary expression in select",
-		Query:          "select age + 1 as a from people where is_married order by a",
-		ExpectedRows:   ToSqlRows(NewResultSetSchema("a", types.IntKind), NewResultSetRow(types.Int(39)), NewResultSetRow(types.Int(41))),
-		ExpectedSchema: NewResultSetSchema("a", types.IntKind),
-	},
-	{
-		Name:         "and expression in select",
-		Query:        "select is_married and age >= 40 from people where last_name = 'Simpson' order by id limit 2",
-		ExpectedRows: []sql.Row{{true}, {false}},
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{Name: "is_married and age >= 40", Type: sql.Int8},
+func BasicSelectTests() []SelectTest {
+	var headCommitHash string
+	switch types.Format_Default {
+	case types.Format_DOLT:
+		headCommitHash = "ias4mf52sgeig337ce2le7ov9vpltppr"
+	case types.Format_LD_1:
+		headCommitHash = "73hc2robs4v0kt9taoe3m5hd49dmrgun"
+	}
+
+	return []SelectTest{
+		{
+			Name:           "select * on primary key",
+			Query:          "select * from people where id = 2",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
 		},
-	},
-	{
-		Name:  "or expression in select",
-		Query: "select first_name, age <= 10 or age >= 40 as not_marge from people where last_name = 'Simpson' order by id desc",
-		ExpectedRows: []sql.Row{
-			{"Lisa", true},
-			{"Bart", true},
-			{"Marge", false},
-			{"Homer", true},
+		{
+			Name:           "select * ",
+			Query:          "select * from people",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
 		},
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{Name: "first_name", Type: typeinfo.StringDefaultType.ToSqlType()},
-			&sql.Column{Name: "not_marge", Type: sql.Int8},
+		{
+			Name:           "select *, limit 1",
+			Query:          "select * from people limit 1",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
 		},
-	},
-	{
-		Name:           "unary expression in select",
-		Query:          "select -age as age from people where is_married order by age",
-		ExpectedRows:   ToSqlRows(NewResultSetSchema("age", types.IntKind), NewResultSetRow(types.Int(-40)), NewResultSetRow(types.Int(-38))),
-		ExpectedSchema: NewResultSetSchema("age", types.IntKind),
-	},
-	{
-		Name:            "unary expression in select, alias named after column",
-		Query:           "select -age as age from people where is_married order by people.age",
-		ExpectedRows:    ToSqlRows(NewResultSetSchema("age", types.IntKind), NewResultSetRow(types.Int(-38)), NewResultSetRow(types.Int(-40))),
-		ExpectedSchema:  NewResultSetSchema("age", types.IntKind),
-		SkipOnSqlEngine: true, // this seems to be a bug in the engine
-	},
-	{
-		Name:           "select *, -column",
-		Query:          "select * from people where -rating = -8.5",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, -column, string type",
-		Query:          "select * from people where -first_name = 'Homer'",
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, AllPeopleRows...), // A little weird, but correct due to mysql type conversion rules (both expression evaluate to 0 after conversion)
-	},
-	{
-		Name:           "select *, binary + in where",
-		Query:          "select * from people where age + 1 = 41",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, binary - in where",
-		Query:          "select * from people where age - 1 = 39",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, binary / in where",
-		Query:          "select * from people where age / 2 = 20",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, binary * in where",
-		Query:          "select * from people where age * 2 = 80",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, binary % in where",
-		Query:          "select * from people where age % 4 = 0",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Lisa, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select *, complex binary expr in where",
-		Query:          "select * from people where age / 4 + 2 * 2 = 14",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:        "select *, binary + in where type mismatch",
-		Query:       "select * from people where first_name + 1 = 41",
-		ExpectedErr: "Type mismatch evaluating expression 'first_name + 1'",
-	},
-	{
-		Name:        "select *, binary - in where type mismatch",
-		Query:       "select * from people where first_name - 1 = 39",
-		ExpectedErr: "Type mismatch evaluating expression 'first_name - 1'",
-	},
-	{
-		Name:        "select *, binary / in where type mismatch",
-		Query:       "select * from people where first_name / 2 = 20",
-		ExpectedErr: "Type mismatch evaluating expression 'first_name / 2'",
-	},
-	{
-		Name:        "select *, binary * in where type mismatch",
-		Query:       "select * from people where first_name * 2 = 80",
-		ExpectedErr: "Type mismatch evaluating expression 'first_name * 2'",
-	},
-	{
-		Name:        "select *, binary % in where type mismatch",
-		Query:       "select * from people where first_name % 4 = 0",
-		ExpectedErr: "Type mismatch evaluating expression 'first_name % 4'",
-	},
-	{
-		Name:           "select * with where, order by",
-		Query:          "select * from people where `uuid` is not null and first_name <> 'Marge' order by last_name desc, age",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Lisa, Bart, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "select subset of cols",
-		Query:          "select first_name, last_name from people where age >= 40",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
-		ExpectedSchema: CompressSchema(PeopleTestSchema, "first_name", "last_name"),
-	},
-	{
-		Name:           "column aliases",
-		Query:          "select first_name as f, last_name as l from people where age >= 40",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
-		ExpectedSchema: NewResultSetSchema("f", types.StringKind, "l", types.StringKind),
-	},
-	{
-		Name:           "duplicate column aliases",
-		Query:          "select first_name as f, last_name as f from people where age >= 40",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
-		ExpectedSchema: NewResultSetSchema("f", types.StringKind, "f", types.StringKind),
-	},
-	{
-		Name:  "column selected more than once",
-		Query: "select first_name, first_name from people where age >= 40 order by id",
-		ExpectedRows: []sql.Row{
-			{"Homer", "Homer"},
-			{"Moe", "Moe"},
-			{"Barney", "Barney"},
+		{
+			Name:           "select *, limit 1 offset 0",
+			Query:          "select * from people limit 0,1",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
 		},
-		ExpectedSchema: NewResultSetSchema("first_name", types.StringKind, "first_name", types.StringKind),
-	},
-	{
-		Name:        "duplicate table selection",
-		Query:       "select first_name as f, last_name as f from people, people where age >= 40",
-		ExpectedErr: "Non-unique table name / alias: people",
-	},
-	{
-		Name:        "duplicate table alias",
-		Query:       "select * from people p, people p where age >= 40",
-		ExpectedErr: "Non-unique table name / alias: 'p'",
-	},
-	{
-		Name:            "column aliases in where clause",
-		Query:           `select first_name as f, last_name as l from people where f = "Homer"`,
-		ExpectedErr:     "Unknown column: 'f'",
-		SkipOnSqlEngine: true, // this is actually a bug (aliases aren't usable in filters)
-	},
-	{
-		Name:           "select subset of columns with order by",
-		Query:          "select first_name from people order by age, first_name",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name"), Lisa, Bart, Marge, Barney, Homer, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema, "first_name"),
-	},
-	{
-		Name:           "column aliases with order by",
-		Query:          "select first_name as f from people order by age, f",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name"), Lisa, Bart, Marge, Barney, Homer, Moe),
-		ExpectedSchema: NewResultSetSchema("f", types.StringKind),
-	},
-	{
-		Name:            "ambiguous column in order by",
-		Query:           "select first_name as f, last_name as f from people order by f",
-		ExpectedErr:     "Ambiguous column: 'f'",
-		SkipOnSqlEngine: true, // this is a bug in go-mysql-server
-	},
-	{
-		Name:           "table aliases",
-		Query:          "select p.first_name as f, p.last_name as l from people p where p.first_name = 'Homer'",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer),
-		ExpectedSchema: NewResultSetSchema("f", types.StringKind, "l", types.StringKind),
-	},
-	{
-		Name:           "table aliases without column aliases",
-		Query:          "select p.first_name, p.last_name from people p where p.first_name = 'Homer'",
-		ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer),
-		ExpectedSchema: NewResultSetSchema("first_name", types.StringKind, "last_name", types.StringKind),
-	},
-	{
-		Name:        "table aliases with bad alias",
-		Query:       "select m.first_name as f, p.last_name as l from people p where p.f = 'Homer'",
-		ExpectedErr: "Unknown table: 'm'",
-	},
-	{
-		Name: "column aliases, all columns",
-		Query: `select id as i, first_name as f, last_name as l, is_married as m, age as a,
-					rating as r, uuid as u, num_episodes as n from people
-					where age >= 40`,
-		ExpectedRows: ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
-		ExpectedSchema: NewResultSetSchema("i", types.IntKind, "f", types.StringKind,
-			"l", types.StringKind, "m", types.BoolKind, "a", types.IntKind, "r", types.FloatKind,
-			"u", types.UUIDKind, "n", types.UintKind),
-	},
-	{
-		Name:           "select *, not equals",
-		Query:          "select * from people where age <> 40",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa, Moe),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "empty result set",
-		Query:          "select * from people where age > 80",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-	},
-	{
-		Name:           "empty result set with columns",
-		Query:          "select id, age from people where age > 80",
-		ExpectedRows:   ToSqlRows(PeopleTestSchema),
-		ExpectedSchema: CompressSchema(PeopleTestSchema, "id", "age"),
-	},
-	{
-		Name:        "unknown table",
-		Query:       "select * from dne",
-		ExpectedErr: `Unknown table: 'dne'`,
-	},
-	{
-		Name:        "unknown diff table",
-		Query:       "select * from dolt_diff_dne",
-		ExpectedErr: `Unknown table: 'dolt_diff_dne'`,
-	},
-	{
-		Name:        "unknown diff table",
-		Query:       "select * from dolt_commit_diff_dne",
-		ExpectedErr: `Unknown table: 'dolt_commit_diff_dne'`,
-	},
-	{
-		Name:        "unknown history table",
-		Query:       "select * from dolt_history_dne",
-		ExpectedErr: `Unknown table: 'dolt_history_dne'`,
-	},
-	{
-		Name:        "unknown table in join",
-		Query:       "select * from people join dne",
-		ExpectedErr: `Unknown table: 'dne'`,
-	},
-	{
-		Name:  "no table",
-		Query: "select 1",
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{
-				Name: "1",
-				Type: sql.Int8,
+		{
+			Name:           "select *, limit 1 offset 1",
+			Query:          "select * from people limit 1 offset 1;",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, limit 1 offset 5",
+			Query:          "select * from people limit 5,1",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, limit 1 offset 6",
+			Query:          "select * from people limit 6,1",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, limit 0",
+			Query:          "select * from people limit 0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, limit 0 offset 0",
+			Query:          "select * from people limit 0,0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:        "select *, limit -1",
+			Query:       "select * from people limit -1",
+			ExpectedErr: "Limit must be >= 0 if supplied",
+		},
+		{
+			Name:        "select *, offset -1",
+			Query:       "select * from people limit -1,1",
+			ExpectedErr: "Offset must be >= 0 if supplied",
+		},
+		{
+			Name:           "select *, limit 100",
+			Query:          "select * from people limit 100",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < int",
+			Query:          "select * from people where age < 40",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < int, limit 1",
+			Query:          "select * from people where age < 40 limit 1",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < int, limit 2",
+			Query:          "select * from people where age < 40 limit 2",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < int, limit 100",
+			Query:          "select * from people where age < 40 limit 100",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by int",
+			Query:          "select * from people order by id",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by int desc",
+			Query:          "select * from people order by id desc",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Moe, Lisa, Bart, Marge, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by float",
+			Query:          "select * from people order by rating",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Moe, Marge, Homer, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by string",
+			Query:          "select * from people order by first_name",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Bart, Homer, Lisa, Marge, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by string,string",
+			Query:          "select * from people order by last_name desc, first_name asc",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Bart, Homer, Lisa, Marge, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by with limit",
+			Query:          "select * from people order by first_name limit 2",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney, Bart),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, order by string,string with limit",
+			Query:          "select * from people order by last_name desc, first_name asc limit 2",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Bart),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where > int reversed",
+			Query:          "select * from people where 40 > age",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where <= int",
+			Query:          "select * from people where age <= 40",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where >= int reversed",
+			Query:          "select * from people where 40 >= age",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where > int",
+			Query:          "select * from people where age > 40",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < int reversed",
+			Query:          "select * from people where 40 < age",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where >= int",
+			Query:          "select * from people where age >= 40",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where <= int reversed",
+			Query:          "select * from people where 40 <= age",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where > string",
+			Query:          "select * from people where last_name > 'Simpson'",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < string",
+			Query:          "select * from people where last_name < 'Simpson'",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where = string",
+			Query:          "select * from people where last_name = 'Simpson'",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where > float",
+			Query:          "select * from people where rating > 8.0 order by id",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < float",
+			Query:          "select * from people where rating < 8.0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where = float",
+			Query:          "select * from people where rating = 8.0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where < float reversed",
+			Query:          "select * from people where 8.0 < rating",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where > float reversed",
+			Query:          "select * from people where 8.0 > rating",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where = float reversed",
+			Query:          "select * from people where 8.0 = rating",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where bool = ",
+			Query:          "select * from people where is_married = true",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where bool = false ",
+			Query:          "select * from people where is_married = false",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where bool <> ",
+			Query:          "select * from people where is_married <> false",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, where bool",
+			Query:          "select * from people where is_married",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, and clause",
+			Query:          "select * from people where is_married and age > 38",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, or clause",
+			Query:          "select * from people where is_married or age < 20",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge, Bart, Lisa),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause string",
+			Query:          "select * from people where first_name in ('Homer', 'Marge')",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause integer",
+			Query:          "select * from people where age in (-10, 40)",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause float",
+			Query:          "select * from people where rating in (-10.0, 8.5)",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause, mixed types",
+			Query:          "select * from people where first_name in ('Homer', 40)",
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+		},
+		{
+			Name:           "select *, in clause, mixed numeric types",
+			Query:          "select * from people where age in (-10.0, 40)",
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+		},
+		{
+			Name:           "select *, not in clause",
+			Query:          "select * from people where first_name not in ('Homer', 'Marge')",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause single element",
+			Query:          "select * from people where first_name in ('Homer')",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, in clause single type mismatch",
+			Query:          "select * from people where first_name in (1.0)",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is null clause ",
+			Query:          "select * from people where uuid is null",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is not null clause ",
+			Query:          "select * from people where uuid is not null",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is true clause ",
+			Query:          "select * from people where is_married is true",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is not true clause ",
+			Query:          "select * from people where is_married is not true",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is false clause ",
+			Query:          "select * from people where is_married is false",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Bart, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is not false clause ",
+			Query:          "select * from people where is_married is not false",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Marge),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, is true clause on non-bool column",
+			Query:          "select * from people where age is true",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, AllPeopleRows...),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "binary expression in select",
+			Query:          "select age + 1 as a from people where is_married order by a",
+			ExpectedRows:   ToSqlRows(NewResultSetSchema("a", types.IntKind), NewResultSetRow(types.Int(39)), NewResultSetRow(types.Int(41))),
+			ExpectedSchema: NewResultSetSchema("a", types.IntKind),
+		},
+		{
+			Name:         "and expression in select",
+			Query:        "select is_married and age >= 40 from people where last_name = 'Simpson' order by id limit 2",
+			ExpectedRows: []sql.Row{{true}, {false}},
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{Name: "is_married and age >= 40", Type: gmstypes.Boolean},
 			},
 		},
-		ExpectedRows: []sql.Row{{int8(1)}},
-	},
-	{
-		Name:        "unknown column in where",
-		Query:       "select * from people where dne > 8.0",
-		ExpectedErr: `Unknown column: 'dne'`,
-	},
-	{
-		Name:        "unknown column in order by",
-		Query:       "select * from people where rating > 8.0 order by dne",
-		ExpectedErr: `Unknown column: 'dne'`,
-	},
-	{
-		Name:        "unsupported comparison",
-		Query:       "select * from people where function(first_name)",
-		ExpectedErr: "not supported",
-	},
-	{
-		Name:           "type mismatch in where clause",
-		Query:          `select * from people where id = "0"`,
-		ExpectedSchema: CompressSchema(PeopleTestSchema),
-		ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
-	},
-	{
-		Name:  "select * from log system table",
-		Query: "select * from dolt_log",
-		ExpectedRows: []sql.Row{
-			{
-				"so275enkvulb96mkckbun1kjo9seg7c9",
-				"billy bob",
-				"bigbillieb@fake.horse",
-				time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(LoadedLocalLocation()),
-				"Initialize data repository",
+		{
+			Name:  "or expression in select",
+			Query: "select first_name, age <= 10 or age >= 40 as not_marge from people where last_name = 'Simpson' order by id desc",
+			ExpectedRows: []sql.Row{
+				{"Lisa", true},
+				{"Bart", true},
+				{"Marge", false},
+				{"Homer", true},
+			},
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{Name: "first_name", Type: typeinfo.StringDefaultType.ToSqlType()},
+				&sql.Column{Name: "not_marge", Type: gmstypes.Boolean},
 			},
 		},
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{Name: "commit_hash", Type: sql.Text},
-			&sql.Column{Name: "committer", Type: sql.Text},
-			&sql.Column{Name: "email", Type: sql.Text},
-			&sql.Column{Name: "date", Type: sql.Datetime},
-			&sql.Column{Name: "message", Type: sql.Text},
+		{
+			Name:           "unary expression in select",
+			Query:          "select -age as age from people where is_married order by age",
+			ExpectedRows:   ToSqlRows(NewResultSetSchema("age", types.IntKind), NewResultSetRow(types.Int(-40)), NewResultSetRow(types.Int(-38))),
+			ExpectedSchema: NewResultSetSchema("age", types.IntKind),
 		},
-	},
-	{
-		Name:         "select * from conflicts system table",
-		Query:        "select * from dolt_conflicts",
-		ExpectedRows: []sql.Row{},
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{Name: "table", Type: sql.Text},
-			&sql.Column{Name: "num_conflicts", Type: sql.Uint64},
+		{
+			Name:            "unary expression in select, alias named after column",
+			Query:           "select -age as age from people where is_married order by people.age",
+			ExpectedRows:    ToSqlRows(NewResultSetSchema("age", types.IntKind), NewResultSetRow(types.Int(-38)), NewResultSetRow(types.Int(-40))),
+			ExpectedSchema:  NewResultSetSchema("age", types.IntKind),
+			SkipOnSqlEngine: true, // this seems to be a bug in the engine
 		},
-	},
-	{
-		Name:  "select * from branches system table",
-		Query: "select * from dolt_branches",
-		ExpectedRows: []sql.Row{
-			{
-				env.DefaultInitBranch,
-				"so275enkvulb96mkckbun1kjo9seg7c9",
-				"billy bob", "bigbillieb@fake.horse",
-				time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(LoadedLocalLocation()),
-				"Initialize data repository",
+		{
+			Name:           "select *, -column",
+			Query:          "select * from people where -rating = -8.5",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, -column, string type",
+			Query:          "select * from people where -first_name = 'Homer'",
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, AllPeopleRows...), // A little weird, but correct due to mysql type conversion rules (both expression evaluate to 0 after conversion)
+		},
+		{
+			Name:           "select *, binary + in where",
+			Query:          "select * from people where age + 1 = 41",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary - in where",
+			Query:          "select * from people where age - 1 = 39",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary / in where",
+			Query:          "select * from people where age / 2 = 20",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary * in where",
+			Query:          "select * from people where age * 2 = 80",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary % in where",
+			Query:          "select * from people where age % 4 = 0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Lisa, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, complex binary expr in where",
+			Query:          "select * from people where age / 4 + 2 * 2 = 14",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary + in where type mismatch",
+			Query:          "select * from people where first_name + 1 = 41",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary - in where type mismatch",
+			Query:          "select * from people where first_name - 1 = 39",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary / in where type mismatch",
+			Query:          "select * from people where first_name / 2 = 20",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary * in where type mismatch",
+			Query:          "select * from people where first_name * 2 = 80",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select *, binary % in where type mismatch",
+			Query:          "select * from people where first_name % 4 = 0",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, AllPeopleRows...), // invalid value is considered as 0
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select * with where, order by",
+			Query:          "select * from people where `uuid` is not null and first_name <> 'Marge' order by last_name desc, age",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Moe, Lisa, Bart, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "select subset of cols",
+			Query:          "select first_name, last_name from people where age >= 40",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
+			ExpectedSchema: CompressSchema(PeopleTestSchema, "first_name", "last_name"),
+		},
+		{
+			Name:           "column aliases",
+			Query:          "select first_name as f, last_name as l from people where age >= 40",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
+			ExpectedSchema: NewResultSetSchema("f", types.StringKind, "l", types.StringKind),
+		},
+		{
+			Name:           "duplicate column aliases",
+			Query:          "select first_name as f, last_name as f from people where age >= 40",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer, Moe, Barney),
+			ExpectedSchema: NewResultSetSchema("f", types.StringKind, "f", types.StringKind),
+		},
+		{
+			Name:  "column selected more than once",
+			Query: "select first_name, first_name from people where age >= 40 order by id",
+			ExpectedRows: []sql.Row{
+				{"Homer", "Homer"},
+				{"Moe", "Moe"},
+				{"Barney", "Barney"},
+			},
+			ExpectedSchema: NewResultSetSchema("first_name", types.StringKind, "first_name", types.StringKind),
+		},
+		{
+			Name:        "duplicate table selection",
+			Query:       "select first_name as f, last_name as f from people, people where age >= 40",
+			ExpectedErr: "Non-unique table name / alias: people",
+		},
+		{
+			Name:        "duplicate table alias",
+			Query:       "select * from people p, people p where age >= 40",
+			ExpectedErr: "Non-unique table name / alias: 'p'",
+		},
+		{
+			Name:            "column aliases in where clause",
+			Query:           `select first_name as f, last_name as l from people where f = "Homer"`,
+			ExpectedErr:     "Unknown column: 'f'",
+			SkipOnSqlEngine: true, // this is actually a bug (aliases aren't usable in filters)
+		},
+		{
+			Name:           "select subset of columns with order by",
+			Query:          "select first_name from people order by age, first_name",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name"), Lisa, Bart, Marge, Barney, Homer, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema, "first_name"),
+		},
+		{
+			Name:           "column aliases with order by",
+			Query:          "select first_name as f from people order by age, f",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name"), Lisa, Bart, Marge, Barney, Homer, Moe),
+			ExpectedSchema: NewResultSetSchema("f", types.StringKind),
+		},
+		{
+			Name:            "ambiguous column in order by",
+			Query:           "select first_name as f, last_name as f from people order by f",
+			ExpectedErr:     "Ambiguous column: 'f'",
+			SkipOnSqlEngine: true, // this is a bug in go-mysql-server
+		},
+		{
+			Name:           "table aliases",
+			Query:          "select p.first_name as f, p.last_name as l from people p where p.first_name = 'Homer'",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer),
+			ExpectedSchema: NewResultSetSchema("f", types.StringKind, "l", types.StringKind),
+		},
+		{
+			Name:           "table aliases without column aliases",
+			Query:          "select p.first_name, p.last_name from people p where p.first_name = 'Homer'",
+			ExpectedRows:   ToSqlRows(SubsetSchema(PeopleTestSchema, "first_name", "last_name"), Homer),
+			ExpectedSchema: NewResultSetSchema("first_name", types.StringKind, "last_name", types.StringKind),
+		},
+		{
+			Name:        "table aliases with bad alias",
+			Query:       "select m.first_name as f, p.last_name as l from people p where p.f = 'Homer'",
+			ExpectedErr: "Unknown table: 'm'",
+		},
+		{
+			Name: "column aliases, all columns",
+			Query: `select id as i, first_name as f, last_name as l, is_married as m, age as a,
+						rating as r, uuid as u, num_episodes as n from people
+						where age >= 40`,
+			ExpectedRows: ToSqlRows(PeopleTestSchema, Homer, Moe, Barney),
+			ExpectedSchema: NewResultSetSchema("i", types.IntKind, "f", types.StringKind,
+				"l", types.StringKind, "m", types.IntKind, "a", types.IntKind, "r", types.FloatKind,
+				"u", types.StringKind, "n", types.UintKind),
+		},
+		{
+			Name:           "select *, not equals",
+			Query:          "select * from people where age <> 40",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Marge, Bart, Lisa, Moe),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "empty result set",
+			Query:          "select * from people where age > 80",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+		},
+		{
+			Name:           "empty result set with columns",
+			Query:          "select id, age from people where age > 80",
+			ExpectedRows:   ToSqlRows(PeopleTestSchema),
+			ExpectedSchema: CompressSchema(PeopleTestSchema, "id", "age"),
+		},
+		{
+			Name:        "unknown table",
+			Query:       "select * from dne",
+			ExpectedErr: `Unknown table: 'dne'`,
+		},
+		{
+			Name:        "unknown diff table",
+			Query:       "select * from dolt_diff_dne",
+			ExpectedErr: `Unknown table: 'dolt_diff_dne'`,
+		},
+		{
+			Name:        "unknown diff table",
+			Query:       "select * from dolt_commit_diff_dne",
+			ExpectedErr: `Unknown table: 'dolt_commit_diff_dne'`,
+		},
+		{
+			Name:        "unknown history table",
+			Query:       "select * from dolt_history_dne",
+			ExpectedErr: `Unknown table: 'dolt_history_dne'`,
+		},
+		{
+			Name:        "unknown table in join",
+			Query:       "select * from people join dne",
+			ExpectedErr: `Unknown table: 'dne'`,
+		},
+		{
+			Name:  "no table",
+			Query: "select 1",
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{
+					Name: "1",
+					Type: gmstypes.Int8,
+				},
+			},
+			ExpectedRows: []sql.Row{{int8(1)}},
+		},
+		{
+			Name:        "unknown column in where",
+			Query:       "select * from people where dne > 8.0",
+			ExpectedErr: `Unknown column: 'dne'`,
+		},
+		{
+			Name:        "unknown column in order by",
+			Query:       "select * from people where rating > 8.0 order by dne",
+			ExpectedErr: `Unknown column: 'dne'`,
+		},
+		{
+			Name:        "unsupported comparison",
+			Query:       "select * from people where function(first_name)",
+			ExpectedErr: "not supported",
+		},
+		{
+			Name:           "type mismatch in where clause",
+			Query:          `select * from people where id = "0"`,
+			ExpectedSchema: CompressSchema(PeopleTestSchema),
+			ExpectedRows:   ToSqlRows(PeopleTestSchema, Homer),
+		},
+		{
+			Name:  "select * from log system table",
+			Query: "select * from dolt_log",
+			ExpectedRows: []sql.Row{
+				{
+					headCommitHash,
+					"billy bob",
+					"bigbillieb@fake.horse",
+					time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(LoadedLocalLocation()),
+					"Initialize data repository",
+				},
+			},
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{Name: "commit_hash", Type: gmstypes.Text},
+				&sql.Column{Name: "committer", Type: gmstypes.Text},
+				&sql.Column{Name: "email", Type: gmstypes.Text},
+				&sql.Column{Name: "date", Type: gmstypes.Datetime},
+				&sql.Column{Name: "message", Type: gmstypes.Text},
 			},
 		},
-		ExpectedSqlSchema: sql.Schema{
-			&sql.Column{Name: "name", Type: sql.Text},
-			&sql.Column{Name: "hash", Type: sql.Text},
-			&sql.Column{Name: "latest_committer", Type: sql.Text},
-			&sql.Column{Name: "latest_committer_email", Type: sql.Text},
-			&sql.Column{Name: "latest_commit_date", Type: sql.Datetime},
-			&sql.Column{Name: "latest_commit_message", Type: sql.Text},
+		{
+			Name:         "select * from conflicts system table",
+			Query:        "select * from dolt_conflicts",
+			ExpectedRows: []sql.Row{},
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{Name: "table", Type: gmstypes.Text},
+				&sql.Column{Name: "num_conflicts", Type: gmstypes.Uint64},
+			},
 		},
-	},
+		{
+			Name:  "select * from branches system table",
+			Query: "select * from dolt_branches",
+			ExpectedRows: []sql.Row{
+				{
+					env.DefaultInitBranch,
+					headCommitHash,
+					"billy bob", "bigbillieb@fake.horse",
+					time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).In(LoadedLocalLocation()),
+					"Initialize data repository",
+					"",
+					"",
+				},
+			},
+			ExpectedSqlSchema: sql.Schema{
+				&sql.Column{Name: "name", Type: gmstypes.Text},
+				&sql.Column{Name: "hash", Type: gmstypes.Text},
+				&sql.Column{Name: "latest_committer", Type: gmstypes.Text},
+				&sql.Column{Name: "latest_committer_email", Type: gmstypes.Text},
+				&sql.Column{Name: "latest_commit_date", Type: gmstypes.Datetime},
+				&sql.Column{Name: "latest_commit_message", Type: gmstypes.Text},
+				&sql.Column{Name: "remote", Type: gmstypes.Text},
+				&sql.Column{Name: "branch", Type: gmstypes.Text},
+			},
+		},
+	}
 }
 
 var sqlDiffSchema = sql.Schema{
-	&sql.Column{Name: "to_id", Type: sql.Int64},
+	&sql.Column{Name: "to_id", Type: gmstypes.Int64},
 	&sql.Column{Name: "to_first_name", Type: typeinfo.StringDefaultType.ToSqlType()},
 	&sql.Column{Name: "to_last_name", Type: typeinfo.StringDefaultType.ToSqlType()},
 	&sql.Column{Name: "to_addr", Type: typeinfo.StringDefaultType.ToSqlType()},
-	&sql.Column{Name: "from_id", Type: sql.Int64},
+	&sql.Column{Name: "from_id", Type: gmstypes.Int64},
 	&sql.Column{Name: "from_first_name", Type: typeinfo.StringDefaultType.ToSqlType()},
 	&sql.Column{Name: "from_last_name", Type: typeinfo.StringDefaultType.ToSqlType()},
 	&sql.Column{Name: "from_addr", Type: typeinfo.StringDefaultType.ToSqlType()},
-	&sql.Column{Name: "diff_type", Type: sql.Text},
+	&sql.Column{Name: "diff_type", Type: typeinfo.StringDefaultType.ToSqlType()},
 }
 
 var SelectDiffTests = []SelectTest{
@@ -960,215 +982,13 @@ var AsOfTests = []SelectTest{
 		Query:       "select * from test_table as of CONVERT('1970-01-01 02:00:00', DATETIME)",
 		ExpectedErr: "not found",
 	},
-}
-
-// SQL is supposed to be case insensitive. These are tests of that promise.
-// Many of these are currently broken in go-myqsl-server. The queries return the correct results in all cases, but the
-// column names in the result schemas often have the wrong case. They sometimes use the case from the table, rather
-// than the case of the expression in the query (the correct behavior). This is a minor issue, but we should fix it
-// eventually.
-var CaseSensitivityTests = []SelectTest{
 	{
-		Name: "table name has mixed case, select lower case",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:          "select test from mixedcase",
-		ExpectedSchema: NewResultSetSchema("test", types.StringKind),
-		ExpectedRows:   []sql.Row{{"1"}},
-	},
-	{
-		Name: "table name has mixed case, select upper case",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:          "select test from MIXEDCASE",
-		ExpectedSchema: NewResultSetSchema("test", types.StringKind),
-		ExpectedRows:   []sql.Row{{"1"}},
-	},
-	{
-		Name: "qualified select *",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:          "select mixedcAse.* from MIXEDCASE",
-		ExpectedSchema: NewResultSetSchema("test", types.StringKind),
-		ExpectedRows:   []sql.Row{{"1"}},
-	},
-	{
-		Name: "qualified select column",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:           "select mixedcAse.TeSt from MIXEDCASE",
-		ExpectedSchema:  NewResultSetSchema("TeSt", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "table alias select *",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:          "select Mc.* from MIXEDCASE as mc",
-		ExpectedSchema: NewResultSetSchema("test", types.StringKind),
-		ExpectedRows:   []sql.Row{{"1"}},
-	},
-	{
-		Name: "table alias select column",
-		AdditionalSetup: CreateTableWithRowsFn("MiXeDcAsE",
-			NewSchema("test", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:           "select mC.TeSt from MIXEDCASE as MC",
-		ExpectedSchema:  NewResultSetSchema("TeSt", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "multiple tables with the same case-insensitive name, exact match",
-		AdditionalSetup: Compose(
-			// the table name passed to NewSchemaForTable isn't important, except to get unique tags
-			CreateTableWithRowsFn("tableName", NewSchemaForTable("tableName1", "test", types.StringKind), []types.Value{types.String("1")}),
-			CreateTableWithRowsFn("TABLENAME", NewSchemaForTable("TABLENAME2", "test", types.StringKind)),
-			CreateTableWithRowsFn("tablename", NewSchemaForTable("tablename3", "test", types.StringKind)),
-		),
-		Query:          "select test from tableName",
-		ExpectedSchema: NewResultSetSchema("test", types.StringKind),
-		ExpectedRows:   []sql.Row{{"1"}},
-	},
-	{
-		Name: "alias with same name as table",
-		AdditionalSetup: Compose(
-			CreateTableWithRowsFn("tableName", NewSchema("test", types.StringKind)),
-			CreateTableWithRowsFn("other", NewSchema("othercol", types.StringKind)),
-		),
-		Query:       "select other.test from tablename as other, other",
-		ExpectedErr: "Non-unique table name / alias: 'other'",
-	},
-	{
-		Name: "two table aliases with same name",
-		AdditionalSetup: Compose(
-			CreateTableWithRowsFn("tableName", NewSchema("test", types.StringKind)),
-			CreateTableWithRowsFn("other", NewSchema("othercol", types.StringKind)),
-		),
-		Query:       "select bad.test from tablename as bad, other as bad",
-		ExpectedErr: "Non-unique table name / alias: 'bad'",
-	},
-	{
-		Name: "column name has mixed case, select lower case",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema("MiXeDcAsE", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:           "select mixedcase from test",
-		ExpectedSchema:  NewResultSetSchema("mixedcase", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "column name has mixed case, select upper case",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema("MiXeDcAsE", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:           "select MIXEDCASE from test",
-		ExpectedSchema:  NewResultSetSchema("MIXEDCASE", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "select with multiple matching columns, exact match",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema("MiXeDcAsE", types.StringKind, "mixedcase", types.StringKind),
-			[]types.Value{types.String("1"), types.String("2")}),
-		Query:           "select mixedcase from test",
-		ExpectedSchema:  NewResultSetSchema("mixedcase", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true, // TODO: table should be illegal. field names cannot be the same case-insensitive
-	},
-	{
-		Name: "column is reserved word, select not backticked",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema(
-				"Timestamp", types.StringKind,
-				"and", types.StringKind,
-				"or", types.StringKind,
-				"select", types.StringKind),
-			[]types.Value{types.String("1"), types.String("1.1"), types.String("aaa"), types.String("create")}),
-		Query:          "select Timestamp from test",
-		ExpectedRows:   []sql.Row{{"1"}},
-		ExpectedSchema: NewResultSetSchema("Timestamp", types.StringKind),
-	},
-	{
-		Name: "column is reserved word, qualified with table alias",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema(
-				"Timestamp", types.StringKind,
-				"and", types.StringKind,
-				"or", types.StringKind,
-				"select", types.StringKind),
-			[]types.Value{types.String("1"), types.String("1.1"), types.String("aaa"), types.String("create")}),
-		Query:          "select t.Timestamp from test as t",
-		ExpectedRows:   []sql.Row{{"1"}},
-		ExpectedSchema: NewResultSetSchema("Timestamp", types.StringKind),
-	},
-	{
-		Name: "column is reserved word, select not backticked #2",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema("YeAr", types.StringKind),
-			[]types.Value{types.String("1")}),
-		Query:           "select Year from test",
-		ExpectedSchema:  NewResultSetSchema("Year", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "column is reserved word, select backticked",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema(
-				"Timestamp", types.StringKind,
-				"and", types.StringKind,
-				"or", types.StringKind,
-				"select", types.StringKind),
-			[]types.Value{types.String("1"), types.String("1.1"), types.String("aaa"), types.String("create")}),
-		Query:           "select `Timestamp` from test",
-		ExpectedRows:    []sql.Row{{"1"}},
-		ExpectedSchema:  NewResultSetSchema("Timestamp", types.StringKind),
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "column is reserved word, select backticked #2",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema(
-				"Year", types.StringKind,
-				"and", types.StringKind,
-				"or", types.StringKind,
-				"select", types.StringKind),
-			[]types.Value{types.String("1"), types.String("1.1"), types.String("aaa"), types.String("create")}),
-		Query: "select `Year`, `OR`, `SELect`, `anD` from test",
-		ExpectedSchema: NewResultSetSchema(
-			"Year", types.StringKind,
-			"OR", types.StringKind,
-			"SELect", types.StringKind,
-			"anD", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1", "aaa", "create", "1.1"}},
-		SkipOnSqlEngine: true,
-	},
-	{
-		Name: "column is reserved word, table qualified",
-		AdditionalSetup: CreateTableWithRowsFn("test",
-			NewSchema(
-				"Year", types.StringKind,
-				"and", types.StringKind,
-				"or", types.StringKind,
-				"select", types.StringKind),
-			[]types.Value{types.String("1"), types.String("1.1"), types.String("aaa"), types.String("create")}),
-		Query: "select Year, t.OR, t.SELect, t.anD from test t",
-		ExpectedSchema: NewResultSetSchema(
-			"Year", types.StringKind,
-			"OR", types.StringKind,
-			"SELect", types.StringKind,
-			"anD", types.StringKind),
-		ExpectedRows:    []sql.Row{{"1", "aaa", "create", "1.1"}},
-		SkipOnSqlEngine: true,
+		Name: "select from dolt_docs as of main",
+		AdditionalSetup: CreateTableFn("dolt_docs", doltdb.DocsSchema,
+			"INSERT INTO dolt_docs VALUES ('LICENSE.md','A license')"),
+		Query:          "select * from dolt_docs as of 'main'",
+		ExpectedRows:   []sql.Row{{"LICENSE.md", "A license"}},
+		ExpectedSchema: CompressSchema(doltdb.DocsSchema),
 	},
 }
 
@@ -1437,22 +1257,17 @@ var JoinTests = []SelectTest{
 }
 
 func TestSelect(t *testing.T) {
-	for _, test := range BasicSelectTests {
+	for _, test := range BasicSelectTests() {
 		t.Run(test.Name, func(t *testing.T) {
 			testSelectQuery(t, test)
 		})
 	}
 }
 
-func TestDiffQueries(t *testing.T) {
-	for _, test := range SelectDiffTests {
-		t.Run(test.Name, func(t *testing.T) {
-			testSelectDiffQuery(t, test)
-		})
-	}
-}
-
 func TestAsOfQueries(t *testing.T) {
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip("") // todo: convert to enginetests
+	}
 	for _, test := range AsOfTests {
 		t.Run(test.Name, func(t *testing.T) {
 			// AS OF queries use the same history as the diff tests, so exercise the same test setup
@@ -1471,40 +1286,19 @@ func TestJoins(t *testing.T) {
 	}
 }
 
-// Tests of case sensitivity handling
-func TestCaseSensitivity(t *testing.T) {
-	for _, tt := range CaseSensitivityTests {
-		t.Run(tt.Name, func(t *testing.T) {
-			testSelectQuery(t, tt)
-		})
-	}
-}
-
 var systemTableSelectTests = []SelectTest{
 	{
 		Name: "select from dolt_docs",
-		AdditionalSetup: CreateTableFn("dolt_docs",
-			doltdocs.DocsSchema,
-			NewRowWithSchema(doltdocs.DocsSchema,
-				types.String("LICENSE.md"),
-				types.String("A license")),
-		),
-		Query: "select * from dolt_docs",
-		ExpectedRows: ToSqlRows(CompressSchema(doltdocs.DocsSchema),
-			NewRow(types.String("LICENSE.md"), types.String("A license"))),
-		ExpectedSchema: CompressSchema(doltdocs.DocsSchema),
+		AdditionalSetup: CreateTableFn("dolt_docs", doltdb.DocsSchema,
+			"INSERT INTO dolt_docs VALUES ('LICENSE.md','A license')"),
+		Query:          "select * from dolt_docs",
+		ExpectedRows:   []sql.Row{{"LICENSE.md", "A license"}},
+		ExpectedSchema: CompressSchema(doltdb.DocsSchema),
 	},
 	{
 		Name: "select from dolt_query_catalog",
-		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName,
-			dtables.DoltQueryCatalogSchema,
-			NewRowWithSchema(dtables.DoltQueryCatalogSchema,
-				types.String("existingEntry"),
-				types.Uint(2),
-				types.String("example"),
-				types.String("select 2+2 from dual"),
-				types.String("description")),
-		),
+		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName, dtables.DoltQueryCatalogSchema,
+			"INSERT INTO dolt_query_catalog VALUES ('existingEntry', 2, 'example', 'select 2+2 from dual', 'description')"),
 		Query: "select * from dolt_query_catalog",
 		ExpectedRows: ToSqlRows(CompressSchema(dtables.DoltQueryCatalogSchema),
 			NewRow(types.String("existingEntry"), types.Uint(2), types.String("example"), types.String("select 2+2 from dual"), types.String("description")),
@@ -1513,19 +1307,11 @@ var systemTableSelectTests = []SelectTest{
 	},
 	{
 		Name: "select from dolt_schemas",
-		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName,
-			SchemasTableSchema(),
-			NewRowWithSchema(SchemasTableSchema(),
-				types.String("view"),
-				types.String("name"),
-				types.String("select 2+2 from dual"),
-				types.Int(1),
-			)),
-		Query: "select * from dolt_schemas",
-		ExpectedRows: ToSqlRows(CompressSchema(SchemasTableSchema()),
-			NewRow(types.String("view"), types.String("name"), types.String("select 2+2 from dual"), types.Int(1)),
-		),
-		ExpectedSchema: CompressSchema(SchemasTableSchema()),
+		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName, SchemaTableSchema(),
+			`CREATE VIEW name as select 2+2 from dual`),
+		Query:          "select * from dolt_schemas",
+		ExpectedRows:   []sql.Row{{"view", "name", "CREATE VIEW name as select 2+2 from dual", ignoreVal, "NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"}},
+		ExpectedSchema: CompressSchema(SchemaTableSchema()),
 	},
 }
 
@@ -1548,16 +1334,20 @@ func (tcc *testCommitClock) Now() time.Time {
 }
 
 func installTestCommitClock() func() {
-	oldNowFunc := doltdb.CommitNowFunc
-	oldCommitLoc := doltdb.CommitLoc
+	oldNowFunc := datas.CommitterDate
+	oldCommitLoc := datas.CommitLoc
 	tcc := &testCommitClock{}
-	doltdb.CommitNowFunc = tcc.Now
-	doltdb.CommitLoc = time.UTC
+	datas.CommitterDate = tcc.Now
+	datas.CommitLoc = time.UTC
 	return func() {
-		doltdb.CommitNowFunc = oldNowFunc
-		doltdb.CommitLoc = oldCommitLoc
+		datas.CommitterDate = oldNowFunc
+		datas.CommitLoc = oldCommitLoc
 	}
 }
+
+type testIgnoredValue struct{}
+
+var ignoreVal = testIgnoredValue{}
 
 // Tests the given query on a freshly created dataset, asserting that the result has the given schema and rows. If
 // expectedErr is set, asserts instead that the execution returns an error that matches.
@@ -1567,8 +1357,9 @@ func testSelectQuery(t *testing.T, test SelectTest) {
 	cleanup := installTestCommitClock()
 	defer cleanup()
 
-	dEnv := dtestutils.CreateTestEnv()
-	CreateTestDatabase(dEnv, t)
+	dEnv, err := CreateTestDatabase()
+	require.NoError(t, err)
+	defer dEnv.DoltDB.Close()
 
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
@@ -1585,7 +1376,18 @@ func testSelectQuery(t *testing.T, test SelectTest) {
 		require.NoError(t, err)
 	}
 
-	assert.Equal(t, test.ExpectedRows, actualRows)
+	// JSON columns must be compared using like so
+	assert.Equal(t, len(test.ExpectedRows), len(actualRows))
+	for i := 0; i < len(test.ExpectedRows); i++ {
+		assert.Equal(t, len(test.ExpectedRows[i]), len(actualRows[i]))
+		for j := 0; j < len(test.ExpectedRows[i]); j++ {
+			if test.ExpectedRows[i][j] == ignoreVal {
+				continue
+			}
+			assert.Equal(t, test.ExpectedRows[i][j], actualRows[i][j])
+		}
+	}
+
 	var sqlSchema sql.Schema
 	if test.ExpectedSqlSchema != nil {
 		sqlSchema = test.ExpectedSqlSchema
@@ -1596,16 +1398,161 @@ func testSelectQuery(t *testing.T, test SelectTest) {
 	assertSchemasEqual(t, sqlSchema, sch)
 }
 
+const TableWithHistoryName = "test_table"
+
+var InitialHistSch = dtestutils.MustSchema(idColTag0TypeUUID, firstColTag1TypeStr, lastColTag2TypeStr)
+var AddAddrAt3HistSch = dtestutils.MustSchema(idColTag0TypeUUID, firstColTag1TypeStr, lastColTag2TypeStr, addrColTag3TypeStr)
+var AddAgeAt4HistSch = dtestutils.MustSchema(idColTag0TypeUUID, firstColTag1TypeStr, lastColTag2TypeStr, ageColTag4TypeInt)
+var ReaddAgeAt5HistSch = dtestutils.MustSchema(idColTag0TypeUUID, firstColTag1TypeStr, lastColTag2TypeStr, addrColTag3TypeStr, ageColTag5TypeUint)
+
+// TableUpdate defines a list of modifications that should be made to a table
+type TableUpdate struct {
+	// NewSch is an updated schema for this table. It overwrites the existing value.  If not provided the existing value
+	// will not change
+	NewSch schema.Schema
+
+	// NewRowData if provided overwrites the entirety of the row data in the table.
+	NewRowData *types.Map
+
+	// RowUpdates are new values for rows that should be set in the map.  They can be updates or inserts.
+	RowUpdates []row.Row
+}
+
+// HistoryNode represents a commit to be made
+type HistoryNode struct {
+	// Branch the branch that the commit should be on
+	Branch string
+
+	// CommitMessag is the commit message that should be applied
+	CommitMsg string
+
+	// Updates are the changes that should be made to the table's states before committing
+	Updates map[string]TableUpdate
+
+	// Children are the child commits of this commit
+	Children []HistoryNode
+}
+
+// mustRowData converts a slice of row.TaggedValues into a noms types.Map containing that data.
+func mustRowData(t *testing.T, ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema, colVals []row.TaggedValues) *types.Map {
+	m, err := types.NewMap(ctx, vrw)
+	require.NoError(t, err)
+
+	me := m.Edit()
+	for _, taggedVals := range colVals {
+		r, err := row.New(types.Format_Default, sch, taggedVals)
+		require.NoError(t, err)
+
+		me = me.Set(r.NomsMapKey(sch), r.NomsMapValue(sch))
+	}
+
+	m, err = me.Map(ctx)
+	require.NoError(t, err)
+
+	return &m
+}
+
+func CreateHistory(ctx context.Context, dEnv *env.DoltEnv, t *testing.T) []HistoryNode {
+	vrw := dEnv.DoltDB.ValueReadWriter()
+
+	return []HistoryNode{
+		{
+			Branch:    "seed",
+			CommitMsg: "Seeding with initial user data",
+			Updates: map[string]TableUpdate{
+				TableWithHistoryName: {
+					NewSch: InitialHistSch,
+					NewRowData: mustRowData(t, ctx, vrw, InitialHistSch, []row.TaggedValues{
+						{0: types.Int(0), 1: types.String("Aaron"), 2: types.String("Son")},
+						{0: types.Int(1), 1: types.String("Brian"), 2: types.String("Hendriks")},
+						{0: types.Int(2), 1: types.String("Tim"), 2: types.String("Sehn")},
+					}),
+				},
+			},
+			Children: []HistoryNode{
+				{
+					Branch:    "add-age",
+					CommitMsg: "Adding int age to users with tag 3",
+					Updates: map[string]TableUpdate{
+						TableWithHistoryName: {
+							NewSch: AddAgeAt4HistSch,
+							NewRowData: mustRowData(t, ctx, vrw, AddAgeAt4HistSch, []row.TaggedValues{
+								{0: types.Int(0), 1: types.String("Aaron"), 2: types.String("Son"), 4: types.Int(35)},
+								{0: types.Int(1), 1: types.String("Brian"), 2: types.String("Hendriks"), 4: types.Int(38)},
+								{0: types.Int(2), 1: types.String("Tim"), 2: types.String("Sehn"), 4: types.Int(37)},
+								{0: types.Int(3), 1: types.String("Zach"), 2: types.String("Musgrave"), 4: types.Int(37)},
+							}),
+						},
+					},
+					Children: nil,
+				},
+				{
+					Branch:    env.DefaultInitBranch,
+					CommitMsg: "Adding string address to users with tag 3",
+					Updates: map[string]TableUpdate{
+						TableWithHistoryName: {
+							NewSch: AddAddrAt3HistSch,
+							NewRowData: mustRowData(t, ctx, vrw, AddAddrAt3HistSch, []row.TaggedValues{
+								{0: types.Int(0), 1: types.String("Aaron"), 2: types.String("Son"), 3: types.String("123 Fake St")},
+								{0: types.Int(1), 1: types.String("Brian"), 2: types.String("Hendriks"), 3: types.String("456 Bull Ln")},
+								{0: types.Int(2), 1: types.String("Tim"), 2: types.String("Sehn"), 3: types.String("789 Not Real Ct")},
+								{0: types.Int(3), 1: types.String("Zach"), 2: types.String("Musgrave")},
+								{0: types.Int(4), 1: types.String("Matt"), 2: types.String("Jesuele")},
+							}),
+						},
+					},
+					Children: []HistoryNode{
+						{
+							Branch:    env.DefaultInitBranch,
+							CommitMsg: "Re-add age as a uint with tag 4",
+							Updates: map[string]TableUpdate{
+								TableWithHistoryName: {
+									NewSch: ReaddAgeAt5HistSch,
+									NewRowData: mustRowData(t, ctx, vrw, ReaddAgeAt5HistSch, []row.TaggedValues{
+										{0: types.Int(0), 1: types.String("Aaron"), 2: types.String("Son"), 3: types.String("123 Fake St"), 5: types.Uint(35)},
+										{0: types.Int(1), 1: types.String("Brian"), 2: types.String("Hendriks"), 3: types.String("456 Bull Ln"), 5: types.Uint(38)},
+										{0: types.Int(2), 1: types.String("Tim"), 2: types.String("Sehn"), 3: types.String("789 Not Real Ct"), 5: types.Uint(37)},
+										{0: types.Int(3), 1: types.String("Zach"), 2: types.String("Musgrave"), 3: types.String("-1 Imaginary Wy"), 5: types.Uint(37)},
+										{0: types.Int(4), 1: types.String("Matt"), 2: types.String("Jesuele")},
+										{0: types.Int(5), 1: types.String("Daylon"), 2: types.String("Wilkins")},
+									}),
+								},
+							},
+							Children: nil,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+var idColTag0TypeUUID = schema.NewColumn("id", 0, types.IntKind, true)
+var firstColTag1TypeStr = schema.NewColumn("first_name", 1, types.StringKind, false)
+var lastColTag2TypeStr = schema.NewColumn("last_name", 2, types.StringKind, false)
+var addrColTag3TypeStr = schema.NewColumn("addr", 3, types.StringKind, false)
+var ageColTag4TypeInt = schema.NewColumn("age", 4, types.IntKind, false)
+var ageColTag5TypeUint = schema.NewColumn("age", 5, types.UintKind, false)
+
+var DiffSchema = dtestutils.MustSchema(
+	schema.NewColumn("to_id", 0, types.IntKind, false),
+	schema.NewColumn("to_first_name", 1, types.StringKind, false),
+	schema.NewColumn("to_last_name", 2, types.StringKind, false),
+	schema.NewColumn("to_addr", 3, types.StringKind, false),
+	schema.NewColumn("from_id", 7, types.IntKind, false),
+	schema.NewColumn("from_first_name", 8, types.StringKind, false),
+	schema.NewColumn("from_last_name", 9, types.StringKind, false),
+	schema.NewColumn("from_addr", 10, types.StringKind, false),
+	schema.NewColumn("diff_type", 14, types.StringKind, false),
+)
+
 func testSelectDiffQuery(t *testing.T, test SelectTest) {
 	validateTest(t, test)
-
 	ctx := context.Background()
-
 	cleanup := installTestCommitClock()
 	defer cleanup()
-
 	dEnv := dtestutils.CreateTestEnv()
-	InitializeWithHistory(t, ctx, dEnv, CreateHistory(ctx, dEnv, t)...)
+	initializeWithHistory(t, ctx, dEnv, CreateHistory(ctx, dEnv, t)...)
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
 	}
@@ -1613,10 +1560,13 @@ func testSelectDiffQuery(t *testing.T, test SelectTest) {
 	cs, err := doltdb.NewCommitSpec("main")
 	require.NoError(t, err)
 
-	cm, err := dEnv.DoltDB.Resolve(ctx, cs, nil)
+	optCmt, err := dEnv.DoltDB.Resolve(ctx, cs, nil)
 	require.NoError(t, err)
 
-	root, err := cm.GetRootValue()
+	cm, ok := optCmt.ToCommit()
+	require.True(t, ok)
+
+	root, err := cm.GetRootValue(ctx)
 	require.NoError(t, err)
 
 	err = dEnv.UpdateStagedRoot(ctx, root)
@@ -1628,7 +1578,7 @@ func testSelectDiffQuery(t *testing.T, test SelectTest) {
 	root, err = dEnv.WorkingRoot(context.Background())
 	require.NoError(t, err)
 
-	root = UpdateTables(t, ctx, root, CreateWorkingRootUpdate())
+	root = updateTables(t, ctx, root, createWorkingRootUpdate())
 
 	err = dEnv.UpdateWorkingRoot(ctx, root)
 	require.NoError(t, err)
@@ -1651,6 +1601,127 @@ func testSelectDiffQuery(t *testing.T, test SelectTest) {
 	}
 
 	assertSchemasEqual(t, sqlSchema, sch)
+}
+
+// TODO: this shouldn't be here
+func createWorkingRootUpdate() map[string]TableUpdate {
+	return map[string]TableUpdate{
+		TableWithHistoryName: {
+			RowUpdates: []row.Row{
+				mustRow(row.New(types.Format_Default, ReaddAgeAt5HistSch, row.TaggedValues{
+					0: types.Int(6), 1: types.String("Katie"), 2: types.String("McCulloch"),
+				})),
+			},
+		},
+	}
+}
+
+func updateTables(t *testing.T, ctx context.Context, root doltdb.RootValue, tblUpdates map[string]TableUpdate) doltdb.RootValue {
+	for tblName, updates := range tblUpdates {
+		tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: tblName})
+		require.NoError(t, err)
+
+		var sch schema.Schema
+		if updates.NewSch != nil {
+			sch = updates.NewSch
+		} else {
+			sch, err = tbl.GetSchema(ctx)
+			require.NoError(t, err)
+		}
+
+		var rowData types.Map
+		if updates.NewRowData == nil {
+			if ok {
+				rowData, err = tbl.GetNomsRowData(ctx)
+				require.NoError(t, err)
+			} else {
+				rowData, err = types.NewMap(ctx, root.VRW())
+				require.NoError(t, err)
+			}
+		} else {
+			rowData = *updates.NewRowData
+		}
+
+		if updates.RowUpdates != nil {
+			me := rowData.Edit()
+
+			for _, r := range updates.RowUpdates {
+				me = me.Set(r.NomsMapKey(sch), r.NomsMapValue(sch))
+			}
+
+			rowData, err = me.Map(ctx)
+			require.NoError(t, err)
+		}
+
+		var indexData durable.IndexSet
+		require.NoError(t, err)
+		if tbl != nil {
+			indexData, err = tbl.GetIndexSet(ctx)
+			require.NoError(t, err)
+		}
+
+		tbl, err = doltdb.NewNomsTable(ctx, root.VRW(), root.NodeStore(), sch, rowData, indexData, nil)
+		require.NoError(t, err)
+
+		root, err = root.PutTable(ctx, doltdb.TableName{Name: tblName}, tbl)
+		require.NoError(t, err)
+	}
+
+	return root
+}
+
+// initializeWithHistory will go through the provided historyNodes and create the intended commit graph
+func initializeWithHistory(t *testing.T, ctx context.Context, dEnv *env.DoltEnv, historyNodes ...HistoryNode) {
+	for _, node := range historyNodes {
+		cs, err := doltdb.NewCommitSpec(env.DefaultInitBranch)
+		require.NoError(t, err)
+
+		optCmt, err := dEnv.DoltDB.Resolve(ctx, cs, nil)
+		require.NoError(t, err)
+
+		cm, ok := optCmt.ToCommit()
+		require.True(t, ok)
+
+		processNode(t, ctx, dEnv, node, cm)
+	}
+}
+
+func processNode(t *testing.T, ctx context.Context, dEnv *env.DoltEnv, node HistoryNode, parent *doltdb.Commit) {
+	branchRef := ref.NewBranchRef(node.Branch)
+	ok, err := dEnv.DoltDB.HasRef(ctx, branchRef)
+	require.NoError(t, err)
+
+	if !ok {
+		err = dEnv.DoltDB.NewBranchAtCommit(ctx, branchRef, parent, nil)
+		require.NoError(t, err)
+	}
+
+	cs, err := doltdb.NewCommitSpec(branchRef.String())
+	require.NoError(t, err)
+
+	optCmt, err := dEnv.DoltDB.Resolve(ctx, cs, nil)
+	require.NoError(t, err)
+
+	cm, ok := optCmt.ToCommit()
+	require.True(t, ok)
+
+	root, err := cm.GetRootValue(ctx)
+	require.NoError(t, err)
+
+	root = updateTables(t, ctx, root, node.Updates)
+	r, h, err := dEnv.DoltDB.WriteRootValue(ctx, root)
+	require.NoError(t, err)
+	root = r
+
+	meta, err := datas.NewCommitMeta("Ash Ketchum", "ash@poke.mon", node.CommitMsg)
+	require.NoError(t, err)
+
+	cm, err = dEnv.DoltDB.Commit(ctx, h, branchRef, meta)
+	require.NoError(t, err)
+
+	for _, child := range node.Children {
+		processNode(t, ctx, dEnv, child, cm)
+	}
 }
 
 func validateTest(t *testing.T, test SelectTest) {

@@ -31,12 +31,12 @@ import (
 	"github.com/dolthub/dolt/go/store/types"
 )
 
-func setupEditorIndexTest(t *testing.T) (*env.DoltEnv, *doltdb.RootValue) {
+func setupEditorIndexTest(t *testing.T) (*env.DoltEnv, doltdb.RootValue) {
 	index_dEnv := dtestutils.CreateTestEnv()
 	root, err := index_dEnv.WorkingRoot(context.Background())
 	require.NoError(t, err)
 
-	index_initialRoot, err := ExecuteSql(t, index_dEnv, root, `
+	index_initialRoot, err := ExecuteSql(index_dEnv, root, `
 CREATE TABLE onepk (
   pk1 BIGINT PRIMARY KEY,
   v1 BIGINT,
@@ -120,6 +120,7 @@ UPDATE onepk SET pk1 = v1 + pk1 ORDER BY pk1 DESC;
 	for _, test := range tests {
 		t.Run(test.sqlStatement, func(t *testing.T) {
 			dEnv, initialRoot := setupEditorIndexTest(t)
+			defer dEnv.DoltDB.Close()
 
 			root := initialRoot
 			for _, sqlStatement := range strings.Split(test.sqlStatement, ";") {
@@ -128,10 +129,10 @@ UPDATE onepk SET pk1 = v1 + pk1 ORDER BY pk1 DESC;
 				require.NoError(t, err)
 			}
 
-			onepk, ok, err := root.GetTable(context.Background(), "onepk")
+			onepk, ok, err := root.GetTable(context.Background(), doltdb.TableName{Name: "onepk"})
 			require.NoError(t, err)
 			require.True(t, ok)
-			twopk, ok, err := root.GetTable(context.Background(), "twopk")
+			twopk, ok, err := root.GetTable(context.Background(), doltdb.TableName{Name: "twopk"})
 			require.NoError(t, err)
 			require.True(t, ok)
 
@@ -144,6 +145,10 @@ UPDATE onepk SET pk1 = v1 + pk1 ORDER BY pk1 DESC;
 			require.NotNil(t, idx_v1)
 			idx_v2v1 := twopkSch.Indexes().GetByName("idx_v2v1")
 			require.NotNil(t, idx_v2v1)
+
+			if types.Format_Default != types.Format_LD_1 {
+				t.Skip("need a prolly sql row iter")
+			}
 
 			idx_v1RowData, err := onepk.GetNomsIndexRowData(context.Background(), idx_v1.Name())
 			require.NoError(t, err)
@@ -278,6 +283,7 @@ UPDATE oneuni SET v1 = v1 + pk1;
 	for _, test := range tests {
 		t.Run(test.sqlStatement, func(t *testing.T) {
 			dEnv, initialRoot := setupEditorIndexTest(t)
+			defer dEnv.DoltDB.Close()
 
 			root := initialRoot
 			var err error
@@ -293,10 +299,10 @@ UPDATE oneuni SET v1 = v1 + pk1;
 			}
 			require.NoError(t, err)
 
-			oneuni, ok, err := root.GetTable(context.Background(), "oneuni")
+			oneuni, ok, err := root.GetTable(context.Background(), doltdb.TableName{Name: "oneuni"})
 			require.NoError(t, err)
 			require.True(t, ok)
-			twouni, ok, err := root.GetTable(context.Background(), "twouni")
+			twouni, ok, err := root.GetTable(context.Background(), doltdb.TableName{Name: "twouni"})
 			require.NoError(t, err)
 			require.True(t, ok)
 
@@ -309,6 +315,10 @@ UPDATE oneuni SET v1 = v1 + pk1;
 			require.NotNil(t, idx_v1)
 			idx_v1v2 := twouniSch.Indexes().GetByName("idx_v1v2")
 			require.NotNil(t, idx_v1v2)
+
+			if types.Format_Default != types.Format_LD_1 {
+				t.Skip("need a prolly sql row iter")
+			}
 
 			idx_v1RowData, err := oneuni.GetNomsIndexRowData(context.Background(), idx_v1.Name())
 			require.NoError(t, err)

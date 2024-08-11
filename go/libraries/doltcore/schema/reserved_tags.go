@@ -48,6 +48,7 @@ const (
 const (
 	DiffCommitTag = iota + SystemTableReservedMin + uint64(2000)
 	DiffCommitDateTag
+	DiffTypeTag
 )
 
 // Tags for dolt_query_catalog table
@@ -77,6 +78,8 @@ const (
 	DoltSchemasTypeTag
 	DoltSchemasNameTag
 	DoltSchemasFragmentTag
+	DoltSchemasExtraTag
+	DoltSchemasSqlModeTag
 )
 
 // Tags for hidden columns in keyless rows
@@ -91,9 +94,24 @@ const (
 	DoltProceduresCreateStmtTag
 	DoltProceduresCreatedAtTag
 	DoltProceduresModifiedAtTag
+	DoltProceduresSqlModeTag
 )
 
 const (
 	DoltConstraintViolationsTypeTag = 0
 	DoltConstraintViolationsInfoTag = math.MaxUint64
+)
+
+// Tags for the dolt_conflicts_table_name table
+const (
+	DoltConflictsOurDiffTypeTag = iota + SystemTableReservedMin + uint64(7000)
+	DoltConflictsTheirDiffTypeTag
+	DoltConflictsBaseCardinalityTag
+	DoltConflictsOurCardinalityTag
+	DoltConflictsTheirCardinalityTag
+)
+
+const (
+	DoltIgnorePatternTag = iota + SystemTableReservedMin + uint64(8000)
+	DoltIgnoreIgnoredTag
 )

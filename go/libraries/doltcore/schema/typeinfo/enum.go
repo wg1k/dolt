@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -39,10 +40,10 @@ type enumType struct {
 var _ TypeInfo = (*enumType)(nil)
 
 func CreateEnumTypeFromParams(params map[string]string) (TypeInfo, error) {
-	var collation sql.Collation
+	var collation sql.CollationID
 	var err error
 	if collationStr, ok := params[enumTypeParam_Collation]; ok {
-		collation, err = sql.ParseCollation(nil, &collationStr, false)
+		collation, err = sql.ParseCollation("", collationStr, false)
 		if err != nil {
 			return nil, err
 		}
@@ -59,24 +60,21 @@ func CreateEnumTypeFromParams(params map[string]string) (TypeInfo, error) {
 	} else {
 		return nil, fmt.Errorf(`create enum type info is missing param "%v"`, enumTypeParam_Values)
 	}
-	sqlEnumType, err := sql.CreateEnumType(values, collation)
+	sqlEnumType, err := gmstypes.CreateEnumType(values, collation)
 	if err != nil {
 		return nil, err
 	}
-	return &enumType{sqlEnumType}, nil
+	return CreateEnumTypeFromSqlEnumType(sqlEnumType), nil
+}
+
+func CreateEnumTypeFromSqlEnumType(sqlEnumType sql.EnumType) TypeInfo {
+	return &enumType{sqlEnumType}
 }
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *enumType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
 	if val, ok := v.(types.Uint); ok {
-		if val == 0 {
-			return "", nil
-		}
-		res, err := ti.sqlEnumType.Unmarshal(int64(val))
-		if err != nil {
-			return nil, fmt.Errorf(`"%v" cannot convert "%v" to value`, ti.String(), val)
-		}
-		return res, nil
+		return uint16(val), nil
 	}
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
@@ -89,16 +87,7 @@ func (ti *enumType) ReadFrom(_ *types.NomsBinFormat, reader types.CodecReader) (
 	k := reader.ReadKind()
 	switch k {
 	case types.UintKind:
-		n := reader.ReadUint()
-		if n == 0 {
-			return "", nil
-		}
-		res, err := ti.sqlEnumType.Unmarshal(int64(n))
-		if err != nil {
-			return nil, nil
-		}
-
-		return res, nil
+		return uint16(reader.ReadUint()), nil
 	case types.NullKind:
 		return nil, nil
 	}
@@ -111,11 +100,11 @@ func (ti *enumType) ConvertValueToNomsValue(ctx context.Context, vrw types.Value
 	if v == nil {
 		return types.NullValue, nil
 	}
-	val, err := ti.sqlEnumType.Marshal(v)
+	val, _, err := ti.sqlEnumType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
-	return types.Uint(val), nil
+	return types.Uint(val.(uint16)), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -141,11 +130,11 @@ func (ti *enumType) FormatValue(v types.Value) (*string, error) {
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
 	}
-	strVal, err := ti.ConvertNomsValueToValue(v)
+	convVal, err := ti.ConvertNomsValueToValue(v)
 	if err != nil {
 		return nil, err
 	}
-	val, ok := strVal.(string)
+	val, ok := ti.sqlEnumType.At(int(convVal.(uint16)))
 	if !ok {
 		return nil, fmt.Errorf(`"%v" has unexpectedly encountered a value of type "%T" from embedded type`, ti.String(), v)
 	}
@@ -175,8 +164,8 @@ func (ti *enumType) GetTypeParams() map[string]string {
 // IsValid implements TypeInfo interface.
 func (ti *enumType) IsValid(v types.Value) bool {
 	if val, ok := v.(types.Uint); ok {
-		_, err := ti.sqlEnumType.Unmarshal(int64(val))
-		if err != nil {
+		_, ok := ti.sqlEnumType.At(int(val))
+		if !ok {
 			return false
 		}
 		return true
@@ -229,17 +218,21 @@ func enumTypeConverter(ctx context.Context, src *enumType, destTi TypeInfo) (tc 
 			if !ok {
 				return nil, fmt.Errorf("unexpected type converting enum to other enum: %T", v)
 			}
-			valStr, err := src.sqlEnumType.Unmarshal(int64(val))
+			valStr, ok := src.sqlEnumType.At(int(val))
+			if !ok {
+				return nil, fmt.Errorf("%s does not contain an equivalent value of %d", src.sqlEnumType.String(), val)
+			}
+			newVal, _, err := dest.sqlEnumType.Convert(valStr)
 			if err != nil {
 				return nil, err
 			}
-			newVal, err := dest.sqlEnumType.Marshal(valStr)
-			if err != nil {
-				return nil, err
-			}
-			return types.Uint(newVal), nil
+			return types.Uint(newVal.(uint16)), nil
 		}, true, nil
 	case *floatType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
@@ -248,6 +241,12 @@ func enumTypeConverter(ctx context.Context, src *enumType, destTi TypeInfo) (tc 
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

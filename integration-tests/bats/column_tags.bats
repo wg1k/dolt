@@ -57,7 +57,6 @@ SQL
     [[ "$output" =~ "TeSt,c1,8201" ]] || false
 }
 
-
 @test "column_tags: Merging two branches that added same tag, name, type, and constraints" {
     dolt sql <<SQL
 CREATE TABLE test (
@@ -78,8 +77,9 @@ SQL
     dolt add test
     dolt commit	-m "Added column c2 bigint"
     dolt checkout main
-    dolt merge branch1
-    dolt merge branch2
+    dolt merge branch1 -m "merge branch1"
+    run dolt merge branch2 -m "merge branch2"
+    [ $status -eq 0 ]
 }
 
 @test "column_tags: Merging branches that use the same tag referring to different schema fails" {
@@ -104,7 +104,8 @@ SQL
     dolt checkout main
     dolt merge branch1
     run dolt merge branch2
-    [ $status -ne 0 ]
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (schema):" ]] || false
 }
 
 @test "column_tags: Merging branches that use the same tag referring to different column names fails" {
@@ -130,7 +131,8 @@ SQL
     dolt checkout main
     dolt merge branch1
     run dolt merge branch2
-    [ $status -eq 1 ]
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (schema):" ]] || false
 }
 
 @test "column_tags: Merging branches that both created the same column succeeds" {
@@ -156,8 +158,8 @@ SQL
     dolt add test
     dolt commit -m "Added columns c2 bigint and c3 double to branch2"
     dolt checkout main
-    dolt merge branch1
-    run dolt merge branch2
+    dolt merge branch1 -m "merge branch1"
+    run dolt merge branch2 -m "merge branch2"
     [ $status -eq 0 ]
     run dolt schema show
     [[ "${lines[2]}" =~ "\`pk\` bigint NOT NULL" ]] || false
@@ -190,8 +192,8 @@ SQL
     # pk and c1 will have the same tags on both branches due to deterministic tag generation
     dolt commit -m "Committed test table"
     dolt checkout main
-    dolt merge branch1
-    run dolt merge branch2
+    dolt merge branch1 -m "merge branch1"
+    run dolt merge branch2 -m "merge branch2"
     [ $status -eq 0 ]
     run dolt schema show
     [[ "${lines[2]}" =~ "\`pk\` bigint NOT NULL" ]] || false
@@ -236,4 +238,117 @@ DELIM
     [[ "$output" =~ "ints_table,c3,14526" ]] || false
     [[ "$output" =~ "ints_table,c4,5634" ]] || false
     [[ "$output" =~ "ints_table,c5,12796" ]] || false
+}
+
+@test "column_tags: Round-tripping a column type through different NomsKinds preserves its tag" {
+    dolt sql -q "CREATE TABLE t (pk INT PRIMARY KEY, col1 int);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 VARCHAR(100);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 int;"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+}
+
+@test "column_tags: Round-tripping a column type through same NomsKinds keeps original tag" {
+    dolt sql -q "CREATE TABLE t (pk INT PRIMARY KEY, col1 VARCHAR(100));"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 16050" ]] || false
+
+    dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 VARCHAR(101);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 16050" ]] || false
+
+     dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 VARCHAR(100);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 16050" ]] || false
+}
+
+@test "column_tags: Round-tripping a column type after other column is altered preserves column tag" {
+    dolt sql -q "CREATE TABLE t (pk INT PRIMARY KEY, col1 int);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt sql -q "ALTER TABLE t ADD COLUMN col2 int;"
+
+    dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 VARCHAR(100);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt sql -q "ALTER TABLE t MODIFY COLUMN col1 int;"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "col1   | 10878" ]] || false
+}
+
+@test "column_tags: update-tag only available on __DOLT__" {
+    mkdir ld
+    mkdir dev
+
+    cd ld
+    DOLT_DEFAULT_BIN_FORMAT=__LD_1__ dolt init
+    run dolt schema update-tag t col 5
+    [ $status -ne 0 ]
+    echo $output
+    [[ $output =~ "update-tag is only available in storage format __DOLT__" ]] || false
+}
+
+@test "column_tags: update-tag updates a columns tag" {
+    dolt sql -q "CREATE TABLE t (pk INT PRIMARY KEY, col1 int);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "pk     | 15476" ]] || false
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt schema update-tag t pk 5
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "pk     | 5" ]] || false
+    [[ $output =~ "col1   | 10878" ]] || false
+
+    dolt schema update-tag t col1 6
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "pk     | 5" ]] || false
+    [[ $output =~ "col1   | 6" ]] || false
+}
+
+@test "column_tags: create table on two separate branches, merge them together even though they have different tags" {
+    dolt branch other
+    dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, col1 int);"
+    dolt sql -q "INSERT INTO t VALUES (1, 1);"
+    dolt commit -Am "unrelated table"
+
+    dolt sql -q "CREATE table target (pk int PRIMARY KEY, col1 int);"
+    dolt sql -q "INSERT into target VALUES (1, 1);"
+    dolt commit -Am "table target on main branch"
+
+    dolt checkout other
+    dolt sql -q "CREATE table target (pk int PRIMARY KEY, badCol int, col1 int);"
+    dolt sql -q "INSERT INTO target VALUES (2, 2, 2);"
+    dolt commit -Am "table target on other branch"
+    dolt sql -q "ALTER TABLE target DROP COLUMN badCol;"
+    dolt commit -Am "fixup"
+
+    dolt checkout main
+    run dolt merge other -m "merge other into main"
+    [ $status -eq 0 ]
+    [[ $output =~ "1 tables changed, 1 rows added(+)" ]] || false
+
+    run dolt sql -r csv -q "select * from target;"
+    [ $status -eq 0 ]
+    [[ $output =~ "1,1" ]] || false
+    [[ $output =~ "2,2" ]] || false
 }

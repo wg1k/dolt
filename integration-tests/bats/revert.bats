@@ -3,6 +3,7 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
+
     dolt sql -q "CREATE TABLE test(pk BIGINT PRIMARY KEY, v1 BIGINT)"
     dolt add -A
     dolt commit -m "Created table"
@@ -96,16 +97,16 @@ SQL
     [[ "$output" =~ "ancestor" ]] || false
 }
 
-@test "revert: no changes" {
+@test "revert: init commit" {
     run dolt revert HEAD~4
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "No changes were made" ]] || false
+    [ "$status" -ne "0" ]
+    [[ "$output" =~ "cannot revert commit with no parents" ]] || false
 }
 
 @test "revert: invalid hash" {
     run dolt revert aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     [ "$status" -eq "1" ]
-    [[ "$output" =~ "hash" ]] || false
+    [[ "$output" =~ "target commit not found" ]] || false
 }
 
 @test "revert: HEAD with --author parameter" {
@@ -136,7 +137,7 @@ SQL
 }
 
 @test "revert: SQL HEAD" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD')"
+    dolt sql -q "call dolt_revert('HEAD')"
     run dolt sql -q "SELECT * FROM test" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1" ]] || false
@@ -146,7 +147,7 @@ SQL
 }
 
 @test "revert: SQL HEAD~1" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD~1')"
+    dolt sql -q "call dolt_revert('HEAD~1')"
     run dolt sql -q "SELECT * FROM test" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1" ]] || false
@@ -156,7 +157,7 @@ SQL
 }
 
 @test "revert: SQL HEAD & HEAD~1" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD', 'HEAD~1')"
+    dolt sql -q "call dolt_revert('HEAD', 'HEAD~1')"
     run dolt sql -q "SELECT * FROM test" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1" ]] || false
@@ -166,7 +167,7 @@ SQL
 
 @test "revert: SQL has changes in the working set" {
     dolt sql -q "INSERT INTO test VALUES (4, 4)"
-    run dolt sql -q "SELECT DOLT_REVERT('HEAD')"
+    run dolt sql -q "call dolt_revert('HEAD')"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "changes" ]] || false
 }
@@ -178,7 +179,7 @@ SQL
     dolt sql -q "REPLACE INTO test VALUES (4, 5)"
     dolt add -A
     dolt commit -m "Updated 4"
-    run dolt sql -q "SELECT DOLT_REVERT('HEAD~1')"
+    run dolt sql -q "call dolt_revert('HEAD~1')"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "conflict" ]] || false
 }
@@ -198,36 +199,31 @@ SQL
     dolt sql -q "DELETE FROM parent WHERE pk = 20"
     dolt add -A
     dolt commit -m "MC3"
-    run dolt sql -q "SELECT DOLT_REVERT('HEAD~1')"
+    run dolt sql -q "call dolt_revert('HEAD~1')"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "constraint violation" ]] || false
 }
 
 @test "revert: SQL too far back" {
-    run dolt sql -q "SELECT DOLT_REVERT('HEAD~10')"
+    run dolt sql -q "call dolt_revert('HEAD~10')"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "ancestor" ]] || false
 }
 
-@test "revert: SQL no changes" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD~4')"
-    run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "pk,v1" ]] || false
-    [[ "$output" =~ "1,1" ]] || false
-    [[ "$output" =~ "2,2" ]] || false
-    [[ "$output" =~ "3,3" ]] || false
-    [[ "${#lines[@]}" = "4" ]] || false
+@test "revert: SQL revert init commit" {
+    run dolt sql -q "call dolt_revert('HEAD~4')"
+    [ "$status" -ne "0" ]
+    [[ "$output" =~ "cannot revert commit with no parents" ]] || false
 }
 
 @test "revert: SQL invalid hash" {
-    run dolt sql -q "SELECT DOLT_REVERT('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+    run dolt sql -q "call dolt_revert('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
     [ "$status" -eq "1" ]
-    [[ "$output" =~ "hash" ]] || false
+    [[ "$output" =~ "target commit not found" ]] || false
 }
 
 @test "revert: SQL HEAD with author" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD', '--author', 'john doe <johndoe@gmail.com>')"
+    dolt sql -q "call dolt_revert('HEAD', '--author', 'john doe <johndoe@gmail.com>')"
     run dolt sql -q "SELECT * FROM test" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1" ]] || false
@@ -240,7 +236,7 @@ SQL
 }
 
 @test "revert: SQL HEAD & HEAD~1 with author" {
-    dolt sql -q "SELECT DOLT_REVERT('HEAD', 'HEAD~1', '--author', 'john doe <johndoe@gmail.com>')"
+    dolt sql -q "call dolt_revert('HEAD', 'HEAD~1', '--author', 'john doe <johndoe@gmail.com>')"
     run dolt sql -q "SELECT * FROM test" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1" ]] || false

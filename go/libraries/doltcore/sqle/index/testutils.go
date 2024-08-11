@@ -18,6 +18,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/table/typed/noms"
+	"github.com/dolthub/dolt/go/store/prolly"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -152,6 +153,32 @@ func LessOrEqualRange(tpl types.Tuple) *noms.ReadRange {
 	}
 }
 
+func NullRange() *noms.ReadRange {
+	return &noms.ReadRange{
+		Start:     types.EmptyTuple(types.Format_Default),
+		Inclusive: true,
+		Reverse:   false,
+		Check: nomsRangeCheck{
+			{
+				boundsCase: boundsCase_isNull,
+			},
+		},
+	}
+}
+
+func NotNullRange() *noms.ReadRange {
+	return &noms.ReadRange{
+		Start:     types.EmptyTuple(types.Format_Default),
+		Inclusive: true,
+		Reverse:   false,
+		Check: nomsRangeCheck{
+			{
+				boundsCase: boundsCase_infinity_infinity,
+			},
+		},
+	}
+}
+
 func AllRange() *noms.ReadRange {
 	return &noms.ReadRange{
 		Start:     types.EmptyTuple(types.Format_Default),
@@ -175,6 +202,15 @@ func ReadRangesEqual(nr1, nr2 *noms.ReadRange) bool {
 	return true
 }
 
-func ReadRangesFromIndexLookup(lookup sql.IndexLookup) []*noms.ReadRange {
-	return lookup.(*doltIndexLookup).nomsRanges
+func NomsRangesFromIndexLookup(ctx *sql.Context, lookup sql.IndexLookup) ([]*noms.ReadRange, error) {
+	return lookup.Index.(*doltIndex).nomsRanges(ctx, lookup.Ranges...)
+}
+
+func ProllyRangesFromIndexLookup(ctx *sql.Context, lookup sql.IndexLookup) ([]prolly.Range, error) {
+	idx := lookup.Index.(*doltIndex)
+	return idx.prollyRanges(ctx, idx.ns, lookup.Ranges...)
+}
+
+func DoltIndexFromSqlIndex(idx sql.Index) DoltIndex {
+	return idx.(DoltIndex)
 }

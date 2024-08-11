@@ -94,27 +94,46 @@ teardown() {
     dolt add test
     dolt commit -m "committed table so we can see diffs"
     dolt sql -q "alter table test add c0 bigint"
+
+    dolt diff
     run dolt diff
+
+    EXPECTED=$(cat <<'EOF'
+ CREATE TABLE `test` (
+   `pk` bigint NOT NULL COMMENT 'tag:0',
+   `c1` bigint COMMENT 'tag:1',
+   `c2` bigint COMMENT 'tag:2',
+   `c3` bigint COMMENT 'tag:3',
+   `c4` bigint COMMENT 'tag:4',
+   `c5` bigint COMMENT 'tag:5',
++  `c0` bigint,
+   PRIMARY KEY (`pk`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+EOF
+)    
+
     [ "$status" -eq 0 ]
-    [[ "$output" =~ \+[[:space:]]+\`c0\` ]] || false
-    [[ "$output" =~ "| c0 |" ]] || false
+    [[ "$output" =~ "$EXPECTED" ]] || false
+
+    # no data diff
+    [ "${#lines[@]}" -eq 13 ]
+    
     run dolt diff --schema
     [ "$status" -eq 0 ]
-    [[ "$output" =~ \+[[:space:]]+\`c0\` ]] || false
-    [[ ! "$output" =~ "| c0 |" ]] || false
+    [[ "$output" =~ "$EXPECTED" ]] || false
+    [ "${#lines[@]}" -eq 13 ]
+
     run dolt diff --data
     [ "$status" -eq 0 ]
-    [[ ! "$output" =~ \+[[:space:]]+\`c0\` ]] || false
-    [[ "$output" =~ "| c0 |" ]] || false
-    [[ "$output" =~ ">" ]] || false
-    [[ "$output" =~ "<" ]] || false
-    # Check for a blank column in the diff output
-    [[ "$output" =~ \|[[:space:]]+\| ]] || false
+    [ "${#lines[@]}" -eq 3 ]
+    [[ ! "$output" =~ ">" ]] || false
+
     dolt sql -q "insert into test (pk,c0,c1,c2,c3,c4,c5) values (0,0,0,0,0,0,0)"
+
     run dolt diff
     [ "$status" -eq 0 ]
-    [[ "$output" =~ \|[[:space:]]+c0[[:space:]]+\| ]] || false
-    [[ "$output" =~ \+[[:space:]]+[[:space:]]+\|[[:space:]]+0 ]] || false
+    [[ "$output" =~ "| c0" ]] || false
+    [[ "$output" =~ "+ | 0" ]] || false
     dolt sql -q "alter table test drop column c0"
     dolt diff
 }
@@ -203,9 +222,9 @@ SQL
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,column,tag" ]] || false
     [[ "$output" =~ "test2,pk1,6801" ]] || false
-    [[ "$output" =~ "test2,pk2,4776" ]] || false
-    [[ "$output" =~ "test2,v1,10579" ]] || false
-    [[ "$output" =~ "test2,v2,7704" ]] || false
+    [[ "$output" =~ "test2,PK2,4776" ]] || false
+    [[ "$output" =~ "test2,V1,10579" ]] || false
+    [[ "$output" =~ "test2,V2,7704" ]] || false
 
     dolt diff
     run dolt diff
@@ -213,9 +232,9 @@ SQL
     [[ "$output" =~ '-  `pk2` bigint NOT NULL,' ]] || false
     [[ "$output" =~ '-  `v1` varchar(100) NOT NULL,' ]] || false
     [[ "$output" =~ '-  `v2` varchar(120),' ]] || false
-    [[ "$output" =~ '+  `pk2` tinyint NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `v1` varchar(300) NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `v2` varchar(1024) NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `PK2` tinyint NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `V1` varchar(300) NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `V2` varchar(1024) NOT NULL,' ]] || false
     [[ "$output" =~ 'PRIMARY KEY' ]] || false
 
     dolt add .
@@ -227,12 +246,13 @@ SQL
     dolt add .
     dolt commit -m "Created table with one row"
 
-    dolt merge main
+    skip_nbf_dolt "In __DOLT__ the following throws an error since the primary key types changed"
+    dolt merge main --no-commit
 
     run dolt sql -q 'show create table test2'
     [ "$status" -eq 0 ]
-    [[ "$output" =~ '`pk2` tinyint NOT NULL' ]] || false
-    [[ "$output" =~ '`v1` varchar(300) NOT NULL' ]] || false
+    [[ "$output" =~ '`PK2` tinyint NOT NULL' ]] || false
+    [[ "$output" =~ '`V1` varchar(300) NOT NULL' ]] || false
 
     run dolt sql -q 'select * from test2' -r csv
     [ "$status" -eq 0 ]
@@ -253,8 +273,8 @@ SQL
     dolt pull
     run dolt sql -q 'show create table test2'
     [ "$status" -eq 0 ]
-    [[ "$output" =~ '`pk2` tinyint NOT NULL' ]] || false
-    [[ "$output" =~ '`v1` varchar(300) NOT NULL' ]] || false
+    [[ "$output" =~ '`PK2` tinyint NOT NULL' ]] || false
+    [[ "$output" =~ '`V1` varchar(300) NOT NULL' ]] || false
 
     run dolt sql -q 'select * from test2' -r csv
     [ "$status" -eq 0 ]
@@ -269,9 +289,9 @@ SQL
     [[ "$output" =~ '-  `pk2` bigint NOT NULL,' ]] || false
     [[ "$output" =~ '-  `v1` varchar(100) NOT NULL,' ]] || false
     [[ "$output" =~ '-  `v2` varchar(120),' ]] || false
-    [[ "$output" =~ '+  `pk2` tinyint NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `v1` varchar(300) NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `v2` varchar(1024) NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `PK2` tinyint NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `V1` varchar(300) NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `V2` varchar(1024) NOT NULL,' ]] || false
     [[ "$output" =~ 'PRIMARY KEY' ]] || false
 }
 
@@ -289,6 +309,7 @@ SQL
     # Commit is important here because we are testing column reuse on
     # drop / add, we want to be sure that we don't re-use any old
     # values from before the column was dropped
+    dolt add .
     dolt commit -am "Committing test table"
 
     dolt sql -q "alter table test2 drop column v1"
@@ -316,6 +337,7 @@ CREATE TABLE test2(
 insert into test2 values (1, 1, 1), (2, 2, 2);
 SQL
 
+    dolt add .
     # Commit is important here because we are testing column reuse on
     # drop / add, we want to be sure that we don't re-use any old
     # values from before the column was dropped
@@ -338,9 +360,38 @@ SQL
     run dolt diff --data
     [ "$status" -eq 0 ]
 
-    skip "dolt incorrectly considers there to be two different columns named v1"
-    skip "output should have a single column named v1 https://github.com/dolthub/dolt/issues/2430"
+    EXPECTED=$(cat <<'EOF'
++---+-----+-----+------+
+|   | pk1 | pk2 | v1   |
++---+-----+-----+------+
+| < | 1   | 1   | 1    |
+| > | 1   | 1   | NULL |
+| < | 2   | 2   | 2    |
+| > | 2   | 2   | NULL |
++---+-----+-----+------+
+EOF
+)               
     
-    [[ ! "$output" =~ '|  <  | pk1 | pk2 |      | v1   |' ]] || false
-    [[ ! "$output" =~ '|  >  | pk1 | pk2 | v1   |      |' ]] || false
+    [[ "$output" =~ "$EXPECTED" ]] || false
+}
+
+# We passed nil where a sql ctx was expected in merge. When we added
+# collations, the sql ctx became required and merge started to panic.
+@test "schema-changes: regression test for merging check constraints with TEXT type panicking due to a nil sql ctx" {
+    dolt sql -q "create table t (pk int primary key, col1 text);"
+    dolt commit -Am "initial"
+    dolt branch right
+    dolt sql -q "insert into t values (1, 'valid');"
+    dolt commit -am "row"
+
+    dolt checkout right
+    dolt sql -q "alter table t add constraint col1_check CHECK (col1 = 'valid');"
+    dolt commit -am "add check"
+
+    dolt checkout main
+    dolt merge -m "merge" right
+
+    run dolt sql -q "show create table t;"
+    [ $status -eq 0 ]
+    [[ $output =~ "CHECK ((\`col1\` = 'valid'))" ]] || false
 }

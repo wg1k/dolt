@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/proto"
 
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
@@ -42,8 +42,10 @@ func (namer *SequentialNamer) Name(bytes []byte) string {
 }
 
 func (namer *SequentialNamer) Check(data []byte, path string) (bool, error) {
-	// todo
-	return true, nil
+	filename := filepath.Base(path)
+	ext := filepath.Ext(filename)
+
+	return ext == evtDataExt, nil
 }
 
 func (namer *SequentialNamer) GetIdx() int {

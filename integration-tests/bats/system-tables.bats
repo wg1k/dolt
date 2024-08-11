@@ -4,39 +4,28 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 setup() {
     skiponwindows "tests are flaky on Windows"
     setup_common
-
-    # Needed for dolt_branches test
-    cd $BATS_TMPDIR
-    mkdir remotes-$$
-    mkdir remotes-$$/empty
-    echo remotesrv log available here $BATS_TMPDIR/remotes-$$/remotesrv.log
-    remotesrv --http-port 1234 --dir ./remotes-$$ &> ./remotes-$$/remotesrv.log 3>&- &
-    remotesrv_pid=$!
-    cd dolt-repo-$$
-    mkdir "dolt-repo-clones"
 }
 
 teardown() {
     skiponwindows "tests are flaky on Windows"
     assert_feature_version
     teardown_common
-    kill $remotesrv_pid
     rm -rf $BATS_TMPDIR/remotes-$$
 }
 
 @test "system-tables: Show list of system tables using dolt ls --system or --all" {
     dolt sql -q "create table test (pk int, c1 int, primary key(pk))"
-    dolt sql -q "show tables" --save "BATS query"
-    dolt ls --system
+
     run dolt ls --system
     [ $status -eq 0 ]
     [[ "$output" =~ "dolt_log" ]] || false
     [[ "$output" =~ "dolt_conflicts" ]] || false
     [[ "$output" =~ "dolt_branches" ]] || false
+    [[ "$output" =~ "dolt_remote_branches" ]] || false
     [[ "$output" =~ "dolt_remotes" ]] || false
-    [[ "$output" =~ "dolt_query_catalog" ]] || false
     [[ "$output" =~ "dolt_status" ]] || false
     [[ ! "$output" =~ " test" ]] || false  # spaces are impt!
+
     run dolt ls --all
     [ $status -eq 0 ]
     [[ "$output" =~ "dolt_log" ]] || false
@@ -44,71 +33,22 @@ teardown() {
     [[ "$output" =~ "dolt_commit_ancestors" ]] || false
     [[ "$output" =~ "dolt_conflicts" ]] || false
     [[ "$output" =~ "dolt_branches" ]] || false
+    [[ "$output" =~ "dolt_remote_branches" ]] || false
     [[ "$output" =~ "dolt_remotes" ]] || false
-    [[ "$output" =~ "dolt_query_catalog" ]] || false
     [[ "$output" =~ "dolt_status" ]] || false
     [[ "$output" =~ "test" ]] || false
+
     dolt add test
     dolt commit -m "Added test table"
+
     run dolt ls --system
     [ $status -eq 0 ]
     [[ "$output" =~ "dolt_history_test" ]] || false
     [[ "$output" =~ "dolt_diff_test" ]] || false
     [[ "$output" =~ "dolt_commit_diff_test" ]] || false
+
     run dolt ls --all
     [ $status -eq 0 ]
-    [[ "$output" =~ "dolt_history_test" ]] || false
-    [[ "$output" =~ "dolt_diff_test" ]] || false
-    [[ "$output" =~ "dolt_commit_diff_test" ]] || false
-}
-
-@test "system-tables: dolt ls --system -v shows history and diff systems tables for deleted tables" {
-    dolt sql -q "create table test (pk int, c1 int, primary key(pk))"
-    dolt add test
-    dolt commit -m "Added test table"
-    dolt table rm test
-    dolt add test
-    dolt commit -m "Removed test table"
-    run dolt ls --system
-    [ $status -eq 0 ]
-    [[ "$output" =~ "dolt_log" ]] || false
-    [[ "$output" =~ "dolt_conflicts" ]] || false
-    [[ "$output" =~ "dolt_branches" ]] || false
-    [[ "$output" =~ "dolt_remotes" ]] || false
-    [[ ! "$output" =~ "dolt_history_test" ]] || false
-    [[ ! "$output" =~ "dolt_diff_test" ]] || false
-    [[ ! "$output" =~ "dolt_commit_diff_test" ]] || false
-    run dolt ls --system -v
-    [ $status -eq 0 ]
-    [[ "$output" =~ "dolt_log" ]] || false
-    [[ "$output" =~ "dolt_conflicts" ]] || false
-    [[ "$output" =~ "dolt_branches" ]] || false
-    [[ "$output" =~ "dolt_remotes" ]] || false
-    [[ "$output" =~ "dolt_history_test" ]] || false
-    [[ "$output" =~ "dolt_commit_diff_test" ]] || false
-}
-
-@test "system-tables: dolt ls --system -v shows history and diff systems tables for tables on other branches" {
-    dolt checkout -b add-table-branch
-    dolt sql -q "create table test (pk int, c1 int, primary key(pk))"
-    dolt add test
-    dolt commit -m "Added test table"
-    dolt checkout main
-    run dolt ls --system
-    [ $status -eq 0 ]
-    [[ "$output" =~ "dolt_log" ]] || false
-    [[ "$output" =~ "dolt_conflicts" ]] || false
-    [[ "$output" =~ "dolt_branches" ]] || false
-    [[ "$output" =~ "dolt_remotes" ]] || false
-    [[ ! "$output" =~ "dolt_history_test" ]] || false
-    [[ ! "$output" =~ "dolt_diff_test" ]] || false
-    [[ ! "$output" =~ "dolt_commit_diff_test" ]] || false
-    run dolt ls --system -v
-    [ $status -eq 0 ]
-    [[ "$output" =~ "dolt_log" ]] || false
-    [[ "$output" =~ "dolt_conflicts" ]] || false
-    [[ "$output" =~ "dolt_branches" ]] || false
-    [[ "$output" =~ "dolt_remotes" ]] || false
     [[ "$output" =~ "dolt_history_test" ]] || false
     [[ "$output" =~ "dolt_diff_test" ]] || false
     [[ "$output" =~ "dolt_commit_diff_test" ]] || false
@@ -145,6 +85,60 @@ teardown() {
     [[ "$output" =~ "create-table-branch" ]] || false
 }
 
+@test "system-tables: query dolt_remote_branches system table" {
+    dolt checkout -b create-table-branch
+    dolt sql -q "create table test (pk int, c1 int, primary key(pk))"
+    dolt add test
+    dolt commit -m "Added test table"
+    dolt branch "b1"
+    mkdir ./remote1
+    dolt remote add rem1 file://./remote1
+    dolt push rem1 b1
+    dolt branch -d b1
+
+    run dolt sql -q "select name, latest_commit_message from dolt_branches"
+    [ $status -eq 0 ]
+    [[ "$output" =~ main.*Initialize\ data\ repository ]] || false
+    [[ "$output" =~ create-table-branch.*Added\ test\ table ]] || false
+    [[ ! "$output" =~ b1 ]] || false
+
+    run dolt sql -q "select name, latest_commit_message from dolt_remote_branches"
+    [ $status -eq 0 ]
+    [[ ! "$output" =~ main.*Initialize\ data\ repository ]] || false
+    [[ ! "$output" =~ create-table-branch.*Added\ test\ table ]] || false
+    [[ "$output" =~ "remotes/rem1/b1" ]] || false
+
+    run dolt sql -q "select name from dolt_remote_branches where latest_commit_message ='Initialize data repository'"
+    [ $status -eq 0 ]
+    [[ ! "$output" =~ "main" ]] || false
+    [[ ! "$output" =~ "create-table-branch" ]] || false
+    [[ ! "$output" =~ "remotes/rem1/b1" ]] || false
+
+    run dolt sql -q "select name from dolt_remote_branches where latest_commit_message ='Added test table'"
+    [ $status -eq 0 ]
+    [[ ! "$output" =~ "main" ]] || false
+    [[ ! "$output" =~ "create-table-branch" ]] || false
+    [[ "$output" =~ "remotes/rem1/b1" ]] || false
+
+    run dolt sql -q "select name from dolt_branches union select name from dolt_remote_branches"
+    [[ "$output" =~ "main" ]] || false
+    [[ "$output" =~ "create-table-branch" ]] || false
+    [[ "$output" =~ "remotes/rem1/b1" ]] || false
+
+    # make sure table works with no remote branches
+    mkdir noremotes && cd noremotes
+    dolt init
+    dolt sql <<SQL
+create table t1(a int primary key);
+SQL
+    dolt commit -Am 'new table';
+    dolt branch b1
+
+    run dolt sql -q "select * from dolt_remote_branches" -r csv
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+}
+
 @test "system-tables: query dolt_remotes system table" {
     run dolt sql -q "select count(*) from dolt_remotes" -r csv
     [ $status -eq 0 ]
@@ -158,50 +152,54 @@ teardown() {
     [[ "$output" =~ 1 ]] || false
 
     regex='file://.*/remote'
-    run dolt sql -q "select * from dolt_remotes" -r csv
+    run dolt sql -q "select name, fetch_specs, params from dolt_remotes" -r csv
     [ $status -eq 0 ]
-    [[ "${lines[0]}" = name,url,fetch_specs,params ]] || false
-    [[ "${lines[1]}" =~ origin,$regex,[refs/heads/*:refs/remotes/origin/*,map[] ]] || false
+    [[ "${lines[0]}" = name,fetch_specs,params ]] || false
+    [[ "${lines[1]}" =~ "origin,\"[\"\"refs/heads/*:refs/remotes/origin/*\"\"]\",{}" ]] || false
+    run dolt sql -q "select url from dolt_remotes" -r csv
+    [ $status -eq 0 ]
+    [[ "${lines[0]}" = url ]] || false
+    [[ "${lines[1]}" =~ $regex ]] || false
 }
 
 @test "system-tables: check unsupported dolt_remote behavior" {
-    run dolt sql -q "insert into dolt_remotes (name, url) values ('origin1', 'file://remote')"
+    run dolt sql -q "insert into dolt_remotes (name, url) values ('origin', 'file://remote')"
     [ $status -ne 0 ]
-    [[ "$output" =~ "cannot insert remote in an SQL session" ]] || false
+    [[ ! "$output" =~ panic ]] || false
+    [[ "$output" =~ "the dolt_remotes table is read-only; use the dolt_remote stored procedure to edit remotes" ]] || false
 
     mkdir remote
     dolt remote add origin file://remote/
     run dolt sql -q "delete from dolt_remotes where name = 'origin'"
     [ $status -ne 0 ]
-    [[ "$output" =~ "cannot delete remote in an SQL session" ]] || false
+    [[ "$output" =~ "the dolt_remotes table is read-only; use the dolt_remote stored procedure to edit remotes" ]] || false
 }
 
-@test "system-tables: insert into dolt_remotes system table" {
-    skip "Remotes table not yet mutable in SQL session"
-    run dolt sql -q "insert into dolt_remotes (name, url) values ('origin', 'file://remote')"
-    [ $status -ne 0 ]
-    [[ ! "$output" =~ panic ]] || false
-
+@test "system-tables: insert into dolt_remotes system table using dolt_remote procedure" {
     mkdir remote
-    dolt sql -q "insert into dolt_remotes (name, url) values ('origin1', 'file://remote')"
-    dolt sql -q "insert into dolt_remotes (name, url) values ('origin2', 'aws://[dynamo_db_table:s3_bucket]/repo_name')"
+    dolt sql -q "CALL DOLT_REMOTE('add', 'origin1', 'file://remote')"
+    dolt sql -q "CALL DOLT_REMOTE('add', 'origin2', 'aws://[dynamo_db_table:s3_bucket]/repo_name')"
 
     run dolt sql -q "select count(*) from dolt_remotes" -r csv
     [ $status -eq 0 ]
     [[ "$output" =~ 2 ]] || false
 
+    run dolt sql -q "select name, fetch_specs, params from dolt_remotes" -r csv
+    [ $status -eq 0 ]
+    [[ "${lines[0]}" = name,fetch_specs,params ]] || false
+    [[ "$output" =~ "origin1,\"[\"\"refs/heads/*:refs/remotes/origin1/*\"\"]\",{}" ]] || false
+    [[ "$output" =~ "origin2,\"[\"\"refs/heads/*:refs/remotes/origin2/*\"\"]\",{}" ]] || false
+
     file_regex='file://.*/remote'
     aws_regex='aws://.*/repo_name'
-    run dolt sql -q "select * from dolt_remotes" -r csv
+    run dolt sql -q "select url from dolt_remotes" -r csv
     [ $status -eq 0 ]
-    [[ "${lines[0]}" = name,url,fetch_specs,params ]] || false
-    [[ "${lines[1]}" =~ origin1,$file_regex,[refs/heads/*:refs/remotes/origin/*,map[] ]] || false
-    [[ "${lines[2]}" =~ origin2,$aws_regex,[refs/heads/*:refs/remotes/origin/*,map[] ]] || false
-
+    [[ "${lines[0]}" = url ]] || false
+    [[ "$output" =~ $file_regex ]] || false
+    [[ "$output" =~ $aws_regex ]] || false
 }
 
-@test "system-tables: delete from dolt_remotes system table" {
-    skip "Remotes table not yet mutable in SQL session"
+@test "system-tables: delete from dolt_remotes system table using dolt_remote procedure" {
     mkdir remote
     dolt remote add origin file://remote/
 
@@ -209,23 +207,73 @@ teardown() {
     [ $status -eq 0 ]
     [[ "$output" =~ 1 ]] || false
 
-    regex='file://.*/remote'
-    run dolt sql -q "select * from dolt_remotes" -r csv
+    run dolt sql -q "select name, fetch_specs, params from dolt_remotes" -r csv
     [ $status -eq 0 ]
-    [[ "${lines[0]}" = name,url,fetch_specs,params ]] || false
-    [[ "${lines[1]}" =~ origin,$regex,[refs/heads/*:refs/remotes/origin/*,map[] ]] || false
+    [[ "${lines[0]}" =~ "name,fetch_specs,params" ]] || false
+    [[ "${lines[1]}" =~ "origin,\"[\"\"refs/heads/*:refs/remotes/origin/*\"\"]\",{}" ]] || false
 
-    dolt sql -q "delete from dolt_remotes where name = 'origin1'"
+    regex='file://.*/remote'
+    run dolt sql -q "select url from dolt_remotes" -r csv
+    [ $status -eq 0 ]
+    [[ "${lines[0]}" = url ]] || false
+    [[ "$output" =~ $regex ]] || false
+
+    run dolt sql -q "CALL DOLT_REMOTE('remove', 'origin1')"
+    [ $status -eq 1 ]
+    [[ "$output" =~ "error: unknown remote: 'origin1'" ]] || false
 
     run dolt sql -q "select count(*) from dolt_remotes"
     [ $status -eq 0 ]
     [[ "$output" =~ 1 ]] || false
 
-    dolt sql -q "delete from dolt_remotes where name = 'origin'"
-
+    dolt sql -q "CALL DOLT_REMOTE('remove', 'origin')"
     run dolt sql -q "select count(*) from dolt_remotes" -r csv
     [ $status -eq 0 ]
     [[ "$output" =~ 0 ]] || false
+}
+
+@test "system-tables: revision databases can query dolt_remotes table" {
+    mkdir remote
+    dolt remote add origin file://remote/
+    dolt branch b1
+
+    run dolt sql <<SQL
+SELECT name FROM dolt_remotes;
+SQL
+    [ $status -eq 0 ]
+    [[ "$output" =~ "origin" ]] || false
+
+    DATABASE=$(echo $(basename $(pwd)))
+    run dolt sql <<SQL
+USE \`$DATABASE/b1\`;
+SELECT name FROM dolt_remotes;
+SQL
+    [ $status -eq 0 ]
+    [[ "$output" =~ "origin" ]] || false
+}
+
+@test "system-tables: query dolt_diff system table" {
+    dolt sql -q "CREATE TABLE testStaged (pk INT, c1 INT, PRIMARY KEY(pk))"
+    dolt add testStaged
+    dolt sql -q "CREATE TABLE testWorking (pk INT, c1 INT, PRIMARY KEY(pk))"
+
+    run dolt sql -r csv -q 'select * from dolt_diff'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "STAGED,testStaged,,,,,false,true" ]] || false
+    [[ "$output" =~ "WORKING,testWorking,,,,,false,true" ]] || false
+}
+
+@test "system-tables: query dolt_column_diff system table" {
+    dolt sql -q "CREATE TABLE testStaged (pk INT, c1 INT, PRIMARY KEY(pk))"
+    dolt add testStaged
+    dolt sql -q "CREATE TABLE testWorking (pk INT, c1 INT, PRIMARY KEY(pk))"
+
+    run dolt sql -r csv -q 'select * from dolt_column_diff'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "STAGED,testStaged,pk,,,,,added" ]] || false
+    [[ "$output" =~ "STAGED,testStaged,c1,,,,,added" ]] || false
+    [[ "$output" =~ "WORKING,testWorking,pk,,,,,added" ]] || false
+    [[ "$output" =~ "WORKING,testWorking,c1,,,,,added" ]] || false
 }
 
 @test "system-tables: query dolt_diff_ system table" {
@@ -331,7 +379,21 @@ teardown() {
     [[ "$output" =~ "$EXPECTED" ]] || false
 }
 
+@test "system-tables: query dolt_diff_ system table when column types have been narrowed" {
+    dolt sql -q "create table t (pk int primary key, col1 varchar(20), col2 int);"
+    dolt commit -Am "new table t"
+    dolt sql -q "insert into t values (1, '123456789012345', 420);"
+    dolt commit -am "inserting a row"
+    dolt sql -q "update t set col1='1234567890', col2=13;"
+    dolt sql -q "alter table t modify column col1 varchar(10);"
+    dolt sql -q "alter table t modify column col2 tinyint;"
+    dolt commit -am "narrowing types"
 
+    run dolt sql -r csv -q "select to_pk, to_col1, to_col2, from_pk, from_col1, from_col2, diff_type from dolt_diff_t order by from_commit_date ASC;"
+    [ $status -eq 0 ]
+    [[ $output =~ "1,,,,,,added" ]] || false
+    [[ $output =~ "1,1234567890,13,1,,,modified" ]] || false
+}
 
 @test "system-tables: query dolt_history_ system table" {
     dolt sql -q "create table test (pk int, c1 int, primary key(pk))"
@@ -420,8 +482,7 @@ teardown() {
     dolt add -A && dolt commit -m "commit C"
 
     dolt checkout main
-    dolt merge other
-    dolt add -A && dolt commit -m "commit M"
+    dolt merge other -m "merge other (commit M)"
 
     #         C--M
     #        /  /
@@ -446,8 +507,7 @@ teardown() {
     dolt add -A && dolt commit -m "commit C"
 
     dolt checkout main
-    dolt merge other
-    dolt add -A && dolt commit -m "commit M"
+    dolt merge other -m "merge other (commit M)"
 
     run dolt sql -q "
         SELECT an.parent_index,cm.message
@@ -464,60 +524,24 @@ teardown() {
     [[ "$output" =~ "1,commit C" ]] || false
 }
 
-@test "system-tables: dolt_branches table should include remote refs as well" {
-    skip "This functionality needs to be implemented"
-
-    # Create a remote with a test branch
-    dolt remote add test-remote http://localhost:50051/test-org/test-repo
-    run dolt push test-remote main
-    dolt checkout -b test-branch
-    dolt sql <<SQL
-CREATE TABLE test (
-  pk BIGINT NOT NULL,
-  c1 BIGINT,
-  c2 BIGINT,
-  c3 BIGINT,
-  c4 BIGINT,
-  c5 BIGINT,
-  PRIMARY KEY (pk)
-);
-SQL
-
-    dolt add test
-    dolt commit -m "test commit"
-    dolt push test-remote test-branch
-
-    # Clone the branch
-    cd "dolt-repo-clones"
-    run dolt clone http://localhost:50051/test-org/test-repo
-    [ "$status" -eq 0 ]
-
-    cd test-repo
-
-    # Assert we are on main
-    run dolt branch
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "main" ]] || false
-    [[ ! "$output" =~ "test-branch" ]] || false
-
-    # Validate that the dolt_branches table has the remote test-branch (this is the failing part)
-    run dolt sql -q "SELECT COUNT(*) from dolt_branches"
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "2" ]] || false
-
-    run dolt sql -q "SELECT COUNT(*) from dolt_branches WHERE name='test-branch'"
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "1" ]] || false
-}
-
-@test "system-tables: cannot delete last branch in dolt_branches" {
+@test "system-tables: dolt_branches is read-only" {
     run dolt sql -q "DELETE FROM dolt_branches"
     [ "$status" -ne 0 ]
+    [[ "$output" =~ "read-only" ]] || false
+
+    run dolt sql -q "INSERT INTO dolt_branches (name,hash) VALUES ('branch1', 'main');"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "read-only" ]] || false
+
+    run dolt sql -q "UPDATE dolt_branches SET name = 'branch1' WHERE name = 'main'"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "read-only" ]] || false
 }
 
 @test "system-tables: dolt diff includes changes from initial commit" {
     dolt sql -q "CREATE TABLE test(pk int primary key, val int)"
     dolt sql -q "INSERT INTO test VALUES (1,1)"
+    dolt add .
     dolt commit -am "cm1"
 
     dolt sql -q "INSERT INTO test VALUES (2,2)"
@@ -527,4 +551,72 @@ SQL
     [ "$status" -eq 0 ]
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
+}
+
+@test "system-tables: query dolt_tags" {
+    dolt sql -q "CREATE TABLE test(pk int primary key, val int)"
+    dolt add .
+    dolt sql -q "INSERT INTO test VALUES (1,1)"
+    dolt commit -am "cm1"
+    dolt tag v1 head -m "tag v1 from main"
+
+    dolt checkout -b branch1
+    dolt sql -q "INSERT INTO test VALUES (2,2)"
+    dolt commit -am "cm2"
+    dolt tag v2 branch1~ -m "tag v2 from branch1"
+    dolt tag v3 branch1 -m "tag v3 from branch1"
+
+    run dolt sql -q "SELECT * FROM dolt_tags" -r csv
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "tag v1 from main" ]] || false
+    [[ "$output" =~ "tag v2 from branch1" ]] || false
+    [[ "$output" =~ "tag v3 from branch1" ]] || false
+}
+
+@test "system-tables: query dolt_schema_diff" {
+			dolt sql <<SQL
+call dolt_checkout('-b', 'branch1');
+create table test (pk int primary key, c1 int, c2 int);
+call dolt_add('.');
+call dolt_commit('-am', 'commit 1');
+call dolt_tag('tag1');
+call dolt_checkout('-b', 'branch2');
+alter table test drop column c2, add column c3 varchar(10);
+call dolt_add('.');
+call dolt_commit('-m', 'commit 2');
+call dolt_tag('tag2');
+call dolt_checkout('-b', 'branch3');
+insert into test values (1, 2, 3);
+call dolt_add('.');
+call dolt_commit('-m', 'commit 3');
+call dolt_tag('tag3');
+SQL
+
+      run dolt sql -q "select * from dolt_schema_diff('branch1', 'branch2');"
+      [ "$status" -eq 0 ]
+      [[ "$output" =~ "| test            | test          | CREATE TABLE \`test\` (                                             | CREATE TABLE \`test\` (                                             |" ]] || false
+      [[ "$output" =~ "|                 |               |   \`c2\` int,                                                       |   \`c3\` varchar(10),                                               |" ]] || false
+
+      run dolt sql -q "select * from dolt_schema_diff('branch2', 'branch1');"
+      [ "$status" -eq 0 ]
+      [[ "$output" =~ "| test            | test          | CREATE TABLE \`test\` (                                             | CREATE TABLE \`test\` (                                             |" ]] || false
+      [[ "$output" =~ "|                 |               |   \`c3\` varchar(10),                                               |   \`c2\` int,                                                       |" ]] || false
+
+      run dolt sql -q "select * from dolt_schema_diff('tag1', 'tag2');"
+      [ "$status" -eq 0 ]
+      [[ "$output" =~ "| test            | test          | CREATE TABLE \`test\` (                                             | CREATE TABLE \`test\` (                                             |" ]] || false
+      [[ "$output" =~ "|                 |               |   \`c2\` int,                                                       |   \`c3\` varchar(10),                                               |" ]] || false
+
+      run dolt sql -q "select * from dolt_schema_diff('tag2', 'tag1');"
+      [ "$status" -eq 0 ]
+      [[ "$output" =~ "| test            | test          | CREATE TABLE \`test\` (                                             | CREATE TABLE \`test\` (                                             |" ]] || false
+      [[ "$output" =~ "|                 |               |   \`c3\` varchar(10),                                               |   \`c2\` int,                                                       |" ]] || false
+
+      run dolt sql -q "select * from dolt_schema_diff('branch1', 'branch1');"
+      [ "$status" -eq 0 ]
+      [ "$output" = "" ]
+
+      run dolt sql -q "select * from dolt_schema_diff('tag2', 'tag2');"
+      [ "$status" -eq 0 ]
+      [ "$output" = "" ]
 }

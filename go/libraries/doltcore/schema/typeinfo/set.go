@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -39,41 +40,40 @@ type setType struct {
 var _ TypeInfo = (*setType)(nil)
 
 func CreateSetTypeFromParams(params map[string]string) (TypeInfo, error) {
-	var collation sql.Collation
-	var err error
-	if collationStr, ok := params[setTypeParam_Collation]; ok {
-		collation, err = sql.ParseCollation(nil, &collationStr, false)
-		if err != nil {
-			return nil, err
-		}
-	} else {
+	collationStr, ok := params[setTypeParam_Collation]
+	if !ok {
 		return nil, fmt.Errorf(`create set type info is missing param "%v"`, setTypeParam_Collation)
 	}
-	var values []string
-	if valuesStr, ok := params[setTypeParam_Values]; ok {
-		dec := gob.NewDecoder(strings.NewReader(valuesStr))
-		err = dec.Decode(&values)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		return nil, fmt.Errorf(`create set type info is missing param "%v"`, setTypeParam_Values)
-	}
-	sqlSetType, err := sql.CreateSetType(values, collation)
+	collation, err := sql.ParseCollation("", collationStr, false)
 	if err != nil {
 		return nil, err
 	}
-	return &setType{sqlSetType}, nil
+
+	valuesStr, ok := params[setTypeParam_Values]
+	if !ok {
+		return nil, fmt.Errorf(`create set type info is missing param "%v"`, setTypeParam_Values)
+	}
+	var values []string
+	dec := gob.NewDecoder(strings.NewReader(valuesStr))
+	if err = dec.Decode(&values); err != nil {
+		return nil, err
+	}
+
+	sqlSetType, err := gmstypes.CreateSetType(values, collation)
+	if err != nil {
+		return nil, err
+	}
+	return CreateSetTypeFromSqlSetType(sqlSetType), nil
+}
+
+func CreateSetTypeFromSqlSetType(sqlSetType sql.SetType) TypeInfo {
+	return &setType{sqlSetType}
 }
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *setType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
 	if val, ok := v.(types.Uint); ok {
-		res, err := ti.sqlSetType.Unmarshal(uint64(val))
-		if err != nil {
-			return nil, fmt.Errorf(`"%v" cannot convert "%v" to value`, ti.String(), val)
-		}
-		return res, nil
+		return uint64(val), nil
 	}
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
@@ -86,12 +86,7 @@ func (ti *setType) ReadFrom(_ *types.NomsBinFormat, reader types.CodecReader) (i
 	k := reader.ReadKind()
 	switch k {
 	case types.UintKind:
-		val := reader.ReadUint()
-		res, err := ti.sqlSetType.Unmarshal(uint64(val))
-		if err != nil {
-			return nil, fmt.Errorf(`"%v" cannot convert "%v" to value`, ti.String(), val)
-		}
-		return res, nil
+		return reader.ReadUint(), nil
 	case types.NullKind:
 		return nil, nil
 	}
@@ -104,11 +99,11 @@ func (ti *setType) ConvertValueToNomsValue(ctx context.Context, vrw types.ValueR
 	if v == nil {
 		return types.NullValue, nil
 	}
-	val, err := ti.sqlSetType.Marshal(v)
+	val, _, err := ti.sqlSetType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
-	return types.Uint(val), nil
+	return types.Uint(val.(uint64)), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -134,13 +129,13 @@ func (ti *setType) FormatValue(v types.Value) (*string, error) {
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
 	}
-	strVal, err := ti.ConvertNomsValueToValue(v)
+	convVal, err := ti.ConvertNomsValueToValue(v)
 	if err != nil {
 		return nil, err
 	}
-	val, ok := strVal.(string)
-	if !ok {
-		return nil, fmt.Errorf(`"%v" has unexpectedly encountered a value of type "%T" from embedded type`, ti.String(), v)
+	val, err := ti.sqlSetType.BitsToString(convVal.(uint64))
+	if err != nil {
+		return nil, err
 	}
 	return &val, nil
 }
@@ -168,7 +163,7 @@ func (ti *setType) GetTypeParams() map[string]string {
 // IsValid implements TypeInfo interface.
 func (ti *setType) IsValid(v types.Value) bool {
 	if val, ok := v.(types.Uint); ok {
-		_, err := ti.sqlSetType.Unmarshal(uint64(val))
+		_, err := ti.sqlSetType.BitsToString(uint64(val))
 		if err != nil {
 			return false
 		}
@@ -217,6 +212,10 @@ func setTypeConverter(ctx context.Context, src *setType, destTi TypeInfo) (tc Ty
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *intType:
@@ -224,6 +223,12 @@ func setTypeConverter(ctx context.Context, src *setType, destTi TypeInfo) (tc Ty
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

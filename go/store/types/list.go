@@ -37,9 +37,9 @@ var EmptyList List
 // or more types. The type of the list will reflect the type of the elements in the list. For
 // example:
 //
-//  l := NewList(Float(1), Bool(true))
-//  fmt.Println(l.Type().Describe())
-//  // outputs List<Bool | Float>
+//	l := NewList(Float(1), Bool(true))
+//	fmt.Println(l.Type().Describe())
+//	// outputs List<Bool | Float>
 //
 // Lists, like all Noms values are immutable so the "mutation" methods return a new list.
 type List struct {
@@ -82,7 +82,7 @@ func (l List) ToSet(ctx context.Context) (Set, error) {
 	}
 	e := s.Edit()
 	err = l.IterAll(ctx, func(v Value, idx uint64) error {
-		se, err := e.Insert(v)
+		se, err := e.Insert(ctx, v)
 		e = se
 		return err
 	})
@@ -137,24 +137,6 @@ func (l List) asSequence() sequence {
 // Value interface
 func (l List) Value(ctx context.Context) (Value, error) {
 	return l, nil
-}
-
-func (l List) WalkValues(ctx context.Context, cb ValueCallback) error {
-	var err error
-	iterErr := iterAll(ctx, l, func(v Value, idx uint64) error {
-		if err != nil {
-			return nil
-		}
-
-		err = cb(v)
-		return err
-	})
-
-	if err != nil {
-		return err
-	}
-
-	return iterErr
 }
 
 // Get returns the value at the given index. If this list has been chunked then this will have to
@@ -495,7 +477,7 @@ func newListChunker(nbf *NomsBinFormat, salt byte) sequenceSplitter {
 }
 
 func makeListLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
-	return func(level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
+	return func(ctx context.Context, level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
 		d.PanicIfFalse(level == 0)
 		values := make([]Value, len(items))
 

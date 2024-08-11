@@ -27,24 +27,33 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/dustin/go-humanize"
+	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/oracle/oci-go-sdk/v65/common"
+	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/dolthub/dolt/go/libraries/utils/tracing"
 	"github.com/dolthub/dolt/go/store/blobstore"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
-var ErrFetchFailure = errors.New("fetch failed")
-var ErrSpecWithoutChunkSource = errors.New("manifest referenced table file for which there is no chunkSource.")
+var (
+	ErrFetchFailure                           = errors.New("fetch failed")
+	ErrSpecWithoutChunkSource                 = errors.New("manifest referenced table file for which there is no chunkSource.")
+	ErrConcurrentManifestWriteDuringOverwrite = errors.New("concurrent manifest write during manifest overwrite")
+)
 
 // The root of a Noms Chunk Store is stored in a 'manifest', along with the
 // names of the tables that hold all the chunks in the store. The number of
@@ -57,24 +66,18 @@ const (
 	defaultMemTableSize uint64 = (1 << 20) * 128 // 128MB
 	defaultMaxTables           = 256
 
-	defaultIndexCacheSize    = (1 << 20) * 64 // 64MB
-	defaultManifestCacheSize = 1 << 23        // 8MB
+	defaultManifestCacheSize = 1 << 23 // 8MB
 	preflushChunkCount       = 8
-
-	copyTableFileBufferSize = 128 * 1024 * 1024
 )
 
 var (
 	cacheOnce           = sync.Once{}
-	globalIndexCache    *indexCache
 	makeManifestManager func(manifest) manifestManager
-	globalFDCache       *fdCache
 )
 
-func makeGlobalCaches() {
-	globalIndexCache = newIndexCache(defaultIndexCacheSize)
-	globalFDCache = newFDCache(defaultMaxTables)
+var tracer = otel.Tracer("github.com/dolthub/dolt/go/store/nbs")
 
+func makeGlobalCaches() {
 	manifestCache := newManifestCache(defaultManifestCacheSize)
 	manifestLocks := newManifestLocks()
 	makeManifestManager = func(m manifest) manifestManager { return manifestManager{m, manifestCache, manifestLocks} }
@@ -88,97 +91,85 @@ type NBSCompressedChunkStore interface {
 type NomsBlockStore struct {
 	mm manifestManager
 	p  tablePersister
-	c  conjoiner
+	c  conjoinStrategy
 
 	mu       sync.RWMutex // protects the following state
 	mt       *memTable
 	tables   tableSet
 	upstream manifestContents
 
+	cond         *sync.Cond
+	gcInProgress bool
+	// keeperFunc is set when |gcInProgress| and appends to the GC sweep queue
+	// or blocks on GC finalize
+	keeperFunc func(hash.Hash) bool
+
 	mtSize   uint64
 	putCount uint64
+
+	hasCache *lru.TwoQueueCache[hash.Hash, struct{}]
 
 	stats *Stats
 }
 
-var _ TableFileStore = &NomsBlockStore{}
+func (nbs *NomsBlockStore) PersistGhostHashes(ctx context.Context, refs hash.HashSet) error {
+	return fmt.Errorf("runtime error: PersistGhostHashes should never be called on the NomsBlockStore")
+}
+
+var _ chunks.TableFileStore = &NomsBlockStore{}
 var _ chunks.ChunkStoreGarbageCollector = &NomsBlockStore{}
+
+// 20-byte keys, ~2MB of key data.
+//
+// Likely big enough to keep common top of DAG references in the scan resistant
+// portion for most databases.
+const hasCacheSize = 100000
 
 type Range struct {
 	Offset uint64
 	Length uint32
 }
 
-func (nbs *NomsBlockStore) GetChunkLocations(hashes hash.HashSet) (map[hash.Hash]map[hash.Hash]Range, error) {
+// ChunkJournal returns the ChunkJournal in use by this NomsBlockStore, or nil if no ChunkJournal is being used.
+func (nbs *NomsBlockStore) ChunkJournal() *ChunkJournal {
+	if cj, ok := nbs.p.(*ChunkJournal); ok {
+		return cj
+	}
+	return nil
+}
+
+func (nbs *NomsBlockStore) GetChunkLocationsWithPaths(ctx context.Context, hashes hash.HashSet) (map[string]map[hash.Hash]Range, error) {
+	locs, err := nbs.GetChunkLocations(ctx, hashes)
+	if err != nil {
+		return nil, err
+	}
+	toret := make(map[string]map[hash.Hash]Range, len(locs))
+	for k, v := range locs {
+		toret[k.String()] = v
+	}
+	return toret, nil
+}
+
+func (nbs *NomsBlockStore) GetChunkLocations(ctx context.Context, hashes hash.HashSet) (map[hash.Hash]map[hash.Hash]Range, error) {
 	gr := toGetRecords(hashes)
-
 	ranges := make(map[hash.Hash]map[hash.Hash]Range)
-	f := func(css chunkSources) error {
+
+	fn := func(css chunkSourceSet) error {
 		for _, cs := range css {
-			switch tr := cs.(type) {
-			case *mmapTableReader:
-				offsetRecSlice, _, err := tr.findOffsets(gr)
-				if err != nil {
-					return err
-				}
-				if len(offsetRecSlice) > 0 {
-					y, ok := ranges[hash.Hash(tr.h)]
-
-					if !ok {
-						y = make(map[hash.Hash]Range)
-					}
-
-					for _, offsetRec := range offsetRecSlice {
-						h := hash.Hash(*offsetRec.a)
-						y[h] = Range{Offset: offsetRec.offset, Length: offsetRec.length}
-
-						delete(hashes, h)
-					}
-
-					if len(offsetRecSlice) > 0 {
-						gr = toGetRecords(hashes)
-					}
-
-					ranges[hash.Hash(tr.h)] = y
-				}
-			case *chunkSourceAdapter:
-				y, ok := ranges[hash.Hash(tr.h)]
-
-				if !ok {
-					y = make(map[hash.Hash]Range)
-				}
-
-				tableIndex, err := tr.index()
-
-				if err != nil {
-					return err
-				}
-
-				var foundHashes []hash.Hash
-				for h := range hashes {
-					a := addr(h)
-					e, ok, err := tableIndex.Lookup(&a)
-					if err != nil {
-						return err
-					}
-					if ok {
-						foundHashes = append(foundHashes, h)
-						y[h] = Range{Offset: e.Offset(), Length: e.Length()}
-					}
-				}
-
-				ranges[hash.Hash(tr.h)] = y
-
-				for _, h := range foundHashes {
-					delete(hashes, h)
-				}
-
-			default:
-				panic(reflect.TypeOf(cs))
+			rng, err := cs.getRecordRanges(ctx, gr)
+			if err != nil {
+				return err
 			}
 
+			h := hash.Hash(cs.hash())
+			if m, ok := ranges[h]; ok {
+				for k, v := range rng {
+					m[k] = v
+				}
+			} else {
+				ranges[h] = rng
+			}
 		}
-
 		return nil
 	}
 
@@ -188,22 +179,54 @@ func (nbs *NomsBlockStore) GetChunkLocations(hashes hash.HashSet) (map[hash.Hash
 		return nbs.tables
 	}()
 
-	err := f(tables.upstream)
-
-	if err != nil {
+	if err := fn(tables.upstream); err != nil {
 		return nil, err
 	}
-
-	err = f(tables.novel)
-
-	if err != nil {
+	if err := fn(tables.novel); err != nil {
 		return nil, err
 	}
-
 	return ranges, nil
 }
 
+func (nbs *NomsBlockStore) conjoinIfRequired(ctx context.Context) (bool, error) {
+	if nbs.c.conjoinRequired(nbs.tables) {
+		newUpstream, cleanup, err := conjoin(ctx, nbs.c, nbs.upstream, nbs.mm, nbs.p, nbs.stats)
+		if err != nil {
+			return false, err
+		}
+
+		newTables, err := nbs.tables.rebase(ctx, newUpstream.specs, nbs.stats)
+		if err != nil {
+			return false, err
+		}
+
+		nbs.upstream = newUpstream
+		oldTables := nbs.tables
+		nbs.tables = newTables
+		err = oldTables.close()
+		if err != nil {
+			return true, err
+		}
+		cleanup()
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
 func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.Hash]uint32) (mi ManifestInfo, err error) {
+	nbs.mu.Lock()
+	defer nbs.mu.Unlock()
+	err = nbs.waitForGC(ctx)
+	if err != nil {
+		return
+	}
+
+	err = nbs.checkAllManifestUpdatesExist(ctx, updates)
+	if err != nil {
+		return
+	}
+
 	nbs.mm.LockForUpdate()
 	defer func() {
 		unlockErr := nbs.mm.UnlockForUpdate()
@@ -213,12 +236,14 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 		}
 	}()
 
-	nbs.mu.Lock()
-	defer nbs.mu.Unlock()
+	_, err = nbs.conjoinIfRequired(ctx)
+	if err != nil {
+		return manifestContents{}, err
+	}
 
 	var updatedContents manifestContents
 	for {
-		ok, contents, ferr := nbs.mm.Fetch(ctx, nbs.stats)
+		ok, contents, _, ferr := nbs.mm.Fetch(ctx, nbs.stats)
 		if ferr != nil {
 			return manifestContents{}, ferr
 		} else if !ok {
@@ -231,11 +256,9 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 
 		var addCount int
 		for h, count := range updates {
-			a := addr(h)
-
-			if _, ok := currSpecs[a]; !ok {
+			if _, ok := currSpecs[h]; !ok {
 				addCount++
-				contents.specs = append(contents.specs, tableSpec{a, count})
+				contents.specs = append(contents.specs, tableSpec{h, count})
 			}
 		}
 
@@ -245,7 +268,7 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 
 		contents.lock = generateLockHash(contents.root, contents.specs, contents.appendix)
 
-		// ensure we dont drop existing appendices
+		// ensure we don't drop existing appendices
 		if contents.appendix != nil && len(contents.appendix) > 0 {
 			contents, err = fromManifestAppendixOptionNewContents(contents, contents.appendix, ManifestAppendixOption_Set)
 			if err != nil {
@@ -263,7 +286,7 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 		}
 	}
 
-	newTables, err := nbs.tables.Rebase(ctx, updatedContents.specs, nbs.stats)
+	newTables, err := nbs.tables.rebase(ctx, updatedContents.specs, nbs.stats)
 	if err != nil {
 		return manifestContents{}, err
 	}
@@ -271,7 +294,7 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 	nbs.upstream = updatedContents
 	oldTables := nbs.tables
 	nbs.tables = newTables
-	err = oldTables.Close()
+	err = oldTables.close()
 	if err != nil {
 		return manifestContents{}, err
 	}
@@ -280,6 +303,18 @@ func (nbs *NomsBlockStore) UpdateManifest(ctx context.Context, updates map[hash.
 }
 
 func (nbs *NomsBlockStore) UpdateManifestWithAppendix(ctx context.Context, updates map[hash.Hash]uint32, option ManifestAppendixOption) (mi ManifestInfo, err error) {
+	nbs.mu.Lock()
+	defer nbs.mu.Unlock()
+	err = nbs.waitForGC(ctx)
+	if err != nil {
+		return
+	}
+
+	err = nbs.checkAllManifestUpdatesExist(ctx, updates)
+	if err != nil {
+		return
+	}
+
 	nbs.mm.LockForUpdate()
 	defer func() {
 		unlockErr := nbs.mm.UnlockForUpdate()
@@ -289,12 +324,14 @@ func (nbs *NomsBlockStore) UpdateManifestWithAppendix(ctx context.Context, updat
 		}
 	}()
 
-	nbs.mu.Lock()
-	defer nbs.mu.Unlock()
+	_, err = nbs.conjoinIfRequired(ctx)
+	if err != nil {
+		return manifestContents{}, err
+	}
 
 	var updatedContents manifestContents
 	for {
-		ok, contents, ferr := nbs.mm.Fetch(ctx, nbs.stats)
+		ok, contents, _, ferr := nbs.mm.Fetch(ctx, nbs.stats)
 
 		if ferr != nil {
 			return manifestContents{}, ferr
@@ -309,14 +346,12 @@ func (nbs *NomsBlockStore) UpdateManifestWithAppendix(ctx context.Context, updat
 		appendixSpecs := make([]tableSpec, 0)
 		var addCount int
 		for h, count := range updates {
-			a := addr(h)
-
 			if option == ManifestAppendixOption_Set {
-				appendixSpecs = append(appendixSpecs, tableSpec{a, count})
+				appendixSpecs = append(appendixSpecs, tableSpec{h, count})
 			} else {
-				if _, ok := currAppendixSpecs[a]; !ok {
+				if _, ok := currAppendixSpecs[h]; !ok {
 					addCount++
-					appendixSpecs = append(appendixSpecs, tableSpec{a, count})
+					appendixSpecs = append(appendixSpecs, tableSpec{h, count})
 				}
 			}
 		}
@@ -340,7 +375,7 @@ func (nbs *NomsBlockStore) UpdateManifestWithAppendix(ctx context.Context, updat
 		}
 	}
 
-	newTables, err := nbs.tables.Rebase(ctx, updatedContents.specs, nbs.stats)
+	newTables, err := nbs.tables.rebase(ctx, updatedContents.specs, nbs.stats)
 	if err != nil {
 		return manifestContents{}, err
 	}
@@ -348,18 +383,38 @@ func (nbs *NomsBlockStore) UpdateManifestWithAppendix(ctx context.Context, updat
 	nbs.upstream = updatedContents
 	oldTables := nbs.tables
 	nbs.tables = newTables
-	err = oldTables.Close()
+	err = oldTables.close()
 	if err != nil {
 		return manifestContents{}, err
 	}
 	return updatedContents, nil
 }
 
+func (nbs *NomsBlockStore) checkAllManifestUpdatesExist(ctx context.Context, updates map[hash.Hash]uint32) error {
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.SetLimit(128)
+	for h, c := range updates {
+		h := h
+		c := c
+		eg.Go(func() error {
+			ok, err := nbs.p.Exists(ctx, h, c, nbs.stats)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("missing table file referenced in UpdateManifest call: %v", h)
+			}
+			return nil
+		})
+	}
+	return eg.Wait()
+}
+
 func fromManifestAppendixOptionNewContents(upstream manifestContents, appendixSpecs []tableSpec, option ManifestAppendixOption) (manifestContents, error) {
 	contents, upstreamAppendixSpecs := upstream.removeAppendixSpecs()
 	switch option {
 	case ManifestAppendixOption_Append:
-		// prepend all appendix specs to contents.specs
+		// append all appendix specs to contents.specs
 		specs := append([]tableSpec{}, appendixSpecs...)
 		specs = append(specs, upstreamAppendixSpecs...)
 		contents.specs = append(specs, contents.specs...)
@@ -375,7 +430,7 @@ func fromManifestAppendixOptionNewContents(upstream manifestContents, appendixSp
 			return contents, nil
 		}
 
-		// prepend new appendix specs to contents.specs
+		// append new appendix specs to contents.specs
 		// dropping all upstream appendix specs
 		specs := append([]tableSpec{}, appendixSpecs...)
 		contents.specs = append(specs, contents.specs...)
@@ -390,93 +445,180 @@ func fromManifestAppendixOptionNewContents(upstream manifestContents, appendixSp
 	}
 }
 
-func NewAWSStoreWithMMapIndex(ctx context.Context, nbfVerStr string, table, ns, bucket string, s3 s3svc, ddb ddbsvc, memTableSize uint64) (*NomsBlockStore, error) {
-	cacheOnce.Do(makeGlobalCaches)
-	readRateLimiter := make(chan struct{}, 32)
-	p := &awsTablePersister{
-		s3,
-		bucket,
-		readRateLimiter,
-		&ddbTableStore{ddb, table, readRateLimiter, nil},
-		awsLimits{defaultS3PartSize, minS3PartSize, maxS3PartSize, maxDynamoItemSize, maxDynamoChunks},
-		globalIndexCache,
-		ns,
-		func(bs []byte) (tableIndex, error) {
-			ohi, err := parseTableIndex(bs)
-			if err != nil {
-				return nil, err
-			}
-			return newMmapTableIndex(ohi, nil)
-		},
+// OverwriteStoreManifest is a low level interface to completely replace the manifest contents
+// of |store| with the supplied |root|, |tableFiles| and |appendixTableFiles|. It performs concurrency
+// control on the existing |store| manifest, and can fail with |ErrConcurrentManifestWriteDuringOverwrite|
+// if the |store|'s view is stale. If contents should be unconditionally replaced without regard for the existing
+// contents, run this in a loop, rebasing |store| after each failure.
+//
+// Regardless of success or failure, |OverwriteStoreManifest| does *not* Rebase the |store|. The persisted
+// manifest contents will have been updated, but nothing about the in-memory view of the |store| will reflect
+// those updates. If |store| is Rebase'd, then the new upstream contents will be picked up.
+//
+// Extreme care should be taken when updating manifest contents through this interface. Logic typically
+// assumes that stores grow monotonically unless the |gcGen| of a manifest changes. Since this interface
+// cannot set |gcGen|, callers must ensure that calls to this function grow the store monotonically.
+func OverwriteStoreManifest(ctx context.Context, store *NomsBlockStore, root hash.Hash, tableFiles map[hash.Hash]uint32, appendixTableFiles map[hash.Hash]uint32) (err error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	err = store.waitForGC(ctx)
+	if err != nil {
+		return
 	}
-	mm := makeManifestManager(newDynamoManifest(table, ns, ddb))
-	return newNomsBlockStore(ctx, nbfVerStr, mm, p, inlineConjoiner{defaultMaxTables}, memTableSize)
+
+	contents := manifestContents{
+		root:    root,
+		nbfVers: store.upstream.nbfVers,
+	}
+	// Appendix table files should come first in specs
+	for h, c := range appendixTableFiles {
+		s := tableSpec{name: h, chunkCount: c}
+		contents.appendix = append(contents.appendix, s)
+		contents.specs = append(contents.specs, s)
+	}
+	for h, c := range tableFiles {
+		s := tableSpec{name: h, chunkCount: c}
+		contents.specs = append(contents.specs, s)
+	}
+	contents.lock = generateLockHash(contents.root, contents.specs, contents.appendix)
+
+	store.mm.LockForUpdate()
+	defer func() {
+		unlockErr := store.mm.UnlockForUpdate()
+
+		if err == nil {
+			err = unlockErr
+		}
+	}()
+	updatedContents, err := store.mm.Update(ctx, store.upstream.lock, contents, store.stats, nil)
+	if err != nil {
+		return err
+	}
+	if updatedContents.lock != contents.lock {
+		return ErrConcurrentManifestWriteDuringOverwrite
+	}
+	// We don't update |nbs.upstream| here since the tables have not been rebased
+	return nil
 }
 
-func NewAWSStore(ctx context.Context, nbfVerStr string, table, ns, bucket string, s3 s3svc, ddb ddbsvc, memTableSize uint64) (*NomsBlockStore, error) {
+func NewAWSStoreWithMMapIndex(ctx context.Context, nbfVerStr string, table, ns, bucket string, s3 s3iface.S3API, ddb ddbsvc, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
 	cacheOnce.Do(makeGlobalCaches)
 	readRateLimiter := make(chan struct{}, 32)
 	p := &awsTablePersister{
 		s3,
 		bucket,
 		readRateLimiter,
-		&ddbTableStore{ddb, table, readRateLimiter, nil},
-		awsLimits{defaultS3PartSize, minS3PartSize, maxS3PartSize, maxDynamoItemSize, maxDynamoChunks},
-		globalIndexCache,
+		awsLimits{defaultS3PartSize, minS3PartSize, maxS3PartSize},
 		ns,
-		func(bs []byte) (tableIndex, error) {
-			return parseTableIndex(bs)
-		},
+		q,
 	}
 	mm := makeManifestManager(newDynamoManifest(table, ns, ddb))
-	return newNomsBlockStore(ctx, nbfVerStr, mm, p, inlineConjoiner{defaultMaxTables}, memTableSize)
+	return newNomsBlockStore(ctx, nbfVerStr, mm, p, q, inlineConjoiner{defaultMaxTables}, memTableSize)
+}
+
+func NewAWSStore(ctx context.Context, nbfVerStr string, table, ns, bucket string, s3 s3iface.S3API, ddb ddbsvc, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
+	cacheOnce.Do(makeGlobalCaches)
+	readRateLimiter := make(chan struct{}, 32)
+	p := &awsTablePersister{
+		s3,
+		bucket,
+		readRateLimiter,
+		awsLimits{defaultS3PartSize, minS3PartSize, maxS3PartSize},
+		ns,
+		q,
+	}
+	mm := makeManifestManager(newDynamoManifest(table, ns, ddb))
+	return newNomsBlockStore(ctx, nbfVerStr, mm, p, q, inlineConjoiner{defaultMaxTables}, memTableSize)
 }
 
 // NewGCSStore returns an nbs implementation backed by a GCSBlobstore
-func NewGCSStore(ctx context.Context, nbfVerStr string, bucketName, path string, gcs *storage.Client, memTableSize uint64) (*NomsBlockStore, error) {
+func NewGCSStore(ctx context.Context, nbfVerStr string, bucketName, path string, gcs *storage.Client, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
 	cacheOnce.Do(makeGlobalCaches)
 
 	bs := blobstore.NewGCSBlobstore(gcs, bucketName, path)
-	return NewBSStore(ctx, nbfVerStr, bs, memTableSize)
+	return NewBSStore(ctx, nbfVerStr, bs, memTableSize, q)
+}
+
+// NewGCSStore returns an nbs implementation backed by a GCSBlobstore
+func NewOCISStore(ctx context.Context, nbfVerStr string, bucketName, path string, provider common.ConfigurationProvider, client objectstorage.ObjectStorageClient, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
+	cacheOnce.Do(makeGlobalCaches)
+
+	bs, err := blobstore.NewOCIBlobstore(ctx, provider, client, bucketName, path)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewNoConjoinBSStore(ctx, nbfVerStr, bs, memTableSize, q)
 }
 
 // NewBSStore returns an nbs implementation backed by a Blobstore
-func NewBSStore(ctx context.Context, nbfVerStr string, bs blobstore.Blobstore, memTableSize uint64) (*NomsBlockStore, error) {
+func NewBSStore(ctx context.Context, nbfVerStr string, bs blobstore.Blobstore, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
 	cacheOnce.Do(makeGlobalCaches)
 
-	mm := makeManifestManager(blobstoreManifest{"manifest", bs})
+	mm := makeManifestManager(blobstoreManifest{bs})
 
-	p := &blobstorePersister{bs, s3BlockSize, globalIndexCache}
-	return newNomsBlockStore(ctx, nbfVerStr, mm, p, inlineConjoiner{defaultMaxTables}, memTableSize)
+	p := &blobstorePersister{bs, s3BlockSize, q}
+	return newNomsBlockStore(ctx, nbfVerStr, mm, p, q, inlineConjoiner{defaultMaxTables}, memTableSize)
 }
 
-func NewLocalStore(ctx context.Context, nbfVerStr string, dir string, memTableSize uint64) (*NomsBlockStore, error) {
-	return newLocalStore(ctx, nbfVerStr, dir, memTableSize, defaultMaxTables)
-}
-
-func newLocalStore(ctx context.Context, nbfVerStr string, dir string, memTableSize uint64, maxTables int) (*NomsBlockStore, error) {
+// NewNoConjoinBSStore returns a nbs implementation backed by a Blobstore
+func NewNoConjoinBSStore(ctx context.Context, nbfVerStr string, bs blobstore.Blobstore, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
 	cacheOnce.Do(makeGlobalCaches)
-	err := checkDir(dir)
 
+	mm := makeManifestManager(blobstoreManifest{bs})
+
+	p := &noConjoinBlobstorePersister{bs, s3BlockSize, q}
+	return newNomsBlockStore(ctx, nbfVerStr, mm, p, q, noopConjoiner{}, memTableSize)
+}
+
+func NewLocalStore(ctx context.Context, nbfVerStr string, dir string, memTableSize uint64, q MemoryQuotaProvider) (*NomsBlockStore, error) {
+	return newLocalStore(ctx, nbfVerStr, dir, memTableSize, defaultMaxTables, q)
+}
+
+func newLocalStore(ctx context.Context, nbfVerStr string, dir string, memTableSize uint64, maxTables int, q MemoryQuotaProvider) (*NomsBlockStore, error) {
+	cacheOnce.Do(makeGlobalCaches)
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
+	ok, err := fileExists(filepath.Join(dir, chunkJournalAddr))
+	if err != nil {
+		return nil, err
+	} else if ok {
+		return nil, fmt.Errorf("cannot create NBS store for directory containing chunk journal: %s", dir)
+	}
+
+	m, err := getFileManifest(ctx, dir, asyncFlush)
+	if err != nil {
+		return nil, err
+	}
+	p := newFSTablePersister(dir, q)
+	c := conjoinStrategy(inlineConjoiner{maxTables})
+
+	return newNomsBlockStore(ctx, nbfVerStr, makeManifestManager(m), p, q, c, memTableSize)
+}
+
+func NewLocalJournalingStore(ctx context.Context, nbfVers, dir string, q MemoryQuotaProvider) (*NomsBlockStore, error) {
+	cacheOnce.Do(makeGlobalCaches)
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
+
+	m, err := newJournalManifest(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	p := newFSTablePersister(dir, q)
+
+	journal, err := newChunkJournal(ctx, nbfVers, dir, m, p.(*fsTablePersister))
 	if err != nil {
 		return nil, err
 	}
 
-	m, err := getFileManifest(ctx, dir)
+	mm := makeManifestManager(journal)
+	c := journalConjoiner{child: inlineConjoiner{defaultMaxTables}}
 
-	if err != nil {
-		return nil, err
-	}
-
-	mm := makeManifestManager(m)
-	p := newFSTablePersister(dir, globalFDCache, globalIndexCache)
-	nbs, err := newNomsBlockStore(ctx, nbfVerStr, mm, p, inlineConjoiner{maxTables}, memTableSize)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return nbs, nil
+	// |journal| serves as the manifest and tablePersister
+	return newNomsBlockStore(ctx, nbfVers, mm, journal, q, c, defaultMemTableSize)
 }
 
 func checkDir(dir string) error {
@@ -490,32 +632,39 @@ func checkDir(dir string) error {
 	return nil
 }
 
-func newNomsBlockStore(ctx context.Context, nbfVerStr string, mm manifestManager, p tablePersister, c conjoiner, memTableSize uint64) (*NomsBlockStore, error) {
+func newNomsBlockStore(ctx context.Context, nbfVerStr string, mm manifestManager, p tablePersister, q MemoryQuotaProvider, c conjoinStrategy, memTableSize uint64) (*NomsBlockStore, error) {
 	if memTableSize == 0 {
 		memTableSize = defaultMemTableSize
+	}
+
+	hasCache, err := lru.New2Q[hash.Hash, struct{}](hasCacheSize)
+	if err != nil {
+		return nil, err
 	}
 
 	nbs := &NomsBlockStore{
 		mm:       mm,
 		p:        p,
 		c:        c,
-		tables:   newTableSet(p),
+		tables:   newTableSet(p, q),
 		upstream: manifestContents{nbfVers: nbfVerStr},
 		mtSize:   memTableSize,
+		hasCache: hasCache,
 		stats:    NewStats(),
 	}
+	nbs.cond = sync.NewCond(&nbs.mu)
 
 	t1 := time.Now()
 	defer nbs.stats.OpenLatency.SampleTimeSince(t1)
 
-	exists, contents, err := nbs.mm.Fetch(ctx, nbs.stats)
+	exists, contents, _, err := nbs.mm.Fetch(ctx, nbs.stats)
 
 	if err != nil {
 		return nil, err
 	}
 
 	if exists {
-		newTables, err := nbs.tables.Rebase(ctx, contents.specs, nbs.stats)
+		newTables, err := nbs.tables.rebase(ctx, contents.specs, nbs.stats)
 
 		if err != nil {
 			return nil, err
@@ -524,7 +673,7 @@ func newNomsBlockStore(ctx context.Context, nbfVerStr string, mm manifestManager
 		nbs.upstream = contents
 		oldTables := nbs.tables
 		nbs.tables = newTables
-		err = oldTables.Close()
+		err = oldTables.close()
 		if err != nil {
 			return nil, err
 		}
@@ -548,45 +697,146 @@ func (nbs *NomsBlockStore) WithoutConjoiner() *NomsBlockStore {
 		upstream: nbs.upstream,
 		mtSize:   nbs.mtSize,
 		putCount: nbs.putCount,
+		hasCache: nbs.hasCache,
 		stats:    nbs.stats,
 	}
 }
 
-func (nbs *NomsBlockStore) Put(ctx context.Context, c chunks.Chunk) error {
-	t1 := time.Now()
-	a := addr(c.Hash())
-	success := nbs.addChunk(ctx, a, c.Data())
+// Wait for GC to complete to continue with writes
+func (nbs *NomsBlockStore) waitForGC(ctx context.Context) error {
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			nbs.cond.Broadcast()
+		case <-stop:
+		}
+	}()
+	for nbs.gcInProgress && ctx.Err() == nil {
+		nbs.cond.Wait()
+	}
+	return ctx.Err()
+}
 
-	if !success {
+func (nbs *NomsBlockStore) Put(ctx context.Context, c chunks.Chunk, getAddrs chunks.GetAddrsCurry) error {
+	return nbs.putChunk(ctx, c, getAddrs, nbs.hasMany)
+}
+
+func (nbs *NomsBlockStore) putChunk(ctx context.Context, c chunks.Chunk, getAddrs chunks.GetAddrsCurry, checker refCheck) error {
+	t1 := time.Now()
+
+	success, err := nbs.addChunk(ctx, c, getAddrs, checker)
+	if err != nil {
+		return err
+	} else if !success {
 		return errors.New("failed to add chunk")
 	}
-
-	nbs.putCount++
+	atomic.AddUint64(&nbs.putCount, 1)
 
 	nbs.stats.PutLatency.SampleTimeSince(t1)
 
 	return nil
 }
 
-func (nbs *NomsBlockStore) addChunk(ctx context.Context, h addr, data []byte) bool {
+// When we have chunks with dangling references in our memtable, we have to
+// throw away the entire memtable.
+func (nbs *NomsBlockStore) handlePossibleDanglingRefError(err error) {
+	if errors.Is(err, ErrDanglingRef) {
+		nbs.mt = nil
+	}
+}
+
+// Writes to a Dolt database typically involve mutating some tuple maps and
+// then mutating the top-level address map which points to all the branch heads
+// and working sets. Each internal node of the address map can have many
+// references and many of them typically change quite slowly. We keep a cache
+// of recently written references which we know are in the database so that we
+// don't have to check the table file indexes for these  chunks when we write
+// references to them again in the near future.
+//
+// This cache needs to be treated in a principled manner. The integrity checks
+// that we run against the a set of chunks we are attempting to write consider
+// the to-be-written chunks themselves as also being in the database. This is
+// correct, assuming that all the chunks are written at the same time. However,
+// we should not add the results of those presence checks to the cache until
+// those chunks actually land in the database.
+func (nbs *NomsBlockStore) addPendingRefsToHasCache() {
+	for _, e := range nbs.mt.pendingRefs {
+		if e.has {
+			nbs.hasCache.Add(*e.a, struct{}{})
+		}
+	}
+}
+
+func (nbs *NomsBlockStore) addChunk(ctx context.Context, ch chunks.Chunk, getAddrs chunks.GetAddrsCurry, checker refCheck) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	nbs.mu.Lock()
 	defer nbs.mu.Unlock()
-	if nbs.mt == nil {
-		nbs.mt = newMemTable(nbs.mtSize)
+
+	retry := true
+	var addChunkRes addChunkResult
+	for retry {
+		retry = false
+		if nbs.mt == nil {
+			nbs.mt = newMemTable(nbs.mtSize)
+		}
+
+		addChunkRes = nbs.mt.addChunk(ch.Hash(), ch.Data())
+		if addChunkRes == chunkNotAdded {
+			ts, err := nbs.tables.append(ctx, nbs.mt, checker, nbs.hasCache, nbs.stats)
+			if err != nil {
+				nbs.handlePossibleDanglingRefError(err)
+				return false, err
+			}
+			nbs.addPendingRefsToHasCache()
+			nbs.tables = ts
+			nbs.mt = newMemTable(nbs.mtSize)
+			addChunkRes = nbs.mt.addChunk(ch.Hash(), ch.Data())
+		}
+		if addChunkRes == chunkAdded || addChunkRes == chunkExists {
+			if nbs.keeperFunc != nil && nbs.keeperFunc(ch.Hash()) {
+				retry = true
+				if err := nbs.waitForGC(ctx); err != nil {
+					return false, err
+				}
+				continue
+			}
+		}
+		if addChunkRes == chunkAdded {
+			nbs.mt.addGetChildRefs(getAddrs(ch))
+		}
 	}
-	if !nbs.mt.addChunk(h, data) {
-		nbs.tables = nbs.tables.Prepend(ctx, nbs.mt, nbs.stats)
-		nbs.mt = newMemTable(nbs.mtSize)
-		return nbs.mt.addChunk(h, data)
+
+	return addChunkRes == chunkAdded || addChunkRes == chunkExists, nil
+}
+
+// refCheck checks that no dangling references are being committed.
+type refCheck func(reqs []hasRecord) (hash.HashSet, error)
+
+func (nbs *NomsBlockStore) errorIfDangling(root hash.Hash, checker refCheck) error {
+	if !root.IsEmpty() {
+		if _, ok := nbs.hasCache.Get(root); !ok {
+			var hr [1]hasRecord
+			hr[0].a = &root
+			hr[0].prefix = root.Prefix()
+			absent, err := checker(hr[:])
+			if err != nil {
+				return err
+			} else if absent.Size() > 0 {
+				return fmt.Errorf("%w: found dangling references to %s", ErrDanglingRef, absent.String())
+			}
+			nbs.hasCache.Add(root, struct{}{})
+		}
 	}
-	return true
+	return nil
 }
 
 func (nbs *NomsBlockStore) Get(ctx context.Context, h hash.Hash) (chunks.Chunk, error) {
-	span, ctx := tracing.StartSpan(ctx, "nbs.Get")
-	defer func() {
-		span.Finish()
-	}()
+	ctx, span := tracer.Start(ctx, "nbs.Get")
+	defer span.End()
 
 	t1 := time.Now()
 	defer func() {
@@ -594,14 +844,13 @@ func (nbs *NomsBlockStore) Get(ctx context.Context, h hash.Hash) (chunks.Chunk, 
 		nbs.stats.ChunksPerGet.Sample(1)
 	}()
 
-	a := addr(h)
 	data, tables, err := func() ([]byte, chunkReader, error) {
 		var data []byte
 		nbs.mu.RLock()
 		defer nbs.mu.RUnlock()
 		if nbs.mt != nil {
 			var err error
-			data, err = nbs.mt.get(ctx, a, nbs.stats)
+			data, err = nbs.mt.get(ctx, h, nbs.stats)
 
 			if err != nil {
 				return nil, nil, err
@@ -618,7 +867,7 @@ func (nbs *NomsBlockStore) Get(ctx context.Context, h hash.Hash) (chunks.Chunk, 
 		return chunks.NewChunkWithHash(h, data), nil
 	}
 
-	data, err = tables.get(ctx, a, nbs.stats)
+	data, err = tables.get(ctx, h, nbs.stats)
 
 	if err != nil {
 		return chunks.EmptyChunk, err
@@ -632,22 +881,16 @@ func (nbs *NomsBlockStore) Get(ctx context.Context, h hash.Hash) (chunks.Chunk, 
 }
 
 func (nbs *NomsBlockStore) GetMany(ctx context.Context, hashes hash.HashSet, found func(context.Context, *chunks.Chunk)) error {
-	span, ctx := tracing.StartSpan(ctx, "nbs.GetMany")
-	span.LogKV("num_hashes", len(hashes))
-	defer func() {
-		span.Finish()
-	}()
+	ctx, span := tracer.Start(ctx, "nbs.GetMany", trace.WithAttributes(attribute.Int("num_hashes", len(hashes))))
+	span.End()
 	return nbs.getManyWithFunc(ctx, hashes, func(ctx context.Context, cr chunkReader, eg *errgroup.Group, reqs []getRecord, stats *Stats) (bool, error) {
 		return cr.getMany(ctx, eg, reqs, found, nbs.stats)
 	})
 }
 
 func (nbs *NomsBlockStore) GetManyCompressed(ctx context.Context, hashes hash.HashSet, found func(context.Context, CompressedChunk)) error {
-	span, ctx := tracing.StartSpan(ctx, "nbs.GetManyCompressed")
-	span.LogKV("num_hashes", len(hashes))
-	defer func() {
-		span.Finish()
-	}()
+	ctx, span := tracer.Start(ctx, "nbs.GetManyCompressed", trace.WithAttributes(attribute.Int("num_hashes", len(hashes))))
+	defer span.End()
 	return nbs.getManyWithFunc(ctx, hashes, func(ctx context.Context, cr chunkReader, eg *errgroup.Group, reqs []getRecord, stats *Stats) (bool, error) {
 		return cr.getManyCompressed(ctx, eg, reqs, found, nbs.stats)
 	})
@@ -669,6 +912,8 @@ func (nbs *NomsBlockStore) getManyWithFunc(
 	}()
 
 	eg, ctx := errgroup.WithContext(ctx)
+	const ioParallelism = 16
+	eg.SetLimit(ioParallelism)
 
 	tables, remaining, err := func() (tables chunkReader, remaining bool, err error) {
 		nbs.mu.RLock()
@@ -699,39 +944,16 @@ func toGetRecords(hashes hash.HashSet) []getRecord {
 	reqs := make([]getRecord, len(hashes))
 	idx := 0
 	for h := range hashes {
-		a := addr(h)
+		h := h
 		reqs[idx] = getRecord{
-			a:      &a,
-			prefix: a.Prefix(),
+			a:      &h,
+			prefix: h.Prefix(),
 		}
 		idx++
 	}
 
 	sort.Sort(getRecordByPrefix(reqs))
 	return reqs
-}
-
-func (nbs *NomsBlockStore) CalcReads(hashes hash.HashSet, blockSize uint64) (reads int, split bool, err error) {
-	reqs := toGetRecords(hashes)
-	tables := func() (tables tableSet) {
-		nbs.mu.RLock()
-		defer nbs.mu.RUnlock()
-		tables = nbs.tables
-
-		return
-	}()
-
-	reads, split, remaining, err := tables.calcReads(reqs, blockSize)
-
-	if err != nil {
-		return 0, false, err
-	}
-
-	if remaining {
-		return 0, false, errors.New("failed to find all chunks")
-	}
-
-	return
 }
 
 func (nbs *NomsBlockStore) Count() (uint32, error) {
@@ -769,13 +991,12 @@ func (nbs *NomsBlockStore) Has(ctx context.Context, h hash.Hash) (bool, error) {
 		nbs.stats.AddressesPerHas.Sample(1)
 	}()
 
-	a := addr(h)
 	has, tables, err := func() (bool, chunkReader, error) {
 		nbs.mu.RLock()
 		defer nbs.mu.RUnlock()
 
 		if nbs.mt != nil {
-			has, err := nbs.mt.has(a)
+			has, err := nbs.mt.has(h)
 
 			if err != nil {
 				return false, nil, err
@@ -792,7 +1013,7 @@ func (nbs *NomsBlockStore) Has(ctx context.Context, h hash.Hash) (bool, error) {
 	}
 
 	if !has {
-		has, err = tables.has(a)
+		has, err = tables.has(h)
 
 		if err != nil {
 			return false, err
@@ -803,13 +1024,21 @@ func (nbs *NomsBlockStore) Has(ctx context.Context, h hash.Hash) (bool, error) {
 }
 
 func (nbs *NomsBlockStore) HasMany(ctx context.Context, hashes hash.HashSet) (hash.HashSet, error) {
+	if hashes.Size() == 0 {
+		return nil, nil
+	}
+
 	t1 := time.Now()
+	defer nbs.stats.HasLatency.SampleTimeSince(t1)
+	nbs.stats.AddressesPerHas.SampleLen(hashes.Size())
 
-	reqs := toHasRecords(hashes)
+	nbs.mu.RLock()
+	defer nbs.mu.RUnlock()
+	return nbs.hasMany(toHasRecords(hashes))
+}
 
+func (nbs *NomsBlockStore) hasMany(reqs []hasRecord) (hash.HashSet, error) {
 	tables, remaining, err := func() (tables chunkReader, remaining bool, err error) {
-		nbs.mu.RLock()
-		defer nbs.mu.RUnlock()
 		tables = nbs.tables
 
 		remaining = true
@@ -836,15 +1065,10 @@ func (nbs *NomsBlockStore) HasMany(ctx context.Context, hashes hash.HashSet) (ha
 		}
 	}
 
-	if len(hashes) > 0 {
-		nbs.stats.HasLatency.SampleTimeSince(t1)
-		nbs.stats.AddressesPerHas.SampleLen(len(reqs))
-	}
-
 	absent := hash.HashSet{}
 	for _, r := range reqs {
 		if !r.has {
-			absent.Insert(hash.New(r.a[:]))
+			absent.Insert(*r.a)
 		}
 	}
 	return absent, nil
@@ -854,10 +1078,10 @@ func toHasRecords(hashes hash.HashSet) []hasRecord {
 	reqs := make([]hasRecord, len(hashes))
 	idx := 0
 	for h := range hashes {
-		a := addr(h)
+		h := h
 		reqs[idx] = hasRecord{
-			a:      &a,
-			prefix: a.Prefix(),
+			a:      &h,
+			prefix: h.Prefix(),
 			order:  idx,
 		}
 		idx++
@@ -870,7 +1094,11 @@ func toHasRecords(hashes hash.HashSet) []hasRecord {
 func (nbs *NomsBlockStore) Rebase(ctx context.Context) error {
 	nbs.mu.Lock()
 	defer nbs.mu.Unlock()
-	exists, contents, err := nbs.mm.Fetch(ctx, nbs.stats)
+	return nbs.rebase(ctx)
+}
+
+func (nbs *NomsBlockStore) rebase(ctx context.Context) error {
+	exists, contents, _, err := nbs.mm.Fetch(ctx, nbs.stats)
 	if err != nil {
 		return err
 	}
@@ -881,7 +1109,7 @@ func (nbs *NomsBlockStore) Rebase(ctx context.Context) error {
 			return nil
 		}
 
-		newTables, err := nbs.tables.Rebase(ctx, contents.specs, nbs.stats)
+		newTables, err := nbs.tables.rebase(ctx, contents.specs, nbs.stats)
 		if err != nil {
 			return err
 		}
@@ -889,7 +1117,7 @@ func (nbs *NomsBlockStore) Rebase(ctx context.Context) error {
 		nbs.upstream = contents
 		oldTables := nbs.tables
 		nbs.tables = newTables
-		err = oldTables.Close()
+		err = oldTables.close()
 		if err != nil {
 			return err
 		}
@@ -905,54 +1133,33 @@ func (nbs *NomsBlockStore) Root(ctx context.Context) (hash.Hash, error) {
 }
 
 func (nbs *NomsBlockStore) Commit(ctx context.Context, current, last hash.Hash) (success bool, err error) {
+	return nbs.commit(ctx, current, last, nbs.hasMany)
+}
+
+func (nbs *NomsBlockStore) commit(ctx context.Context, current, last hash.Hash, checker refCheck) (success bool, err error) {
 	t1 := time.Now()
 	defer nbs.stats.CommitLatency.SampleTimeSince(t1)
 
-	anyPossiblyNovelChunks := func() bool {
-		nbs.mu.Lock()
-		defer nbs.mu.Unlock()
-		return nbs.mt != nil || nbs.tables.Novel() > 0
+	nbs.mu.Lock()
+	defer nbs.mu.Unlock()
+
+	if nbs.keeperFunc != nil {
+		if nbs.keeperFunc(current) {
+			err = nbs.waitForGC(ctx)
+			if err != nil {
+				return false, err
+			}
+		}
 	}
 
-	if !anyPossiblyNovelChunks() && current == last {
-		err := nbs.Rebase(ctx)
+	anyPossiblyNovelChunks := nbs.mt != nil || len(nbs.tables.novel) > 0
 
+	if !anyPossiblyNovelChunks && current == last {
+		err := nbs.rebase(ctx)
 		if err != nil {
 			return false, err
 		}
-
 		return true, nil
-	}
-
-	err = func() error {
-		// This is unfortunate. We want to serialize commits to the same store
-		// so that we avoid writing a bunch of unreachable small tables which result
-		// from optimistic lock failures. However, this means that the time to
-		// write tables is included in "commit" time and if all commits are
-		// serialized, it means a lot more waiting.
-		// "non-trivial" tables are persisted here, outside of the commit-lock.
-		// all other tables are persisted in updateManifest()
-		nbs.mu.Lock()
-		defer nbs.mu.Unlock()
-
-		if nbs.mt != nil {
-			cnt, err := nbs.mt.count()
-
-			if err != nil {
-				return err
-			}
-
-			if cnt > preflushChunkCount {
-				nbs.tables = nbs.tables.Prepend(ctx, nbs.mt, nbs.stats)
-				nbs.mt = nil
-			}
-		}
-
-		return nil
-	}()
-
-	if err != nil {
-		return false, err
 	}
 
 	nbs.mm.LockForUpdate()
@@ -964,18 +1171,14 @@ func (nbs *NomsBlockStore) Commit(ctx context.Context, current, last hash.Hash) 
 		}
 	}()
 
-	nbs.mu.Lock()
-	defer nbs.mu.Unlock()
 	for {
-		if err := nbs.updateManifest(ctx, current, last); err == nil {
+		if err := nbs.updateManifest(ctx, current, last, checker); err == nil {
 			return true, nil
 		} else if err == errOptimisticLockFailedRoot || err == errLastRootMismatch {
 			return false, nil
 		} else if err != errOptimisticLockFailedTables {
 			return false, err
 		}
-
-		// I guess this thing infinitely retries without backoff in the case off errOptimisticLockFailedTables
 	}
 }
 
@@ -983,16 +1186,17 @@ var (
 	errLastRootMismatch           = fmt.Errorf("last does not match nbs.Root()")
 	errOptimisticLockFailedRoot   = fmt.Errorf("root moved")
 	errOptimisticLockFailedTables = fmt.Errorf("tables changed")
+	errReadOnlyManifest           = fmt.Errorf("cannot update manifest: database is read only")
 )
 
 // callers must acquire lock |nbs.mu|
-func (nbs *NomsBlockStore) updateManifest(ctx context.Context, current, last hash.Hash) error {
+func (nbs *NomsBlockStore) updateManifest(ctx context.Context, current, last hash.Hash, checker refCheck) error {
 	if nbs.upstream.root != last {
 		return errLastRootMismatch
 	}
 
 	handleOptimisticLockFailure := func(upstream manifestContents) error {
-		newTables, err := nbs.tables.Rebase(ctx, upstream.specs, nbs.stats)
+		newTables, err := nbs.tables.rebase(ctx, upstream.specs, nbs.stats)
 		if err != nil {
 			return err
 		}
@@ -1000,7 +1204,7 @@ func (nbs *NomsBlockStore) updateManifest(ctx context.Context, current, last has
 		nbs.upstream = upstream
 		oldTables := nbs.tables
 		nbs.tables = newTables
-		err = oldTables.Close()
+		err = oldTables.close()
 
 		if last != upstream.root {
 			return errOptimisticLockFailedRoot
@@ -1026,43 +1230,36 @@ func (nbs *NomsBlockStore) updateManifest(ctx context.Context, current, last has
 		}
 
 		if cnt > 0 {
-			nbs.tables = nbs.tables.Prepend(ctx, nbs.mt, nbs.stats)
-			nbs.mt = nil
+			ts, err := nbs.tables.append(ctx, nbs.mt, checker, nbs.hasCache, nbs.stats)
+			if err != nil {
+				nbs.handlePossibleDanglingRefError(err)
+				return err
+			}
+			nbs.addPendingRefsToHasCache()
+			nbs.tables, nbs.mt = ts, nil
 		}
 	}
 
-	if nbs.c.ConjoinRequired(nbs.tables) {
-		var err error
-
-		newUpstream, err := nbs.c.Conjoin(ctx, nbs.upstream, nbs.mm, nbs.p, nbs.stats)
-
-		if err != nil {
-			return err
-		}
-
-		newTables, err := nbs.tables.Rebase(ctx, newUpstream.specs, nbs.stats)
-
-		if err != nil {
-			return err
-		}
-
-		nbs.upstream = newUpstream
-		oldTables := nbs.tables
-		nbs.tables = newTables
-		err = oldTables.Close()
-		if err != nil {
-			return err
-		}
-
+	didConjoin, err := nbs.conjoinIfRequired(ctx)
+	if err != nil {
+		return err
+	}
+	if didConjoin {
 		return errOptimisticLockFailedTables
 	}
 
-	specs, err := nbs.tables.ToSpecs()
+	// check for dangling reference to the new root
+	if err = nbs.errorIfDangling(current, checker); err != nil {
+		nbs.handlePossibleDanglingRefError(err)
+		return err
+	}
+
+	specs, err := nbs.tables.toSpecs()
 	if err != nil {
 		return err
 	}
 
-	// ensure we dont drop appendices on commit
+	// ensure we don't drop appendices on commit
 	var appendixSpecs []tableSpec
 	if nbs.upstream.appendix != nil && len(nbs.upstream.appendix) > 0 {
 		appendixSet := nbs.upstream.getAppendixSet()
@@ -1098,10 +1295,10 @@ func (nbs *NomsBlockStore) updateManifest(ctx context.Context, current, last has
 		return handleOptimisticLockFailure(upstream)
 	}
 
-	newTables, err := nbs.tables.Flatten()
+	newTables, err := nbs.tables.flatten(ctx)
 
 	if err != nil {
-		return nil
+		return err
 	}
 
 	nbs.upstream = newContents
@@ -1116,8 +1313,21 @@ func (nbs *NomsBlockStore) Version() string {
 	return nbs.upstream.nbfVers
 }
 
-func (nbs *NomsBlockStore) Close() error {
-	return nbs.tables.Close()
+func (nbs *NomsBlockStore) AccessMode() chunks.ExclusiveAccessMode {
+	return nbs.p.AccessMode()
+}
+
+func (nbs *NomsBlockStore) Close() (err error) {
+	if cerr := nbs.p.Close(); cerr != nil {
+		err = cerr
+	}
+	if cerr := nbs.tables.close(); cerr != nil {
+		err = cerr
+	}
+	if cerr := nbs.mm.Close(); cerr != nil {
+		err = cerr
+	}
+	return
 }
 
 func (nbs *NomsBlockStore) Stats() interface{} {
@@ -1138,6 +1348,11 @@ type tableFile struct {
 	open func(ctx context.Context) (io.ReadCloser, uint64, error)
 }
 
+// LocationPrefix
+func (tf tableFile) LocationPrefix() string {
+	return ""
+}
+
 // FileID gets the id of the file
 func (tf tableFile) FileID() string {
 	return tf.info.GetName()
@@ -1155,7 +1370,7 @@ func (tf tableFile) Open(ctx context.Context) (io.ReadCloser, uint64, error) {
 
 // Sources retrieves the current root hash, a list of all table files (which may include appendix tablefiles),
 // and a second list of only the appendix table files
-func (nbs *NomsBlockStore) Sources(ctx context.Context) (hash.Hash, []TableFile, []TableFile, error) {
+func (nbs *NomsBlockStore) Sources(ctx context.Context) (hash.Hash, []chunks.TableFile, []chunks.TableFile, error) {
 	nbs.mu.Lock()
 	defer nbs.mu.Unlock()
 
@@ -1191,8 +1406,8 @@ func (nbs *NomsBlockStore) Sources(ctx context.Context) (hash.Hash, []TableFile,
 	return contents.GetRoot(), allTableFiles, appendixTableFiles, nil
 }
 
-func getTableFiles(css map[addr]chunkSource, contents manifestContents, numSpecs int, specFunc func(mc manifestContents, idx int) tableSpec) ([]TableFile, error) {
-	tableFiles := make([]TableFile, 0)
+func getTableFiles(css map[hash.Hash]chunkSource, contents manifestContents, numSpecs int, specFunc func(mc manifestContents, idx int) tableSpec) ([]chunks.TableFile, error) {
+	tableFiles := make([]chunks.TableFile, 0)
 	if numSpecs == 0 {
 		return tableFiles, nil
 	}
@@ -1211,17 +1426,11 @@ func newTableFile(cs chunkSource, info tableSpec) tableFile {
 	return tableFile{
 		info: info,
 		open: func(ctx context.Context) (io.ReadCloser, uint64, error) {
-			r, err := cs.reader(ctx)
+			r, s, err := cs.reader(ctx)
 			if err != nil {
 				return nil, 0, err
 			}
-
-			s, err := cs.size()
-			if err != nil {
-				return nil, 0, err
-			}
-
-			return io.NopCloser(r), s, nil
+			return r, s, nil
 		},
 	}
 }
@@ -1230,62 +1439,34 @@ func (nbs *NomsBlockStore) Size(ctx context.Context) (uint64, error) {
 	nbs.mu.Lock()
 	defer nbs.mu.Unlock()
 
-	exists, contents, err := nbs.mm.m.ParseIfExists(ctx, nbs.stats, nil)
-
-	if err != nil {
-		return uint64(0), err
-	}
-
-	if !exists {
-		return uint64(0), nil
-	}
-
-	css, err := nbs.chunkSourcesByAddr()
-	if err != nil {
-		return uint64(0), err
-	}
-
-	numSpecs := contents.NumTableSpecs()
-
 	size := uint64(0)
-	for i := 0; i < numSpecs; i++ {
-		info := contents.getSpec(i)
-		cs, ok := css[info.name]
-		if !ok {
-			return uint64(0), errors.New("manifest referenced table file for which there is no chunkSource.")
-		}
-		ti, err := cs.index()
-		if err != nil {
-			return uint64(0), fmt.Errorf("error getting table file index for chunkSource. %w", err)
-		}
-		size += ti.TableFileSize()
+	for _, cs := range nbs.tables.upstream {
+		size += cs.currentSize()
 	}
+	for _, cs := range nbs.tables.novel {
+		size += cs.currentSize()
+	}
+
 	return size, nil
 }
 
-func (nbs *NomsBlockStore) chunkSourcesByAddr() (map[addr]chunkSource, error) {
-	css := make(map[addr]chunkSource, len(nbs.tables.upstream)+len(nbs.tables.novel))
+func (nbs *NomsBlockStore) chunkSourcesByAddr() (map[hash.Hash]chunkSource, error) {
+	css := make(map[hash.Hash]chunkSource, len(nbs.tables.upstream)+len(nbs.tables.novel))
 	for _, cs := range nbs.tables.upstream {
-		a, err := cs.hash()
-		if err != nil {
-			return nil, err
-		}
-		css[a] = cs
+		css[cs.hash()] = cs
 	}
 	for _, cs := range nbs.tables.novel {
-		a, err := cs.hash()
-		if err != nil {
-			return nil, err
-		}
-		css[a] = cs
+		css[cs.hash()] = cs
 	}
 	return css, nil
 
 }
 
-func (nbs *NomsBlockStore) SupportedOperations() TableFileStoreOps {
-	_, ok := nbs.p.(*fsTablePersister)
-	return TableFileStoreOps{
+func (nbs *NomsBlockStore) SupportedOperations() chunks.TableFileStoreOps {
+	var ok bool
+	_, ok = nbs.p.(tableFilePersister)
+
+	return chunks.TableFileStoreOps{
 		CanRead:  true,
 		CanWrite: ok,
 		CanPrune: ok,
@@ -1293,30 +1474,31 @@ func (nbs *NomsBlockStore) SupportedOperations() TableFileStoreOps {
 	}
 }
 
-// WriteTableFile will read a table file from the provided reader and write it to the TableFileStore
-func (nbs *NomsBlockStore) WriteTableFile(ctx context.Context, fileId string, numChunks int, rd io.Reader, contentLength uint64, contentHash []byte) error {
-	fsPersister, ok := nbs.p.(*fsTablePersister)
+func (nbs *NomsBlockStore) Path() (string, bool) {
+	if tfp, ok := nbs.p.(tableFilePersister); ok {
+		switch p := tfp.(type) {
+		case *fsTablePersister, *ChunkJournal:
+			return p.Path(), true
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
 
+// WriteTableFile will read a table file from the provided reader and write it to the TableFileStore
+func (nbs *NomsBlockStore) WriteTableFile(ctx context.Context, fileId string, numChunks int, contentHash []byte, getRd func() (io.ReadCloser, uint64, error)) error {
+	tfp, ok := nbs.p.(tableFilePersister)
 	if !ok {
 		return errors.New("Not implemented")
 	}
 
-	path := filepath.Join(fsPersister.dir, fileId)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.ModePerm)
-
+	r, sz, err := getRd()
 	if err != nil {
 		return err
 	}
-
-	defer func() {
-		closeErr := f.Close()
-
-		if err == nil {
-			err = closeErr
-		}
-	}()
-
-	return writeTo(f, rd, copyTableFileBufferSize)
+	defer r.Close()
+	return tfp.CopyTableFile(ctx, r, fileId, sz, uint32(numChunks))
 }
 
 // AddTableFilesToManifest adds table files to the manifest
@@ -1342,78 +1524,52 @@ func (nbs *NomsBlockStore) AddTableFilesToManifest(ctx context.Context, fileIdTo
 	return err
 }
 
-func writeTo(wr io.Writer, rd io.Reader, bufferSize uint32) error {
-	buf := make([]byte, bufferSize)
+// PruneTableFiles deletes old table files that are no longer referenced in the manifest.
+func (nbs *NomsBlockStore) PruneTableFiles(ctx context.Context) (err error) {
+	return nbs.pruneTableFiles(ctx, nbs.hasMany)
+}
 
-	for {
-		// can return bytes and an io.EOF
-		n, err := rd.Read(buf)
+func (nbs *NomsBlockStore) pruneTableFiles(ctx context.Context, checker refCheck) (err error) {
+	mtime := time.Now()
 
-		if err != nil && err != io.EOF {
-			return err
+	return nbs.p.PruneTableFiles(ctx, func() []hash.Hash {
+		nbs.mu.Lock()
+		defer nbs.mu.Unlock()
+		keepers := make([]hash.Hash, 0, len(nbs.tables.novel)+len(nbs.tables.upstream))
+		for a, _ := range nbs.tables.novel {
+			keepers = append(keepers, a)
 		}
-
-		pos := 0
-		for pos < n {
-			n, wrErr := wr.Write(buf[pos:n])
-
-			if wrErr != nil {
-				return wrErr
-			}
-
-			pos += n
+		for a, _ := range nbs.tables.upstream {
+			keepers = append(keepers, a)
 		}
+		return keepers
+	}, mtime)
+}
 
-		if err == io.EOF {
-			break
-		}
+func (nbs *NomsBlockStore) BeginGC(keeper func(hash.Hash) bool) error {
+	nbs.cond.L.Lock()
+	defer nbs.cond.L.Unlock()
+	if nbs.gcInProgress {
+		return errors.New("gc already in progress")
 	}
-
+	nbs.gcInProgress = true
+	nbs.keeperFunc = keeper
+	nbs.cond.Broadcast()
 	return nil
 }
 
-// PruneTableFiles deletes old table files that are no longer referenced in the manifest.
-func (nbs *NomsBlockStore) PruneTableFiles(ctx context.Context) (err error) {
-	nbs.mu.Lock()
-	defer nbs.mu.Unlock()
-
-	nbs.mm.LockForUpdate()
-	defer func() {
-		unlockErr := nbs.mm.UnlockForUpdate()
-
-		if err == nil {
-			err = unlockErr
-		}
-	}()
-
-	for {
-		// flush all tables and update manifest
-		err = nbs.updateManifest(ctx, nbs.upstream.root, nbs.upstream.root)
-
-		if err == nil {
-			break
-		} else if err == errOptimisticLockFailedTables {
-			continue
-		} else {
-			return err
-		}
-
-		// Same behavior as Commit
-		// infinitely retries without backoff in the case off errOptimisticLockFailedTables
+func (nbs *NomsBlockStore) EndGC() {
+	nbs.cond.L.Lock()
+	defer nbs.cond.L.Unlock()
+	if !nbs.gcInProgress {
+		panic("EndGC called when gc was not in progress")
 	}
-
-	ok, contents, err := nbs.mm.Fetch(ctx, &Stats{})
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil // no manifest exists
-	}
-
-	return nbs.p.PruneTableFiles(ctx, contents)
+	nbs.gcInProgress = false
+	nbs.keeperFunc = nil
+	nbs.cond.Broadcast()
 }
 
-func (nbs *NomsBlockStore) MarkAndSweepChunks(ctx context.Context, last hash.Hash, keepChunks <-chan []hash.Hash, dest chunks.ChunkStore) error {
+func (nbs *NomsBlockStore) MarkAndSweepChunks(ctx context.Context, hashes <-chan []hash.Hash, dest chunks.ChunkStore) error {
 	ops := nbs.SupportedOperations()
 	if !ops.CanGC || !ops.CanPrune {
 		return chunks.ErrUnsupportedOperation
@@ -1423,12 +1579,8 @@ func (nbs *NomsBlockStore) MarkAndSweepChunks(ctx context.Context, last hash.Has
 		nbs.mu.RLock()
 		defer nbs.mu.RUnlock()
 
-		if nbs.upstream.root != last {
-			return errLastRootMismatch
-		}
-
-		// check to see if the specs have changed since last gc.  If they haven't bail early.
-		gcGenCheck := generateLockHash(last, nbs.upstream.specs, nbs.upstream.appendix)
+		// check to see if the specs have changed since last gc. If they haven't bail early.
+		gcGenCheck := generateLockHash(nbs.upstream.root, nbs.upstream.specs, nbs.upstream.appendix)
 		if nbs.upstream.gcGen == gcGenCheck {
 			return chunks.ErrNothingToCollect
 		}
@@ -1450,7 +1602,7 @@ func (nbs *NomsBlockStore) MarkAndSweepChunks(ctx context.Context, last hash.Has
 		}
 	}
 
-	specs, err := nbs.copyMarkedChunks(ctx, keepChunks, destNBS)
+	specs, err := nbs.copyMarkedChunks(ctx, hashes, destNBS)
 	if err != nil {
 		return err
 	}
@@ -1459,38 +1611,25 @@ func (nbs *NomsBlockStore) MarkAndSweepChunks(ctx context.Context, last hash.Has
 	}
 
 	if destNBS == nbs {
-		err = nbs.swapTables(ctx, specs)
-		if err != nil {
-			return err
-		}
-
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		currentContents := func() manifestContents {
-			nbs.mu.RLock()
-			defer nbs.mu.RUnlock()
-			return nbs.upstream
-		}()
-
-		return nbs.p.PruneTableFiles(ctx, currentContents)
+		return nbs.swapTables(ctx, specs)
 	} else {
 		fileIdToNumChunks := tableSpecsToMap(specs)
-		err = destNBS.AddTableFilesToManifest(ctx, fileIdToNumChunks)
-
-		if err != nil {
-			return err
-		}
-		return nil
+		return destNBS.AddTableFilesToManifest(ctx, fileIdToNumChunks)
 	}
 }
 
 func (nbs *NomsBlockStore) copyMarkedChunks(ctx context.Context, keepChunks <-chan []hash.Hash, dest *NomsBlockStore) ([]tableSpec, error) {
+	tfp, ok := dest.p.(tableFilePersister)
+	if !ok {
+		return nil, fmt.Errorf("NBS does not support copying garbage collection")
+	}
+
 	gcc, err := newGarbageCollectionCopier()
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: We should clean up gcc on error.
 
 LOOP:
 	for {
@@ -1502,12 +1641,14 @@ LOOP:
 			var addErr error
 			mu := new(sync.Mutex)
 			hashset := hash.NewHashSet(hs...)
+			found := 0
 			err := nbs.GetManyCompressed(ctx, hashset, func(ctx context.Context, c CompressedChunk) {
 				mu.Lock()
 				defer mu.Unlock()
 				if addErr != nil {
 					return
 				}
+				found += 1
 				addErr = gcc.addChunk(ctx, c)
 			})
 			if err != nil {
@@ -1516,34 +1657,20 @@ LOOP:
 			if addErr != nil {
 				return nil, addErr
 			}
+			if found != len(hashset) {
+				return nil, fmt.Errorf("dangling references requested during GC. GC not successful. %v", hashset)
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
-
-	nomsDir := dest.p.(*fsTablePersister).dir
-
-	return gcc.copyTablesToDir(ctx, nomsDir)
-}
-
-// todo: what's the optimal table size to copy to?
-func (nbs *NomsBlockStore) gcTableSize() (uint64, error) {
-	total, err := nbs.tables.physicalLen()
-
-	if err != nil {
-		return 0, err
-	}
-
-	avgTableSize := total / uint64(nbs.tables.Upstream()+nbs.tables.Novel()+1)
-
-	// max(avgTableSize, defaultMemTableSize)
-	if avgTableSize > nbs.mtSize {
-		return avgTableSize, nil
-	}
-	return nbs.mtSize, nil
+	return gcc.copyTablesToDir(ctx, tfp)
 }
 
 func (nbs *NomsBlockStore) swapTables(ctx context.Context, specs []tableSpec) (err error) {
+	nbs.mu.Lock()
+	defer nbs.mu.Unlock()
+
 	nbs.mm.LockForUpdate()
 	defer func() {
 		unlockErr := nbs.mm.UnlockForUpdate()
@@ -1551,9 +1678,6 @@ func (nbs *NomsBlockStore) swapTables(ctx context.Context, specs []tableSpec) (e
 			err = unlockErr
 		}
 	}()
-
-	nbs.mu.Lock()
-	defer nbs.mu.Unlock()
 
 	newLock := generateLockHash(nbs.upstream.root, specs, []tableSpec{})
 	newContents := manifestContents{
@@ -1564,7 +1688,7 @@ func (nbs *NomsBlockStore) swapTables(ctx context.Context, specs []tableSpec) (e
 		specs:   specs,
 	}
 
-	// nothing has changed.  Bail early
+	// Nothing has changed. Bail early.
 	if newContents.gcGen == nbs.upstream.gcGen {
 		return nil
 	}
@@ -1578,31 +1702,59 @@ func (nbs *NomsBlockStore) swapTables(ctx context.Context, specs []tableSpec) (e
 		return errors.New("concurrent manifest edit during GC, before swapTables. GC failed.")
 	}
 
-	// clear memTable
-	nbs.mt = newMemTable(nbs.mtSize)
-
-	// clear nbs.tables.novel
-	nbs.tables, err = nbs.tables.Flatten()
-	if err != nil {
-		return err
-	}
+	// We purge the hasCache here, since |swapTables| is the only place where
+	// chunks can actually be removed from the block store. Other times when
+	// we update the table set, we are appending new table files to it, or
+	// replacing table files in it with a file into which they were conjoined.
+	nbs.hasCache.Purge()
 
 	// replace nbs.tables.upstream with gc compacted tables
-	nbs.upstream = upstream
-	nbs.tables, err = nbs.tables.Rebase(ctx, upstream.specs, nbs.stats)
+	ts, err := nbs.tables.rebase(ctx, upstream.specs, nbs.stats)
+	if err != nil {
+		return err
+	}
+	oldTables := nbs.tables
+	nbs.tables, nbs.upstream = ts, upstream
+	err = oldTables.close()
 	if err != nil {
 		return err
 	}
 
+	// When this is called, we are at a safepoint in the GC process.
+	// We clear novel and the memtable, which are not coming with us
+	// into the new store.
+	oldNovel := nbs.tables.novel
+	nbs.tables.novel = make(chunkSourceSet)
+	for _, css := range oldNovel {
+		err = css.close()
+		if err != nil {
+			return err
+		}
+	}
+	if nbs.mt != nil {
+		var thrown []string
+		for a := range nbs.mt.chunks {
+			thrown = append(thrown, a.String())
+		}
+	}
+	nbs.mt = nil
 	return nil
 }
 
 // SetRootChunk changes the root chunk hash from the previous value to the new root.
 func (nbs *NomsBlockStore) SetRootChunk(ctx context.Context, root, previous hash.Hash) error {
+	return nbs.setRootChunk(ctx, root, previous, nbs.hasMany)
+}
+
+func (nbs *NomsBlockStore) setRootChunk(ctx context.Context, root, previous hash.Hash, checker refCheck) error {
 	nbs.mu.Lock()
 	defer nbs.mu.Unlock()
+	err := nbs.waitForGC(ctx)
+	if err != nil {
+		return err
+	}
 	for {
-		err := nbs.updateManifest(ctx, root, previous)
+		err := nbs.updateManifest(ctx, root, previous, checker)
 
 		if err == nil {
 			return nil
@@ -1615,4 +1767,28 @@ func (nbs *NomsBlockStore) SetRootChunk(ctx context.Context, root, previous hash
 		// Same behavior as Commit
 		// I guess this thing infinitely retries without backoff in the case off errOptimisticLockFailedTables
 	}
+}
+
+// CalcReads computes the number of IO operations necessary to fetch |hashes|.
+func CalcReads(nbs *NomsBlockStore, hashes hash.HashSet, blockSize uint64) (reads int, split bool, err error) {
+	reqs := toGetRecords(hashes)
+	tables := func() (tables tableSet) {
+		nbs.mu.RLock()
+		defer nbs.mu.RUnlock()
+		tables = nbs.tables
+
+		return
+	}()
+
+	reads, split, remaining, err := tableSetCalcReads(tables, reqs, blockSize)
+
+	if err != nil {
+		return 0, false, err
+	}
+
+	if remaining {
+		return 0, false, errors.New("failed to find all chunks")
+	}
+
+	return
 }

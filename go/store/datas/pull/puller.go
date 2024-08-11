@@ -18,17 +18,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
-	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/dolthub/dolt/go/libraries/utils/file"
-	"github.com/dolthub/dolt/go/libraries/utils/iohelp"
-	"github.com/dolthub/dolt/go/store/atomicerr"
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/nbs"
@@ -41,103 +43,52 @@ var ErrDBUpToDate = errors.New("the database does not need to be pulled as it's 
 // the event that the source ChunkStore does not implement `NBSCompressedChunkStore`.
 var ErrIncompatibleSourceChunkStore = errors.New("the chunk store of the source database does not implement NBSCompressedChunkStore.")
 
-const (
-	maxChunkWorkers       = 2
-	outstandingTableFiles = 2
-)
-
-// FilledWriters store CmpChunkTableWriter that have been filled and are ready to be flushed.  In the future will likely
-// add the md5 of the data to this structure to be used to verify table upload calls.
-type FilledWriters struct {
-	wr *nbs.CmpChunkTableWriter
-}
-
-// CmpChnkAndRefs holds a CompressedChunk and all of it's references
-type CmpChnkAndRefs struct {
-	cmpChnk nbs.CompressedChunk
-	refs    map[hash.Hash]int
-}
+type WalkAddrs func(chunks.Chunk, func(hash.Hash, bool) error) error
 
 // Puller is used to sync data between to Databases
 type Puller struct {
-	wrf WalkRefs
+	waf WalkAddrs
 
 	srcChunkStore nbs.NBSCompressedChunkStore
 	sinkDBCS      chunks.ChunkStore
-	rootChunkHash hash.Hash
-	downloaded    hash.HashSet
+	hashes        hash.HashSet
 
-	wr            *nbs.CmpChunkTableWriter
-	tablefileSema *semaphore.Weighted
-	tempDir       string
-	chunksPerTF   int
+	wr *PullTableFileWriter
+	rd nbs.ChunkFetcher
 
-	eventCh chan PullerEvent
 	pushLog *log.Logger
-}
 
-type PullerEventType int
-
-const (
-	NewLevelTWEvent PullerEventType = iota
-	DestDBHasTWEvent
-	LevelUpdateTWEvent
-	LevelDoneTWEvent
-
-	TableFileClosedEvent
-	StartUploadTableFileEvent
-	UploadTableFileUpdateEvent
-	EndUploadTableFileEvent
-)
-
-type TreeWalkEventDetails struct {
-	TreeLevel        int
-	ChunksInLevel    int
-	ChunksAlreadyHad int
-	ChunksBuffered   int
-	ChildrenFound    int
-}
-
-type TableFileEventDetails struct {
-	CurrentFileSize int64
-	Stats           iohelp.ReadStats
-}
-
-type PullerEvent struct {
-	EventType      PullerEventType
-	TWEventDetails TreeWalkEventDetails
-	TFEventDetails TableFileEventDetails
-}
-
-func NewTWPullerEvent(et PullerEventType, details *TreeWalkEventDetails) PullerEvent {
-	return PullerEvent{EventType: et, TWEventDetails: *details}
-}
-
-func NewTFPullerEvent(et PullerEventType, details *TableFileEventDetails) PullerEvent {
-	return PullerEvent{EventType: et, TFEventDetails: *details}
+	statsCh chan Stats
+	stats   *stats
 }
 
 // NewPuller creates a new Puller instance to do the syncing.  If a nil puller is returned without error that means
 // that there is nothing to pull and the sinkDB is already up to date.
-func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sinkCS chunks.ChunkStore, walkRefs WalkRefs, rootChunkHash hash.Hash, eventCh chan PullerEvent) (*Puller, error) {
+func NewPuller(
+	ctx context.Context,
+	tempDir string,
+	chunksPerTF int,
+	srcCS, sinkCS chunks.ChunkStore,
+	walkAddrs WalkAddrs,
+	hashes []hash.Hash,
+	statsCh chan Stats,
+) (*Puller, error) {
 	// Sanity Check
-	exists, err := srcCS.Has(ctx, rootChunkHash)
-
+	hs := hash.NewHashSet(hashes...)
+	missing, err := srcCS.HasMany(ctx, hs)
 	if err != nil {
 		return nil, err
 	}
-
-	if !exists {
+	if missing.Size() != 0 {
 		return nil, errors.New("not found")
 	}
 
-	exists, err = sinkCS.Has(ctx, rootChunkHash)
-
+	hs = hash.NewHashSet(hashes...)
+	missing, err = sinkCS.HasMany(ctx, hs)
 	if err != nil {
 		return nil, err
 	}
-
-	if exists {
+	if missing.Size() == 0 {
 		return nil, ErrDBUpToDate
 	}
 
@@ -150,14 +101,18 @@ func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sink
 		return nil, ErrIncompatibleSourceChunkStore
 	}
 
-	wr, err := nbs.NewCmpChunkTableWriter(tempDir)
+	wr := NewPullTableFileWriter(ctx, PullTableFileWriterConfig{
+		ConcurrentUploads:    2,
+		ChunksPerFile:        chunksPerTF,
+		MaximumBufferedFiles: 8,
+		TempDir:              tempDir,
+		DestStore:            sinkCS.(chunks.TableFileStore),
+	})
 
-	if err != nil {
-		return nil, err
-	}
+	rd := GetChunkFetcher(ctx, srcChunkStore)
 
 	var pushLogger *log.Logger
-	if dbg, ok := os.LookupEnv("PUSH_LOG"); ok && strings.ToLower(dbg) == "true" {
+	if dbg, ok := os.LookupEnv(dconfig.EnvPushLog); ok && strings.ToLower(dbg) == "true" {
 		logFilePath := filepath.Join(tempDir, "push.log")
 		f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.ModePerm)
 
@@ -167,17 +122,17 @@ func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sink
 	}
 
 	p := &Puller{
-		wrf:           walkRefs,
+		waf:           walkAddrs,
 		srcChunkStore: srcChunkStore,
 		sinkDBCS:      sinkCS,
-		rootChunkHash: rootChunkHash,
-		downloaded:    hash.HashSet{},
-		tablefileSema: semaphore.NewWeighted(outstandingTableFiles),
-		tempDir:       tempDir,
+		hashes:        hash.NewHashSet(hashes...),
 		wr:            wr,
-		chunksPerTF:   chunksPerTF,
-		eventCh:       eventCh,
+		rd:            rd,
 		pushLog:       pushLogger,
+		statsCh:       statsCh,
+		stats: &stats{
+			wrStatsGetter: wr.GetStats,
+		},
 	}
 
 	if lcs, ok := sinkCS.(chunks.LoggingChunkStore); ok {
@@ -193,303 +148,234 @@ func (p *Puller) Logf(fmt string, args ...interface{}) {
 	}
 }
 
+type readable interface {
+	Reader() (io.ReadCloser, error)
+	Remove() error
+}
+
 type tempTblFile struct {
 	id          string
-	path        string
+	read        readable
 	numChunks   int
+	chunksLen   uint64
 	contentLen  uint64
 	contentHash []byte
 }
 
-func (p *Puller) uploadTempTableFile(ctx context.Context, ae *atomicerr.AtomicError, tmpTblFile tempTblFile) error {
-	fi, err := os.Stat(tmpTblFile.path)
-
-	if ae.SetIfError(err) {
-		return err
-	}
-
-	f, err := os.Open(tmpTblFile.path)
-
-	if ae.SetIfError(err) {
-		return err
-	}
-
-	fileSize := fi.Size()
-	fWithStats := iohelp.NewReaderWithStats(f, fileSize)
-	fWithStats.Start(func(stats iohelp.ReadStats) {
-		p.addEvent(NewTFPullerEvent(UploadTableFileUpdateEvent, &TableFileEventDetails{
-			CurrentFileSize: fileSize,
-			Stats:           stats,
-		}))
-	})
-	defer func() {
-		_ = fWithStats.Stop()
-
-		go func() {
-			_ = file.Remove(tmpTblFile.path)
-		}()
-	}()
-
-	return p.sinkDBCS.(nbs.TableFileStore).WriteTableFile(ctx, tmpTblFile.id, tmpTblFile.numChunks, fWithStats, tmpTblFile.contentLen, tmpTblFile.contentHash)
+type countingReader struct {
+	io.ReadCloser
+	cnt *uint64
 }
 
-func (p *Puller) processCompletedTables(ctx context.Context, ae *atomicerr.AtomicError, completedTables <-chan FilledWriters) {
-	fileIdToNumChunks := make(map[string]int)
+func (c countingReader) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	atomic.AddUint64(c.cnt, uint64(n))
+	return n, err
+}
 
-	var err error
-	for tblFile := range completedTables {
-		p.tablefileSema.Release(1)
-
-		if ae.IsSet() {
-			continue // drain
-		}
-
-		p.addEvent(NewTFPullerEvent(StartUploadTableFileEvent, &TableFileEventDetails{
-			CurrentFileSize: int64(tblFile.wr.ContentLength()),
-		}))
-
-		var id string
-		id, err = tblFile.wr.Finish()
-
-		if ae.SetIfError(err) {
-			continue
-		}
-
-		path := filepath.Join(p.tempDir, id)
-		err = tblFile.wr.FlushToFile(path)
-
-		if ae.SetIfError(err) {
-			continue
-		}
-
-		ttf := tempTblFile{
-			id:          id,
-			path:        path,
-			numChunks:   tblFile.wr.Size(),
-			contentLen:  tblFile.wr.ContentLength(),
-			contentHash: tblFile.wr.GetMD5(),
-		}
-
-		err = p.uploadTempTableFile(ctx, ae, ttf)
-		if ae.SetIfError(err) {
-			continue
-		}
-
-		p.addEvent(NewTFPullerEvent(EndUploadTableFileEvent, &TableFileEventDetails{
-			CurrentFileSize: int64(ttf.contentLen),
-		}))
-
-		fileIdToNumChunks[id] = ttf.numChunks
+func emitStats(s *stats, ch chan Stats) (cancel func()) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	cancel = func() {
+		close(done)
+		wg.Wait()
 	}
 
-	if ae.IsSet() {
-		return
-	}
+	go func() {
+		defer wg.Done()
+		sampleduration := 100 * time.Millisecond
+		samplesinsec := uint64((1 * time.Second) / sampleduration)
+		weight := 0.1
+		ticker := time.NewTicker(sampleduration)
+		defer ticker.Stop()
+		var lastSendBytes, lastFetchedBytes uint64
+		for {
+			select {
+			case <-ticker.C:
+				wrStats := s.wrStatsGetter()
+				newSendBytes := wrStats.FinishedSendBytes
+				newFetchedBytes := atomic.LoadUint64(&s.fetchedSourceBytes)
+				sendBytesDiff := newSendBytes - lastSendBytes
+				fetchedBytesDiff := newFetchedBytes - lastFetchedBytes
 
-	err = p.sinkDBCS.(nbs.TableFileStore).AddTableFilesToManifest(ctx, fileIdToNumChunks)
-	ae.SetIfError(err)
+				newSendBPS := float64(sendBytesDiff * samplesinsec)
+				newFetchedBPS := float64(fetchedBytesDiff * samplesinsec)
+
+				curSendBPS := math.Float64frombits(atomic.LoadUint64(&s.sendBytesPerSec))
+				curFetchedBPS := math.Float64frombits(atomic.LoadUint64(&s.fetchedSourceBytesPerSec))
+
+				smoothedSendBPS := newSendBPS
+				if curSendBPS != 0 {
+					smoothedSendBPS = curSendBPS + weight*(newSendBPS-curSendBPS)
+				}
+
+				smoothedFetchBPS := newFetchedBPS
+				if curFetchedBPS != 0 {
+					smoothedFetchBPS = curFetchedBPS + weight*(newFetchedBPS-curFetchedBPS)
+				}
+
+				if smoothedSendBPS < 1 {
+					smoothedSendBPS = 0
+				}
+				if smoothedFetchBPS < 1 {
+					smoothedFetchBPS = 0
+				}
+
+				atomic.StoreUint64(&s.sendBytesPerSec, math.Float64bits(smoothedSendBPS))
+				atomic.StoreUint64(&s.fetchedSourceBytesPerSec, math.Float64bits(smoothedFetchBPS))
+
+				lastSendBytes = newSendBytes
+				lastFetchedBytes = newFetchedBytes
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		updateduration := 1 * time.Second
+		ticker := time.NewTicker(updateduration)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ch <- s.read()
+			case <-done:
+				ch <- s.read()
+				return
+			}
+		}
+	}()
+
+	return cancel
+}
+
+type stats struct {
+	sendBytesPerSec uint64
+
+	totalSourceChunks        uint64
+	fetchedSourceChunks      uint64
+	fetchedSourceBytes       uint64
+	fetchedSourceBytesPerSec uint64
+
+	sendBytesPerSecF          float64
+	fetchedSourceBytesPerSecF float64
+
+	wrStatsGetter func() PullTableFileWriterStats
+}
+
+type Stats struct {
+	FinishedSendBytes uint64
+	BufferedSendBytes uint64
+	SendBytesPerSec   float64
+
+	TotalSourceChunks        uint64
+	FetchedSourceChunks      uint64
+	FetchedSourceBytes       uint64
+	FetchedSourceBytesPerSec float64
+}
+
+func (s *stats) read() Stats {
+	wrStats := s.wrStatsGetter()
+
+	var ret Stats
+	ret.FinishedSendBytes = wrStats.FinishedSendBytes
+	ret.BufferedSendBytes = wrStats.BufferedSendBytes
+	ret.SendBytesPerSec = math.Float64frombits(atomic.LoadUint64(&s.sendBytesPerSec))
+	ret.TotalSourceChunks = atomic.LoadUint64(&s.totalSourceChunks)
+	ret.FetchedSourceChunks = atomic.LoadUint64(&s.fetchedSourceChunks)
+	ret.FetchedSourceBytes = atomic.LoadUint64(&s.fetchedSourceBytes)
+	ret.FetchedSourceBytesPerSec = math.Float64frombits(atomic.LoadUint64(&s.fetchedSourceBytesPerSec))
+	return ret
 }
 
 // Pull executes the sync operation
 func (p *Puller) Pull(ctx context.Context) error {
-	twDetails := &TreeWalkEventDetails{TreeLevel: -1}
+	if p.statsCh != nil {
+		c := emitStats(p.stats, p.statsCh)
+		defer c()
+	}
 
-	leaves := make(hash.HashSet)
-	absent := make(hash.HashSet)
-	absent.Insert(p.rootChunkHash)
+	eg, ctx := errgroup.WithContext(ctx)
 
-	ae := atomicerr.New()
-	wg := &sync.WaitGroup{}
-	completedTables := make(chan FilledWriters, 8)
+	const batchSize = 64 * 1024
+	tracker := NewPullChunkTracker(ctx, p.hashes, TrackerConfig{
+		BatchSize: batchSize,
+		HasManyer: p.sinkDBCS,
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.processCompletedTables(ctx, ae, completedTables)
-	}()
-
-	p.tablefileSema.Acquire(ctx, 1)
-	for len(absent) > 0 {
-		limitToNewChunks(absent, p.downloaded)
-
-		chunksInLevel := len(absent)
-		twDetails.ChunksInLevel = chunksInLevel
-		p.addEvent(NewTWPullerEvent(NewLevelTWEvent, twDetails))
-
-		var err error
-		absent, err = p.sinkDBCS.HasMany(ctx, absent)
-
-		if ae.SetIfError(err) {
-			break
-		}
-
-		twDetails.ChunksAlreadyHad = chunksInLevel - len(absent)
-		p.addEvent(NewTWPullerEvent(DestDBHasTWEvent, twDetails))
-
-		if len(absent) > 0 {
-			leaves, absent, err = p.getCmp(ctx, twDetails, leaves, absent, completedTables)
-
-			if ae.SetIfError(err) {
-				break
+	// One thread calls ChunkFetcher.Get on each batch.
+	eg.Go(func() error {
+		for {
+			toFetch, hasMore, err := tracker.GetChunksToFetch()
+			if err != nil {
+				return err
 			}
-		}
-	}
-
-	if !ae.IsSet() && p.wr.Size() > 0 {
-		// p.wr may be nil in the error case
-		if p.wr != nil {
-			p.addEvent(NewTFPullerEvent(TableFileClosedEvent, &TableFileEventDetails{
-				CurrentFileSize: int64(p.wr.ContentLength()),
-			}))
-		}
-		completedTables <- FilledWriters{p.wr}
-	}
-
-	close(completedTables)
-
-	wg.Wait()
-	return ae.Get()
-}
-
-func limitToNewChunks(absent hash.HashSet, downloaded hash.HashSet) {
-	smaller := absent
-	longer := downloaded
-	if len(absent) > len(downloaded) {
-		smaller = downloaded
-		longer = absent
-	}
-
-	for k := range smaller {
-		if longer.Has(k) {
-			absent.Remove(k)
-		}
-	}
-}
-
-func (p *Puller) getCmp(ctx context.Context, twDetails *TreeWalkEventDetails, leaves, batch hash.HashSet, completedTables chan FilledWriters) (hash.HashSet, hash.HashSet, error) {
-	found := make(chan nbs.CompressedChunk, 4096)
-	processed := make(chan CmpChnkAndRefs, 4096)
-
-	ae := atomicerr.New()
-	go func() {
-		defer close(found)
-		err := p.srcChunkStore.GetManyCompressed(ctx, batch, func(ctx context.Context, c nbs.CompressedChunk) {
-			select {
-			case found <- c:
-			case <-ctx.Done():
-			}
-		})
-		ae.SetIfError(err)
-	}()
-
-	batchSize := len(batch)
-	numChunkWorkers := (batchSize / 1024) + 1
-	if numChunkWorkers > maxChunkWorkers {
-		numChunkWorkers = maxChunkWorkers
-	}
-
-	go func() {
-		defer close(processed)
-		for cmpChnk := range found {
-			if ae.IsSet() {
-				break
+			if !hasMore {
+				return p.rd.CloseSend()
 			}
 
-			p.downloaded.Insert(cmpChnk.H)
-
-			if leaves.Has(cmpChnk.H) {
-				processed <- CmpChnkAndRefs{cmpChnk: cmpChnk}
-			} else {
-				chnk, err := cmpChnk.ToChunk()
-
-				if ae.SetIfError(err) {
-					return
-				}
-
-				refs := make(map[hash.Hash]int)
-				if err := p.wrf(chnk, func(h hash.Hash, height uint64) error {
-					refs[h] = int(height)
-					return nil
-				}); ae.SetIfError(err) {
-					return
-				}
-
-				processed <- CmpChnkAndRefs{cmpChnk: cmpChnk, refs: refs}
+			atomic.AddUint64(&p.stats.totalSourceChunks, uint64(len(toFetch)))
+			err = p.rd.Get(ctx, toFetch)
+			if err != nil {
+				return err
 			}
 		}
-	}()
+	})
 
-	var err error
-	var maxHeight int
-	nextLeaves := make(hash.HashSet, batchSize)
-	nextLevel := make(hash.HashSet, batchSize)
-
-	twDetails.ChunksBuffered = 0
-	for cmpAndRef := range processed {
-		if err != nil {
-			// drain to prevent deadlock
-			continue
-		}
-
-		twDetails.ChunksBuffered++
-
-		if twDetails.ChunksBuffered%100 == 0 {
-			p.addEvent(NewTWPullerEvent(LevelUpdateTWEvent, twDetails))
-		}
-
-		err = p.wr.AddCmpChunk(cmpAndRef.cmpChnk)
-
-		if ae.SetIfError(err) {
-			continue
-		}
-
-		if p.wr.Size() >= p.chunksPerTF {
-			p.addEvent(NewTFPullerEvent(TableFileClosedEvent, &TableFileEventDetails{
-				CurrentFileSize: int64(p.wr.ContentLength()),
-			}))
-
-			completedTables <- FilledWriters{p.wr}
-			p.wr = nil
-
-			p.tablefileSema.Acquire(ctx, 1)
-			p.wr, err = nbs.NewCmpChunkTableWriter(p.tempDir)
-
-			if ae.SetIfError(err) {
-				continue
+	// One thread reads the received chunks, walks their addresses and writes them to the table file.
+	eg.Go(func() error {
+		for {
+			cChk, err := p.rd.Recv(ctx)
+			if err == io.EOF {
+				// This means the requesting thread
+				// successfully saw all chunk addresses and
+				// called CloseSend and that all requested
+				// chunks were successfully delivered to this
+				// thread. Calling wr.Close() here will block
+				// on uploading any table files and will write
+				// the new table files to the destination's
+				// manifest.
+				return p.wr.Close()
+			}
+			if err != nil {
+				return err
+			}
+			if len(cChk.FullCompressedChunk) == 0 {
+				return errors.New("failed to get all chunks.")
 			}
 
-		}
+			atomic.AddUint64(&p.stats.fetchedSourceBytes, uint64(len(cChk.FullCompressedChunk)))
+			atomic.AddUint64(&p.stats.fetchedSourceChunks, uint64(1))
 
-		for h, height := range cmpAndRef.refs {
-			nextLevel.Insert(h)
-			twDetails.ChildrenFound++
-
-			if height == 1 {
-				nextLeaves.Insert(h)
+			chnk, err := cChk.ToChunk()
+			if err != nil {
+				return err
 			}
+			err = p.waf(chnk, func(h hash.Hash, _ bool) error {
+				tracker.Seen(h)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			tracker.TickProcessed()
 
-			if height > maxHeight {
-				maxHeight = height
+			err = p.wr.AddCompressedChunk(ctx, cChk)
+			if err != nil {
+				return err
 			}
 		}
-	}
+	})
 
-	if err := ae.Get(); err != nil {
-		return nil, nil, err
-	}
-
-	if twDetails.ChunksBuffered != len(batch) {
-		return nil, nil, errors.New("failed to get all chunks.")
-	}
-
-	p.addEvent(NewTWPullerEvent(LevelDoneTWEvent, twDetails))
-
-	twDetails.TreeLevel = maxHeight
-	return nextLeaves, nextLevel, nil
-}
-
-func (p *Puller) addEvent(evt PullerEvent) {
-	if p.eventCh != nil {
-		p.eventCh <- evt
-	}
+	// Always close the reader outside of the errgroup threads above.
+	// Closing the reader will cause Get() to start returning errors, and
+	// we don't need to deliver that error to the Get thread. Both threads
+	// should exit and return any errors they encounter, after which the
+	// errgroup will report the error.
+	wErr := eg.Wait()
+	rErr := p.rd.Close()
+	return errors.Join(wErr, rErr)
 }

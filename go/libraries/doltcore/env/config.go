@@ -20,39 +20,18 @@ import (
 	"strings"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/utils/config"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
-	"github.com/dolthub/dolt/go/libraries/utils/set"
+	"github.com/dolthub/dolt/go/store/datas"
 )
 
 const (
 	localConfigName  = "local"
 	globalConfigName = "global"
 
-	UserEmailKey = "user.email"
-	UserNameKey  = "user.name"
-
 	// should be able to have remote specific creds?
-	UserCreds = "user.creds"
 
-	DoltEditor = "core.editor"
-
-	InitBranchName = "init.defaultbranch"
-
-	RemotesApiHostKey     = "remotes.default_host"
-	RemotesApiHostPortKey = "remotes.default_port"
-
-	AddCredsUrlKey = "creds.add_url"
-
-	MetricsDisabled = "metrics.disabled"
-	MetricsHost     = "metrics.host"
-	MetricsPort     = "metrics.port"
-	MetricsInsecure = "metrics.insecure"
 )
-
-var LocalConfigWhitelist = set.NewStrSet([]string{UserNameKey, UserEmailKey})
-var GlobalConfigWhitelist = set.NewStrSet([]string{UserNameKey, UserEmailKey})
 
 // ConfigScope is an enum representing the elements that make up the ConfigHierarchy
 type ConfigScope int
@@ -132,10 +111,11 @@ func ensureGlobalConfig(path string, fs filesys.ReadWriteFS) (config.ReadWriteCo
 	return config.NewFileConfig(path, fs, map[string]string{})
 }
 
-// CreateLocalConfig creates a new repository local config file.  The current directory must have already been initialized
+// CreateLocalConfig creates a new repository local config file with the values from |val|
+// at the directory |dir|. The |dir| directory must have already been initialized
 // as a data repository before a local config can be created.
-func (dcc *DoltCliConfig) CreateLocalConfig(vals map[string]string) error {
-	return dcc.createLocalConfigAt(".", vals)
+func (dcc *DoltCliConfig) CreateLocalConfig(dir string, vals map[string]string) error {
+	return dcc.createLocalConfigAt(dir, vals)
 }
 
 func (dcc *DoltCliConfig) createLocalConfigAt(dir string, vals map[string]string) error {
@@ -192,29 +172,30 @@ func (dcc *DoltCliConfig) IfEmptyUseConfig(val, key string) string {
 }
 
 func GetStringOrDefault(cfg config.ReadableConfig, key, defStr string) string {
+	if cfg == nil {
+		return defStr
+	}
 	val, err := cfg.GetString(key)
-
 	if err != nil {
 		return defStr
 	}
-
 	return val
 }
 
 // GetNameAndEmail returns the name and email from the supplied config
 func GetNameAndEmail(cfg config.ReadableConfig) (string, string, error) {
-	name, err := cfg.GetString(UserNameKey)
+	name, err := cfg.GetString(config.UserNameKey)
 
 	if err == config.ErrConfigParamNotFound {
-		return "", "", doltdb.ErrNameNotConfigured
+		return "", "", datas.ErrNameNotConfigured
 	} else if err != nil {
 		return "", "", err
 	}
 
-	email, err := cfg.GetString(UserEmailKey)
+	email, err := cfg.GetString(config.UserEmailKey)
 
 	if err == config.ErrConfigParamNotFound {
-		return "", "", doltdb.ErrEmailNotConfigured
+		return "", "", datas.ErrEmailNotConfigured
 	} else if err != nil {
 		return "", "", err
 	}
@@ -255,8 +236,8 @@ const (
 )
 
 var DefaultFailsafeConfig = map[string]string{
-	UserEmailKey: DefaultEmail,
-	UserNameKey:  DefaultName,
+	config.UserEmailKey: DefaultEmail,
+	config.UserNameKey:  DefaultName,
 }
 
 func (w writeableLocalDoltCliConfig) SetStrings(updates map[string]string) error {

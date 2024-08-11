@@ -70,7 +70,7 @@ func main() {
 	var store *nbs.NomsBlockStore
 	if *dir != "" {
 		var err error
-		store, err = nbs.NewLocalStore(ctx, types.Format_Default.VersionString(), *dir, memTableSize)
+		store, err = nbs.NewLocalStore(ctx, types.Format_Default.VersionString(), *dir, memTableSize, nbs.NewUnlimitedMemQuotaProvider())
 		d.PanicIfError(err)
 
 		*dbName = *dir
@@ -78,7 +78,7 @@ func main() {
 		sess := session.Must(session.NewSession(aws.NewConfig().WithRegion("us-west-2")))
 
 		var err error
-		store, err = nbs.NewAWSStore(context.Background(), types.Format_Default.VersionString(), *table, *dbName, *bucket, s3.New(sess), dynamodb.New(sess), memTableSize)
+		store, err = nbs.NewAWSStore(context.Background(), types.Format_Default.VersionString(), *table, *dbName, *bucket, s3.New(sess), dynamodb.New(sess), memTableSize, nbs.NewUnlimitedMemQuotaProvider())
 		d.PanicIfError(err)
 	} else {
 		log.Fatalf("Must set either --dir or ALL of --table, --bucket and --db\n")
@@ -109,7 +109,7 @@ func main() {
 	chartFmt := "| %6d | %7d | %8d | %9d | %6d | %5d | %6d |\n"
 
 	var optimal, sum int
-	visited := map[hash.Hash]bool{}
+	visited := make(map[hash.Hash]struct{})
 
 	current := hash.HashSlice{root}
 	for numNodes := 1; numNodes > 0; numNodes = len(current) {
@@ -120,7 +120,7 @@ func main() {
 		for i, v := range readValues {
 			h := current[i]
 			currentValues[h] = v
-			visited[h] = true
+			visited[h] = struct{}{}
 		}
 
 		// Iterate all the Values at the current level of the graph IN ORDER (as specified in |current|) and gather up their embedded refs. We'll build two different lists of hash.Hashes during this process:
@@ -130,13 +130,11 @@ func main() {
 		orderedChildren := hash.HashSlice{}
 		nextLevel := hash.HashSlice{}
 		for _, h := range current {
-			_ = currentValues[h].WalkRefs(types.Format_Default, func(r types.Ref) error {
-				target := r.TargetHash()
-				orderedChildren = append(orderedChildren, target)
-				if !visited[target] && r.Height() > 1 {
-					nextLevel = append(nextLevel, target)
+			_ = types.WalkAddrs(currentValues[h], types.Format_Default, func(h hash.Hash, isleaf bool) error {
+				orderedChildren = append(orderedChildren, h)
+				if _, ok := visited[h]; !ok && !isleaf {
+					nextLevel = append(nextLevel, h)
 				}
-
 				return nil
 			})
 		}
@@ -155,14 +153,14 @@ func main() {
 			if i+1 == numGroups { // last group
 				go func(i int) {
 					defer wg.Done()
-					reads[i], _, err = store.CalcReads(orderedChildren[i*branchFactor:].HashSet(), 0)
+					reads[i], _, err = nbs.CalcReads(store, orderedChildren[i*branchFactor:].HashSet(), 0)
 					d.PanicIfError(err)
 				}(i)
 				continue
 			}
 			go func(i int) {
 				defer wg.Done()
-				reads[i], _, err = store.CalcReads(orderedChildren[i*branchFactor:(i+1)*branchFactor].HashSet(), 0)
+				reads[i], _, err = nbs.CalcReads(store, orderedChildren[i*branchFactor:(i+1)*branchFactor].HashSet(), 0)
 				d.PanicIfError(err)
 			}(i)
 		}

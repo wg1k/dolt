@@ -10,6 +10,7 @@ CREATE TABLE test (
 );
 SQL
 
+    dolt add .
     dolt commit -a -m "Add a table"
 }
 
@@ -21,7 +22,7 @@ teardown() {
 @test "sql-reset: DOLT_RESET --hard works on unstaged and staged table changes" {
     dolt sql -q "INSERT INTO test VALUES (1)"
 
-    run dolt sql -q "SELECT DOLT_RESET('--hard')"
+    run dolt sql -q "call dolt_reset('--hard')"
     [ $status -eq 0 ]
 
     run dolt status
@@ -33,7 +34,7 @@ teardown() {
 
     dolt add .
 
-    run dolt sql -q "SELECT DOLT_RESET('--hard')"
+    run dolt sql -q "call dolt_reset('--hard')"
     [ $status -eq 0 ]
 
     run dolt status
@@ -44,7 +45,7 @@ teardown() {
     dolt sql -q "INSERT INTO test VALUES (1)"
 
     # Reset to head results in clean main.
-    run dolt sql -q "SELECT DOLT_RESET('--hard', 'head');"
+    run dolt sql -q "call dolt_reset('--hard', 'head');"
     [ "$status" -eq 0 ]
 
     run dolt status
@@ -53,39 +54,39 @@ teardown() {
     [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
 }
 
-@test "sql-reset: DOLT_RESET --hard does not ignore staged docs" {
+@test "sql-reset: CALL DOLT_RESET --hard does not ignore staged docs" {
     # New docs gets referred as untracked file.
     echo ~license~ > LICENSE.md
+    dolt docs upload LICENSE.md LICENSE.md
     dolt add .
 
-    run dolt sql -q "SELECT DOLT_RESET('--hard')"
+    run dolt sql -q "CALL DOLT_RESET('--hard')"
     [ $status -eq 0 ]
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Untracked files:" ]] || false
-    [[ "$output" =~ ([[:space:]]*new doc:[[:space:]]*LICENSE.md) ]] || false
+    [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
 
     # Tracked file gets reset
+    dolt docs upload LICENSE.md LICENSE.md
+    dolt add .
     dolt commit -a -m "Add a the license file"
     echo ~edited-license~ > LICENSE.md
-
+    dolt docs upload LICENSE.md LICENSE.md
     dolt add .
-
-    run dolt sql -q "SELECT DOLT_RESET('--hard')"
+    run dolt sql -q "CALL DOLT_RESET('--hard')"
     [ $status -eq 0 ]
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Changes not staged for commit:" ]] || false
-    [[ "$output" =~ ([[:space:]]*modified:[[:space:]]*LICENSE.md) ]] || false
+    [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
 }
 
-@test "sql-reset: DOLT_RESET --soft works on unstaged and staged table changes" {
+@test "sql-reset: CALL DOLT_RESET --soft works on unstaged and staged table changes" {
     dolt sql -q "INSERT INTO test VALUES (1)"
 
     # Table should still be unstaged
-    run dolt sql -q "SELECT DOLT_RESET('--soft')"
+    run dolt sql -q "CALL DOLT_RESET('--soft')"
     [ $status -eq 0 ]
 
     run dolt status
@@ -95,38 +96,33 @@ teardown() {
 
     dolt add .
 
-    run dolt sql -q "SELECT DOLT_RESET('--soft')"
-    [ $status -eq 0 ]
-
-    run dolt status
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "Changes not staged for commit:" ]] || false
-    [[ "$output" =~ ([[:space:]]*modified:[[:space:]]*test) ]] || false
-}
-
-@test "sql-reset: DOLT_RESET --soft ignores staged docs" {
-    echo ~license~ > LICENSE.md
-    dolt add .
-
-    run dolt sql -q "SELECT DOLT_RESET('--soft')"
+    run dolt sql -q "CALL DOLT_RESET('--soft')"
     [ $status -eq 0 ]
 
     run dolt status
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Changes to be committed:" ]] || false
-    [[ "$output" =~ ([[:space:]]*new doc:[[:space:]]*LICENSE.md) ]] || false
-
-    # Explicitly defining the file ignores it.
-    run dolt sql -q "SELECT DOLT_RESET('LICENSE.md')"
-    [ "$status" -eq 1 ]
-    [[ "$output" =~ ("error: the table(s) LICENSE.md do not exist") ]] || false
+    [[ "$output" =~ ([[:space:]]*modified:[[:space:]]*test) ]] || false
 }
 
-@test "sql-reset: DOLT_RESET works on specific tables" {
+@test "sql-reset: CALL DOLT_RESET --soft ignores staged docs" {
+    echo ~license~ > LICENSE.md
+    dolt docs upload LICENSE.md LICENSE.md
+    dolt add .
+
+    run dolt sql -q "CALL DOLT_RESET('--soft')"
+    [ $status -eq 0 ]
+
+    run dolt status
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ([[:space:]]*new table:[[:space:]]*dolt_docs) ]] || false
+}
+
+@test "sql-reset: CALL DOLT_RESET works on specific tables" {
     dolt sql -q "INSERT INTO test VALUES (1)"
 
     # Table should still be unstaged
-    run dolt sql -q "SELECT DOLT_RESET('test')"
+    run dolt sql -q "CALL DOLT_RESET('test')"
 
     run dolt status
     [ "$status" -eq 0 ]
@@ -136,7 +132,7 @@ teardown() {
     dolt sql -q "CREATE TABLE test2 (pk int primary key);"
 
     dolt add .
-    run dolt sql -q "SELECT DOLT_RESET('test', 'test2')"
+    run dolt sql -q "CALL DOLT_RESET('test', 'test2')"
 
     run dolt status
     [ "$status" -eq 0 ]
@@ -145,10 +141,10 @@ teardown() {
     [[ "$output" =~ ([[:space:]]*new table:[[:space:]]*test2) ]] || false
 }
 
-@test "sql-reset: DOLT_RESET --soft and --hard on the same table" {
+@test "sql-reset: CALL DOLT_RESET --soft and --hard on the same table" {
     # Make a change to the table and do a soft reset
     dolt sql -q "INSERT INTO test VALUES (1)"
-    run dolt sql -q "SELECT DOLT_RESET('test')"
+    run dolt sql -q "CALL DOLT_RESET('test')"
     [ "$status" -eq 0 ]
 
     run dolt status
@@ -159,7 +155,7 @@ teardown() {
     # Add and unstage the table with a soft reset. Make sure the same data exists.
     dolt add .
 
-    run dolt sql -q "SELECT DOLT_RESET('test')"
+    run dolt sql -q "CALL DOLT_RESET('test')"
     [ "$status" -eq 0 ]
 
     run dolt status
@@ -172,7 +168,7 @@ teardown() {
     [[ "$output" =~ 1  ]] || false
 
     # Do a hard reset and validate the insert was wiped properly
-    run dolt sql -q "SELECT DOLT_RESET('--hard')"
+    run dolt sql -q "CALL DOLT_RESET('--hard')"
 
     run dolt status
     [ "$status" -eq 0 ]
@@ -184,21 +180,21 @@ teardown() {
     [[ "$output" != 1  ]] || false
 }
 
-@test "sql-reset: DOLT_RESET('--hard') doesn't remove newly created table." {
+@test "sql-reset: CALL DOLT_RESET('--hard') doesn't remove newly created table." {
     dolt sql << SQL
 CREATE TABLE test2 (
     pk int primary key
 );
 SQL
-    dolt sql -q "SELECT DOLT_RESET('--hard');"
+    dolt sql -q "CALL DOLT_RESET('--hard');"
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Untracked files:" ]] || false
+    [[ "$output" =~ "Untracked tables:" ]] || false
     [[ "$output" =~ ([[:space:]]*new table:[[:space:]]*test2) ]] || false
 
     dolt add .
-    dolt sql -q "SELECT DOLT_RESET('--hard');"
+    dolt sql -q "CALL DOLT_RESET('--hard');"
     run dolt status
 
     [ "$status" -eq 0 ]
@@ -209,7 +205,7 @@ SQL
 @test "sql-reset: No rows in dolt_diff table after DOLT_RESET('--hard') on committed table." {
     run dolt sql << SQL
 INSERT INTO test VALUES (1);
-SELECT DOLT_RESET('--hard');
+call dolt_reset('--hard');
 SELECT count(*)=0 FROM dolt_diff_test;
 SQL
     [ $status -eq 0 ]
@@ -220,19 +216,20 @@ SQL
 @test "sql-reset: No rows in dolt_status table after DOLT_RESET('--hard') on committed table." {
       run dolt sql << SQL
 INSERT INTO test VALUES (1);
-SELECT DOLT_RESET('--hard');
+call dolt_reset('--hard');
 SELECT count(*)=0 FROM dolt_status;
 SQL
     [ $status -eq 0 ]
     [[ "$output" =~ "true" ]] || false
 }
 
-@test "sql-reset: DOLT_RESET --hard properly maintains session variables." {
+@test "sql-reset: CALL DOLT_RESET --hard properly maintains session variables." {
+    export DOLT_DBNAME_REPLACE="true"
     head_variable=@@dolt_repo_$$_head
     head_hash=$(get_head_commit)
     run dolt sql << SQL
 INSERT INTO test VALUES (1);
-SELECT DOLT_RESET('--hard');
+CALL DOLT_RESET('--hard');
 SELECT $head_variable;
 SQL
 
@@ -245,22 +242,23 @@ SQL
 INSERT INTO test VALUES (1);
 SQL
 
-    dolt sql -q "SELECT DOLT_RESET('test');"
+    dolt sql -q "call dolt_reset('test');"
     run dolt sql -q "SELECT * FROM dolt_status;"
 
     [ $status -eq 0 ]
     [[ "$output" =~ "false" ]] || false
 }
 
-@test "sql-reset: DOLT_RESET soft maintains staged session variable" {
+@test "sql-reset: CALL DOLT_RESET soft maintains staged session variable" {
+    export DOLT_DBNAME_REPLACE="true"
     working_hash_var=@@dolt_repo_$$_working
     run dolt sql -q "SELECT $working_hash_var"
     working_hash=$output
 
     run dolt sql << SQL
 INSERT INTO test VALUES (1);
-SELECT DOLT_ADD('.');
-SELECT DOLT_RESET('test');
+call dolt_add('.');
+call dolt_reset('test');
 SELECT $working_hash_var
 SQL
 
@@ -269,7 +267,7 @@ SQL
     # These should not match as @@_working should become a new staged hash different from the original working.
     [[ ! "$output" =~ $working_hash ]] || false
 
-    run dolt sql -q "SELECT DOLT_RESET('--hard');"
+    run dolt sql -q "CALL DOLT_RESET('--hard');"
     [ $status -eq 0 ]
 
     run dolt sql -q "SELECT $working_hash_var"
@@ -283,3 +281,29 @@ get_head_commit() {
     dolt log -n 1 | grep -m 1 commit | cut -c 13-44
 }
 
+@test "sql-reset: reset handles ignored tables" {
+    dolt sql << SQL
+CREATE TABLE test2 (
+    pk int primary key
+);
+INSERT INTO test2 VALUES (9);
+INSERT INTO test VALUES (1);
+SQL
+    dolt sql -q "insert into dolt_ignore values ('test2', true)"
+
+    run dolt sql -q "select * from dolt_status"
+    [ "$status" -eq 0 ]
+    [[ "$output" != "test2" ]] || false
+
+    run dolt sql -q "call dolt_reset('--hard')"
+    [ "$status" -eq 0 ]
+
+    run dolt sql -q "select * from dolt_status"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "| dolt_ignore | false  | new table |" ]] || false
+    [ "${#lines[@]}" -eq 6 ]
+
+    run dolt sql -q "select * from test2"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "9" ]] || false
+}

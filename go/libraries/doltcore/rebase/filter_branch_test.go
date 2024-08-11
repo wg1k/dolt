@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
@@ -96,7 +95,7 @@ func filterBranchTests() []filterBranchTest {
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO test VALUES (7,7),(8,8),(9,9);"}},
 				{cmd.AddCmd{}, args{"-A"}},
 				{cmd.CommitCmd{}, args{"-m", "added more rows againg"}},
-				{cmd.FilterBranchCmd{}, args{"--all", "DELETE FROM test WHERE pk IN (5,8);"}},
+				{cmd.FilterBranchCmd{}, args{"--all", "-q", "DELETE FROM test WHERE pk IN (5,8);"}},
 			},
 			asserts: []testAssertion{
 				{
@@ -124,11 +123,22 @@ func filterBranchTests() []filterBranchTest {
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO test VALUES (7,7),(8,8),(9,9);"}},
 				{cmd.AddCmd{}, args{"-A"}},
 				{cmd.CommitCmd{}, args{"-m", "added more rows on main"}},
-				{cmd.FilterBranchCmd{}, args{"--all", "DELETE FROM test WHERE pk > 4;"}},
+				{cmd.FilterBranchCmd{}, args{"--all", "-q", "DELETE FROM test WHERE pk > 4;"}},
 			},
 			asserts: []testAssertion{
 				{
-					query: "SELECT pk,c0 FROM dolt_history_test ORDER BY pk;",
+					query: "SELECT pk,c0 FROM dolt_history_test ORDER BY pk, c0",
+					rows: []sql.Row{
+						{int32(0), int32(0)},
+						{int32(0), int32(0)},
+						{int32(1), int32(1)},
+						{int32(1), int32(1)},
+						{int32(2), int32(2)},
+						{int32(2), int32(2)},
+					},
+				},
+				{
+					query: "SELECT pk,c0 FROM dolt_history_test ORDER BY pk",
 					rows: []sql.Row{
 						{int32(0), int32(0)},
 						{int32(0), int32(0)},
@@ -151,7 +161,7 @@ func filterBranchTests() []filterBranchTest {
 					},
 				},
 				{
-					query: "SELECT pk,c0 FROM dolt_history_test ORDER BY pk",
+					query: "SELECT pk,c0 FROM dolt_history_test ORDER BY pk,c0",
 					rows: []sql.Row{
 						{int32(0), int32(0)},
 						{int32(0), int32(0)},
@@ -175,7 +185,7 @@ func filterBranchTests() []filterBranchTest {
 				{
 					setup: []testCommand{
 						// expeced error: "table not found: test"
-						{cmd.FilterBranchCmd{}, args{"DELETE FROM test WHERE pk > 1;"}},
+						{cmd.FilterBranchCmd{}, args{"--continue", "-q", "DELETE FROM test WHERE pk > 1;"}},
 					},
 				},
 				{
@@ -192,8 +202,11 @@ func filterBranchTests() []filterBranchTest {
 func setupFilterBranchTests(t *testing.T) *env.DoltEnv {
 	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
+	cliCtx, err := cmd.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, err)
+
 	for _, c := range setupCommon {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
@@ -203,26 +216,28 @@ func setupFilterBranchTests(t *testing.T) *env.DoltEnv {
 func testFilterBranch(t *testing.T, test filterBranchTest) {
 	ctx := context.Background()
 	dEnv := setupFilterBranchTests(t)
+	defer dEnv.DoltDB.Close()
+	cliCtx, err := cmd.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, err)
+
 	for _, c := range test.setup {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
 	for _, a := range test.asserts {
 		for _, c := range a.setup {
-			exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+			exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 			require.Equal(t, 0, exitCode)
 		}
 
-		root, err := dEnv.WorkingRoot(ctx)
-		require.NoError(t, err)
+		t.Run(a.query, func(t *testing.T) {
+			root, err := dEnv.WorkingRoot(ctx)
+			require.NoError(t, err)
 
-		actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, a.query)
-		require.NoError(t, err)
-
-		require.Equal(t, len(a.rows), len(actRows))
-		for i := range a.rows {
-			assert.Equal(t, a.rows[i], actRows[i])
-		}
+			actRows, err := sqle.ExecuteSelect(dEnv, root, a.query)
+			require.NoError(t, err)
+			require.Equal(t, a.rows, actRows)
+		})
 	}
 }

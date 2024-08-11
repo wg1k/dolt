@@ -29,11 +29,12 @@ import (
 	"github.com/dolthub/vitess/go/vt/proto/query"
 	"github.com/shopspring/decimal"
 
-	"github.com/dolthub/dolt/go/cmd/dolt/commands"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	dsql "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/statsnoms"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/statspro"
 	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/dolthub/dolt/go/store/types"
@@ -52,6 +53,13 @@ type DoltHarness struct {
 	sess    *dsess.DoltSession
 }
 
+func (h *DoltHarness) Close() {
+	dbs := h.sess.Provider().AllDatabases(sql.NewEmptyContext())
+	for _, db := range dbs {
+		db.(dsess.SqlDatabase).DbData().Ddb.Close()
+	}
+}
+
 func (h *DoltHarness) EngineStr() string {
 	return "mysql"
 }
@@ -67,7 +75,7 @@ func (h *DoltHarness) ExecuteStatement(statement string) error {
 		sql.WithPid(rand.Uint64()),
 		sql.WithSession(h.sess))
 
-	_, rowIter, err := h.engine.Query(ctx, statement)
+	_, rowIter, _, err := h.engine.Query(ctx, statement)
 	if err != nil {
 		return err
 	}
@@ -92,7 +100,7 @@ func (h *DoltHarness) ExecuteQuery(statement string) (schema string, results []s
 		}
 	}()
 
-	sch, rowIter, err = h.engine.Query(ctx, statement)
+	sch, rowIter, _, err = h.engine.Query(ctx, statement)
 	if err != nil {
 		return "", nil, err
 	}
@@ -110,6 +118,10 @@ func (h *DoltHarness) ExecuteQuery(statement string) (schema string, results []s
 	return schemaString, results, nil
 }
 
+func (h *DoltHarness) GetTimeout() int64 {
+	return 0
+}
+
 func innerInit(h *DoltHarness, dEnv *env.DoltEnv) error {
 	if !dEnv.HasDoltDir() {
 		err := dEnv.InitRepoWithTime(context.Background(), types.Format_Default, name, email, env.DefaultInitBranch, time.Now())
@@ -124,66 +136,30 @@ func innerInit(h *DoltHarness, dEnv *env.DoltEnv) error {
 	}
 
 	var err error
-	h.engine, err = sqlNewEngine(dEnv)
+	var pro dsess.DoltDatabaseProvider
+	h.engine, pro, err = sqlNewEngine(dEnv)
 
 	if err != nil {
 		return err
 	}
 
-	ctx := dsql.NewTestSQLCtx(context.Background())
+	ctx := dsql.NewTestSQLCtxWithProvider(context.Background(), pro, statspro.NewProvider(pro.(*dsql.DoltDatabaseProvider), statsnoms.NewNomsStatsFactory(env.NewGRPCDialProviderFromDoltEnv(dEnv))))
 	h.sess = ctx.Session.(*dsess.DoltSession)
 
 	dbs := h.engine.Analyzer.Catalog.AllDatabases(ctx)
-	dsqlDBs := make([]dsql.Database, len(dbs))
-	for i, db := range dbs {
-		dsqlDB := db.(dsql.Database)
-		dsqlDBs[i] = dsqlDB
-
-		sess := dsess.DSessFromSess(ctx.Session)
-		err := sess.AddDB(ctx, getDbState(db, dEnv))
-		if err != nil {
-			return err
+	var dbName string
+	for _, db := range dbs {
+		dsqlDB, ok := db.(dsql.Database)
+		if !ok {
+			continue
 		}
-
-		root, verr := commands.GetWorkingWithVErr(dEnv)
-		if verr != nil {
-			return verr
-		}
-
-		err = dsqlDB.SetRoot(ctx, root)
-		if err != nil {
-			return err
-		}
+		dbName = dsqlDB.Name()
+		break
 	}
 
-	if len(dbs) == 1 {
-		h.sess.SetCurrentDatabase(dbs[0].Name())
-	}
+	h.sess.SetCurrentDatabase(dbName)
 
 	return nil
-}
-
-func getDbState(db sql.Database, dEnv *env.DoltEnv) dsess.InitialDbState {
-	ctx := context.Background()
-
-	head := dEnv.RepoStateReader().CWBHeadSpec()
-	headCommit, err := dEnv.DoltDB.Resolve(ctx, head, dEnv.RepoStateReader().CWBHeadRef())
-	if err != nil {
-		panic(err)
-	}
-
-	ws, err := dEnv.WorkingSet(ctx)
-	if err != nil {
-		panic(err)
-	}
-
-	return dsess.InitialDbState{
-		Db:         db,
-		HeadCommit: headCommit,
-		WorkingSet: ws,
-		DbData:     dEnv.DbData(),
-		Remotes:    dEnv.RepoState.Remotes,
-	}
 }
 
 func drainIterator(ctx *sql.Context, iter sql.RowIter) error {
@@ -251,7 +227,8 @@ func toSqlString(val interface{}) string {
 		return fmt.Sprintf("%.3f", v)
 	case decimal.Decimal:
 		// exactly 3 decimal points for floats
-		return v.StringFixed(3)
+		res, _ := v.Float64()
+		return fmt.Sprintf("%.3f", res)
 	case int:
 		return strconv.Itoa(v)
 	case uint:
@@ -305,18 +282,31 @@ func schemaToSchemaString(sch sql.Schema) (string, error) {
 	return b.String(), nil
 }
 
-func sqlNewEngine(dEnv *env.DoltEnv) (*sqle.Engine, error) {
-	opts := editor.Options{Deaf: dEnv.DbEaFactory()}
-	db := dsql.NewDatabase("dolt", dEnv.DbData(), opts)
-	mrEnv, err := env.DoltEnvAsMultiEnv(context.Background(), dEnv)
+func sqlNewEngine(dEnv *env.DoltEnv) (*sqle.Engine, dsess.DoltDatabaseProvider, error) {
+	tmpDir, err := dEnv.TempTableFilesDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: tmpDir}
+	db, err := dsql.NewDatabase(context.Background(), "dolt", dEnv.DbData(), opts)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	pro := dsql.NewDoltDatabaseProvider(dEnv.Config, mrEnv.FileSystem(), db)
+	mrEnv, err := env.MultiEnvForDirectory(context.Background(), dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	b := env.GetDefaultInitBranch(dEnv.Config)
+	pro, err := dsql.NewDoltDatabaseProviderWithDatabase(b, mrEnv.FileSystem(), db, dEnv.FS)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	pro = pro.WithDbFactoryUrl(doltdb.InMemDoltDB)
 
 	engine := sqle.NewDefault(pro)
 
-	return engine, nil
+	return engine, pro, nil
 }

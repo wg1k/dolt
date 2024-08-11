@@ -15,6 +15,7 @@
 package nbs
 
 import (
+	"context"
 	"io"
 	"math"
 
@@ -24,29 +25,29 @@ import (
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
-func IterChunks(rd io.ReadSeeker, cb func(chunk chunks.Chunk) (stop bool, err error)) error {
-	idx, err := ReadTableIndexByCopy(rd)
+func IterChunks(ctx context.Context, rd io.ReadSeeker, cb func(chunk chunks.Chunk) (stop bool, err error)) error {
+	idx, err := readTableIndexByCopy(ctx, rd, &UnlimitedQuotaProvider{})
 	if err != nil {
 		return err
 	}
 
 	defer idx.Close()
 
-	seen := make(map[addr]bool)
-	for i := uint32(0); i < idx.ChunkCount(); i++ {
-		var a addr
-		ie, err := idx.IndexEntry(i, &a)
+	seen := make(map[hash.Hash]struct{})
+	for i := uint32(0); i < idx.chunkCount(); i++ {
+		var h hash.Hash
+		ie, err := idx.indexEntry(i, &h)
 		if err != nil {
 			return err
 		}
-		if _, ok := seen[a]; !ok {
-			seen[a] = true
+		if _, ok := seen[h]; !ok {
+			seen[h] = struct{}{}
 			chunkBytes, err := readNFrom(rd, ie.Offset(), ie.Length())
 			if err != nil {
 				return err
 			}
 
-			cmpChnk, err := NewCompressedChunk(hash.Hash(a), chunkBytes)
+			cmpChnk, err := NewCompressedChunk(h, chunkBytes)
 			if err != nil {
 				return err
 			}
@@ -68,8 +69,8 @@ func IterChunks(rd io.ReadSeeker, cb func(chunk chunks.Chunk) (stop bool, err er
 	return nil
 }
 
-func GetTableIndexPrefixes(rd io.ReadSeeker) (prefixes []uint64, err error) {
-	idx, err := ReadTableIndexByCopy(rd)
+func GetTableIndexPrefixes(ctx context.Context, rd io.ReadSeeker) (prefixes []uint64, err error) {
+	idx, err := readTableIndexByCopy(ctx, rd, &UnlimitedQuotaProvider{})
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,11 @@ func GetTableIndexPrefixes(rd io.ReadSeeker) (prefixes []uint64, err error) {
 		}
 	}()
 
-	return idx.Prefixes()
+	prefixes, err = idx.prefixes()
+	if err != nil {
+		return nil, err
+	}
+	return
 }
 
 func GuessPrefixOrdinal(prefix uint64, n uint32) int {

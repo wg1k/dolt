@@ -24,8 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
-	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
 	"github.com/dolthub/dolt/go/store/types"
@@ -72,12 +70,12 @@ var BasicReplaceTests = []ReplaceTest{
 	{
 		Name:         "replace no columns too few values",
 		ReplaceQuery: "replace into people values (2, 'Bart', 'Simpson', false, 10, 9, '00000000-0000-0000-0000-000000000002')",
-		ExpectedErr:  "too few values",
+		ExpectedErr:  "number of values does not match number of columns provided",
 	},
 	{
 		Name:         "replace no columns too many values",
 		ReplaceQuery: "replace into people values (2, 'Bart', 'Simpson', false, 10, 9, '00000000-0000-0000-0000-000000000002', 222, 'abc')",
-		ExpectedErr:  "too many values",
+		ExpectedErr:  "number of values does not match number of columns provided",
 	},
 	{
 		Name:           "replace full columns",
@@ -131,27 +129,27 @@ var BasicReplaceTests = []ReplaceTest{
 	{
 		Name:         "replace partial columns duplicate column",
 		ReplaceQuery: "replace into people (id, first_name, last_name, first_name) values (2, 'Bart', 'Simpson', 'Bart')",
-		ExpectedErr:  "duplicate column",
+		ExpectedErr:  "column 'first_name' specified twice",
 	},
 	{
 		Name:         "replace partial columns invalid column",
 		ReplaceQuery: "replace into people (id, first_name, last_name, middle) values (2, 'Bart', 'Simpson', 'Nani')",
-		ExpectedErr:  "duplicate column",
+		ExpectedErr:  "Unknown column 'middle' in 'people'",
 	},
 	{
 		Name:         "replace missing non-nullable column",
 		ReplaceQuery: "replace into people (id, first_name) values (2, 'Bart')",
-		ExpectedErr:  "column <last_name> received nil but is non-nullable",
+		ExpectedErr:  "Field 'last_name' doesn't have a default value",
 	},
 	{
 		Name:         "replace partial columns mismatch too many values",
 		ReplaceQuery: "replace into people (id, first_name, last_name) values (2, 'Bart', 'Simpson', false)",
-		ExpectedErr:  "too many values",
+		ExpectedErr:  "number of values does not match number of columns provided",
 	},
 	{
 		Name:         "replace partial columns mismatch too few values",
 		ReplaceQuery: "replace into people (id, first_name, last_name) values (2, 'Bart')",
-		ExpectedErr:  "too few values",
+		ExpectedErr:  "number of values does not match number of columns provided",
 	},
 	{
 		Name:         "replace partial columns functions",
@@ -191,12 +189,12 @@ var BasicReplaceTests = []ReplaceTest{
 			NewPeopleRow(11, "Selma", "Bouvier", false, 40, 7),
 		),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 	},
 	{
 		Name:         "replace partial columns multiple rows null pk",
 		ReplaceQuery: "replace into people (id, first_name, last_name) values (0, 'Bart', 'Simpson'), (1, 'Homer', null)",
-		ExpectedErr:  "column <last_name> received nil but is non-nullable",
+		ExpectedErr:  "column name 'last_name' is non-nullable but attempted to set a value of null",
 	},
 	{
 		Name:         "replace partial columns multiple rows duplicate",
@@ -209,18 +207,6 @@ var BasicReplaceTests = []ReplaceTest{
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind),
 	},
 	{
-		Name: "replace partial columns existing pk",
-		AdditionalSetup: CreateTableFn("temppeople",
-			NewSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind, "num", types.IntKind),
-			NewRow(types.Int(2), types.String("Bart"), types.String("Simpson"), types.Int(44))),
-		ReplaceQuery: "replace into temppeople (id, first_name, last_name, num) values (2, 'Bart', 'Simpson', 88)",
-		SelectQuery:  "select id, first_name, last_name, num from temppeople where id = 2 ORDER BY id",
-		ExpectedRows: ToSqlRows(
-			NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind, "num", types.IntKind),
-			NewResultSetRow(types.Int(2), types.String("Bart"), types.String("Simpson"), types.Int(88))),
-		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind, "num", types.IntKind),
-	},
-	{
 		Name: "replace partial columns multiple rows replace existing pk",
 		ReplaceQuery: `replace into people (id, first_name, last_name, is_married, age, rating) values
 					(0, "Homer", "Simpson", true, 45, 100),
@@ -231,7 +217,7 @@ var BasicReplaceTests = []ReplaceTest{
 			NewPeopleRow(8, "Milhouse", "Van Houten", false, 8, 100),
 		),
 		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind,
-			"is_married", types.BoolKind, "age", types.IntKind, "rating", types.FloatKind),
+			"is_married", types.IntKind, "age", types.IntKind, "rating", types.FloatKind),
 	},
 	{
 		Name: "replace partial columns multiple rows null pk",
@@ -239,7 +225,19 @@ var BasicReplaceTests = []ReplaceTest{
 					(0, "Homer", "Simpson", true, 45, 100),
 					(8, "Milhouse", "Van Houten", false, 8, 3.5),
 					(7, "Maggie", null, false, 1, 5.1)`,
-		ExpectedErr: "Constraint failed for column 'last_name': Not null",
+		ExpectedErr: "column name 'last_name' is non-nullable but attempted to set a value of null",
+	},
+	{
+		Name: "replace partial columns existing pk",
+		AdditionalSetup: ExecuteSetupSQL(context.Background(), `
+			CREATE TABLE temppeople (id bigint primary key, first_name varchar(1023), last_name varchar(1023), num bigint);
+			INSERT INTO temppeople VALUES (2, 'Bart', 'Simpson', 44);`),
+		ReplaceQuery: "replace into temppeople (id, first_name, last_name, num) values (2, 'Bart', 'Simpson', 88)",
+		SelectQuery:  "select id, first_name, last_name, num from temppeople where id = 2 ORDER BY id",
+		ExpectedRows: ToSqlRows(
+			NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind, "num", types.IntKind),
+			NewResultSetRow(types.Int(2), types.String("Bart"), types.String("Simpson"), types.Int(88))),
+		ExpectedSchema: NewResultSetSchema("id", types.IntKind, "first_name", types.StringKind, "last_name", types.StringKind, "num", types.IntKind),
 	},
 }
 
@@ -254,42 +252,37 @@ func TestExecuteReplace(t *testing.T) {
 var systemTableReplaceTests = []ReplaceTest{
 	{
 		Name: "replace into dolt_docs",
-		AdditionalSetup: CreateTableFn("dolt_docs",
-			doltdocs.DocsSchema,
-			NewRow(types.String("LICENSE.md"), types.String("A license"))),
-		ReplaceQuery: "replace into dolt_docs (doc_name, doc_text) values ('README.md', 'Some text')",
-		ExpectedErr:  "cannot insert into table",
+		AdditionalSetup: CreateTableFn("dolt_docs", doltdb.DocsSchema,
+			"INSERT INTO dolt_docs VALUES ('LICENSE.md','A license')"),
+		ReplaceQuery:   "replace into dolt_docs (doc_name, doc_text) values ('LICENSE.md', 'Some text')",
+		SelectQuery:    "select * from dolt_docs",
+		ExpectedRows:   []sql.Row{{"LICENSE.md", "Some text"}},
+		ExpectedSchema: CompressSchema(doltdb.DocsSchema),
 	},
 	{
 		Name: "replace into dolt_query_catalog",
-		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName,
-			dtables.DoltQueryCatalogSchema,
-			NewRow(types.String("existingEntry"), types.Uint(1), types.String("example"), types.String("select 2+2 from dual"), types.String("description"))),
+		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName, dtables.DoltQueryCatalogSchema,
+			"INSERT INTO dolt_query_catalog VALUES ('existingEntry', 1, 'example', 'select 2+2 from dual', 'description')"),
 		ReplaceQuery: "replace into dolt_query_catalog (id, display_order, name, query, description) values ('existingEntry', 1, 'example', 'select 1+1 from dual', 'description')",
 		SelectQuery:  "select * from dolt_query_catalog",
-		ExpectedRows: ToSqlRows(dtables.DoltQueryCatalogSchema,
+		ExpectedRows: ToSqlRows(CompressSchema(dtables.DoltQueryCatalogSchema),
 			NewRow(types.String("existingEntry"), types.Uint(1), types.String("example"), types.String("select 1+1 from dual"), types.String("description")),
 		),
 		ExpectedSchema: CompressSchema(dtables.DoltQueryCatalogSchema),
 	},
 	{
 		Name: "replace into dolt_schemas",
-		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName,
-			SchemasTableSchema(),
-			NewRowWithPks([]types.Value{types.String("view"), types.String("name")}, types.String("select 2+2 from dual"))),
-		ReplaceQuery: "replace into dolt_schemas (type, name, fragment) values ('view', 'name', 'select 1+1 from dual')",
-		SelectQuery:  "select * from dolt_schemas",
-		ExpectedRows: ToSqlRows(SchemasTableSchema(),
-			NewRow(types.String("view"), types.String("name"), types.String("select 1+1 from dual")),
-		),
-		ExpectedSchema: CompressSchema(SchemasTableSchema()),
+		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName, SchemaTableSchema(),
+			"CREATE VIEW name as select 2+2 from dual"),
+		ReplaceQuery: "replace into dolt_schemas (type, name, fragment) values ('view', 'name', 'create view name as select 1+1 from dual')",
+		ExpectedErr:  "table doesn't support INSERT INTO",
 	},
 }
 
 func TestReplaceIntoSystemTables(t *testing.T) {
-	for _, test := range systemTableInsertTests {
+	for _, test := range systemTableReplaceTests {
 		t.Run(test.Name, func(t *testing.T) {
-			testInsertQuery(t, test)
+			testReplaceQuery(t, test)
 		})
 	}
 }
@@ -305,18 +298,19 @@ func testReplaceQuery(t *testing.T, test ReplaceTest) {
 		t.Skip("Skipping tests until " + singleReplaceQueryTest)
 	}
 
-	dEnv := dtestutils.CreateTestEnv()
-	CreateEmptyTestDatabase(dEnv, t)
+	dEnv, err := CreateEmptyTestDatabase()
+	require.NoError(t, err)
+	defer dEnv.DoltDB.Close()
 
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
 	}
 
-	var err error
 	root, _ := dEnv.WorkingRoot(context.Background())
 	root, err = executeModify(t, context.Background(), dEnv, root, test.ReplaceQuery)
 	if len(test.ExpectedErr) > 0 {
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), test.ExpectedErr)
 		return
 	} else {
 		require.NoError(t, err)

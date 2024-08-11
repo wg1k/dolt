@@ -15,79 +15,106 @@
 package val
 
 import (
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
+
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
+	"github.com/dolthub/dolt/go/store/hash"
 )
 
+func init() {
+	if v := os.Getenv(dconfig.EnvDisableFixedAccess); v != "" {
+		disableFixedAccess = true
+	}
+}
+
+// disableFixedAccess disables fast-access optimizations for
+// not-null, fixed-width tuple values. See |makeFixedAccess|.
+var disableFixedAccess = false
+
+// TupleDesc describes a Tuple set.
+// Data structures that contain Tuples and algorithms that process Tuples
+// use a TupleDesc's types to interpret the fields of a Tuple.
 type TupleDesc struct {
-	Types []Type
-	cmp   TupleComparator
-	fast  fixedAccess
+	Types    []Type
+	Handlers []TupleTypeHandler
+	cmp      TupleComparator
+	fast     FixedAccess
 }
 
-type TupleComparator interface {
-	Compare(left, right Tuple, desc TupleDesc) int
+// TupleTypeHandler is used to specifically handle types that use extended encoding. Such types are declared by GMS, and
+// this is a forward reference for the interface functions that are necessary here.
+type TupleTypeHandler interface {
+	// SerializedCompare compares two byte slices that each represent a serialized value, without first deserializing
+	// the value.
+	SerializedCompare(v1 []byte, v2 []byte) (int, error)
+	// SerializeValue converts the given value into a binary representation.
+	SerializeValue(val any) ([]byte, error)
+	// DeserializeValue converts a binary representation of a value into its canonical type.
+	DeserializeValue(val []byte) (any, error)
+	// FormatValue returns a string version of the value. Primarily intended for display.
+	FormatValue(val any) (string, error)
 }
 
+// TupleDescriptorArgs are a set of optional arguments for TupleDesc creation.
+type TupleDescriptorArgs struct {
+	Comparator TupleComparator
+	Handlers   []TupleTypeHandler
+}
+
+// NewTupleDescriptor makes a TupleDescriptor from |types|.
 func NewTupleDescriptor(types ...Type) TupleDesc {
-	return NewTupleDescriptorWithComparator(defaultCompare{}, types...)
+	return NewTupleDescriptorWithArgs(TupleDescriptorArgs{}, types...)
 }
 
-// NewTupleDescriptor returns a TupleDesc from a slice of Types.
-func NewTupleDescriptorWithComparator(cmp TupleComparator, types ...Type) (td TupleDesc) {
+// NewTupleDescriptorWithArgs returns a TupleDesc based on the given arguments.
+func NewTupleDescriptorWithArgs(args TupleDescriptorArgs, types ...Type) (td TupleDesc) {
 	if len(types) > MaxTupleFields {
 		panic("tuple field maxIdx exceeds maximum")
 	}
-
 	for _, typ := range types {
 		if typ.Enc == NullEnc {
 			panic("invalid encoding")
 		}
 	}
+	if args.Comparator == nil {
+		args.Comparator = DefaultTupleComparator{}
+	}
+	args.Comparator = ExtendedTupleComparator{args.Comparator, args.Handlers}.Validated(types)
 
 	td = TupleDesc{
-		Types: types,
-		cmp:   cmp,
-		fast:  makeFixedAccess(types),
-	}
-
-	return
-}
-
-func TupleDescriptorPrefix(td TupleDesc, count int) TupleDesc {
-	return NewTupleDescriptorWithComparator(td.cmp, td.Types[:count]...)
-}
-
-type defaultCompare struct{}
-
-func (d defaultCompare) Compare(left, right Tuple, desc TupleDesc) (cmp int) {
-	for i := range desc.fast {
-		start, stop := desc.fast[i][0], desc.fast[i][1]
-		cmp = compare(desc.Types[i], left[start:stop], right[start:stop])
-		if cmp != 0 {
-			return cmp
-		}
-	}
-
-	off := len(desc.fast)
-	for i, typ := range desc.Types[off:] {
-		j := i + off
-		cmp = compare(typ, left.GetField(j), right.GetField(j))
-		if cmp != 0 {
-			return cmp
-		}
+		Types:    types,
+		Handlers: args.Handlers,
+		cmp:      args.Comparator,
+		fast:     makeFixedAccess(types),
 	}
 	return
 }
 
-var _ TupleComparator = defaultCompare{}
+func IterAddressFields(td TupleDesc, cb func(int, Type)) {
+	for i, typ := range td.Types {
+		switch typ.Enc {
+		case BytesAddrEnc, StringAddrEnc,
+			JSONAddrEnc, CommitAddrEnc, GeomAddrEnc:
+			cb(i, typ)
+		}
+	}
+}
 
-type fixedAccess [][2]ByteSize
+type FixedAccess [][2]ByteSize
 
-func makeFixedAccess(types []Type) (acc fixedAccess) {
-	acc = make(fixedAccess, 0, len(types))
+func makeFixedAccess(types []Type) (acc FixedAccess) {
+	if disableFixedAccess {
+		return nil
+	}
+
+	acc = make(FixedAccess, 0, len(types))
 
 	off := ByteSize(0)
 	for _, typ := range types {
@@ -104,11 +131,22 @@ func makeFixedAccess(types []Type) (acc fixedAccess) {
 	return
 }
 
-func (td TupleDesc) WithoutFixedAccess() TupleDesc {
-	td.fast = nil
-	return td
+func (td TupleDesc) AddressFieldCount() (n int) {
+	IterAddressFields(td, func(int, Type) {
+		n++
+	})
+	return
 }
 
+// PrefixDesc returns a descriptor for the first n types.
+func (td TupleDesc) PrefixDesc(n int) TupleDesc {
+	if len(td.Handlers) == 0 {
+		return NewTupleDescriptorWithArgs(TupleDescriptorArgs{Comparator: td.cmp.Prefix(n)}, td.Types[:n]...)
+	}
+	return NewTupleDescriptorWithArgs(TupleDescriptorArgs{Comparator: td.cmp.Prefix(n), Handlers: td.Handlers[:n]}, td.Types[:n]...)
+}
+
+// GetField returns the ith field of |tup|.
 func (td TupleDesc) GetField(i int, tup Tuple) []byte {
 	if i < len(td.fast) {
 		start, stop := td.fast[i][0], td.fast[i][1]
@@ -117,9 +155,26 @@ func (td TupleDesc) GetField(i int, tup Tuple) []byte {
 	return tup.GetField(i)
 }
 
-// Compare returns the Comaparison of |left| and |right|.
+// Compare compares |left| and |right|.
 func (td TupleDesc) Compare(left, right Tuple) (cmp int) {
 	return td.cmp.Compare(left, right, td)
+}
+
+// CompareField compares |value| with the ith field of |tup|.
+func (td TupleDesc) CompareField(value []byte, i int, tup Tuple) (cmp int) {
+	var v []byte
+	if i < len(td.fast) {
+		start, stop := td.fast[i][0], td.fast[i][1]
+		v = tup[start:stop]
+	} else {
+		v = tup.GetField(i)
+	}
+	return td.cmp.CompareValues(i, value, v, td.Types[i])
+}
+
+// Comparator returns the TupleDescriptor's TupleComparator.
+func (td TupleDesc) Comparator() TupleComparator {
+	return td.cmp
 }
 
 // Count returns the number of fields in the TupleDesc.
@@ -131,6 +186,28 @@ func (td TupleDesc) Count() int {
 func (td TupleDesc) IsNull(i int, tup Tuple) bool {
 	b := td.GetField(i, tup)
 	return b == nil
+}
+
+func (td TupleDesc) HasNulls(tup Tuple) bool {
+	if tup.Count() < td.Count() {
+		return true
+	}
+	for i := range td.Types {
+		if tup.FieldIsNull(i) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetFixedAccess returns the FixedAccess for this tuple descriptor.
+func (td TupleDesc) GetFixedAccess() FixedAccess {
+	return td.fast
+}
+
+// WithoutFixedAccess returns a copy of |td| without fixed access metadata.
+func (td TupleDesc) WithoutFixedAccess() TupleDesc {
+	return TupleDesc{Types: td.Types, Handlers: td.Handlers, cmp: td.cmp}
 }
 
 // GetBool reads a bool from the ith field of the Tuple.
@@ -183,7 +260,7 @@ func (td TupleDesc) GetUint16(i int, tup Tuple) (v uint16, ok bool) {
 	td.expectEncoding(i, Uint16Enc)
 	b := td.GetField(i, tup)
 	if b != nil {
-		v, ok = readUint16(b), true
+		v, ok = ReadUint16(b), true
 	}
 	return
 }
@@ -254,46 +331,90 @@ func (td TupleDesc) GetFloat64(i int, tup Tuple) (v float64, ok bool) {
 	return
 }
 
+// GetBit reads a uint64 from the ith field of the Tuple.
+// If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetBit(i int, tup Tuple) (v uint64, ok bool) {
+	td.expectEncoding(i, Bit64Enc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readBit64(b), true
+	}
+	return
+}
+
 // GetDecimal reads a float64 from the ith field of the Tuple.
 // If the ith field is NULL, |ok| is set to false.
-func (td TupleDesc) GetDecimal(i int, tup Tuple) (v string, ok bool) {
+func (td TupleDesc) GetDecimal(i int, tup Tuple) (v decimal.Decimal, ok bool) {
 	td.expectEncoding(i, DecimalEnc)
 	b := td.GetField(i, tup)
 	if b != nil {
-		v, ok = readString(b), true
+		v, ok = readDecimal(b), true
 	}
 	return
 }
 
-// GetTimestamp reads a time.Time from the ith field of the Tuple.
-// If the ith field is NULL, |ok| is set to false.
-func (td TupleDesc) GetTimestamp(i int, tup Tuple) (v time.Time, ok bool) {
-	td.expectEncoding(i, TimestampEnc, DateEnc, DatetimeEnc, YearEnc)
-	b := td.GetField(i, tup)
-	if b != nil {
-		v, ok = readTimestamp(b), true
-	}
-	return
-}
-
-// GetSqlTime reads a string encoded Time value from the ith field of the Tuple.
-// If the ith field is NULL, |ok| is set to false.
-func (td TupleDesc) GetSqlTime(i int, tup Tuple) (v string, ok bool) {
-	td.expectEncoding(i, TimeEnc)
-	b := td.GetField(i, tup)
-	if b != nil {
-		v, ok = readString(b), true
-	}
-	return
-}
-
-// GetInt16 reads an int16 from the ith field of the Tuple.
+// GetYear reads an int16 from the ith field of the Tuple.
 // If the ith field is NULL, |ok| is set to false.
 func (td TupleDesc) GetYear(i int, tup Tuple) (v int16, ok bool) {
 	td.expectEncoding(i, YearEnc)
 	b := td.GetField(i, tup)
 	if b != nil {
-		v, ok = readInt16(b), true
+		v, ok = readYear(b), true
+	}
+	return
+}
+
+// GetDate reads a time.Time from the ith field of the Tuple.
+// If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetDate(i int, tup Tuple) (v time.Time, ok bool) {
+	td.expectEncoding(i, DateEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readDate(b), true
+	}
+	return
+}
+
+// GetSqlTime reads an int64 encoded Time value, representing a duration as a number of microseconds,
+// from the ith field of the Tuple. If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetSqlTime(i int, tup Tuple) (v int64, ok bool) {
+	td.expectEncoding(i, TimeEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readInt64(b), true
+	}
+	return
+}
+
+// GetDatetime reads a time.Time from the ith field of the Tuple.
+// If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetDatetime(i int, tup Tuple) (v time.Time, ok bool) {
+	td.expectEncoding(i, DatetimeEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readDatetime(b), true
+	}
+	return
+}
+
+// GetEnum reads a uin16 from the ith field of the Tuple.
+// If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetEnum(i int, tup Tuple) (v uint16, ok bool) {
+	td.expectEncoding(i, EnumEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readEnum(b), true
+	}
+	return
+}
+
+// GetSet reads a uint64 from the ith field of the Tuple.
+// If the ith field is NULL, |ok| is set to false.
+func (td TupleDesc) GetSet(i int, tup Tuple) (v uint64, ok bool) {
+	td.expectEncoding(i, SetEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v, ok = readSet(b), true
 	}
 	return
 }
@@ -334,16 +455,74 @@ func (td TupleDesc) GetJSON(i int, tup Tuple) (v []byte, ok bool) {
 	return
 }
 
-// GetBytes reads a []byte from the ith field of the Tuple.
+// GetGeometry reads a []byte from the ith field of the Tuple.
 // If the ith field is NULL, |ok| is set to false.
 func (td TupleDesc) GetGeometry(i int, tup Tuple) (v []byte, ok bool) {
-	td.expectEncoding(i, GeometryEnc)
+	// TODO: we are support both Geometry and GeometryAddr for now, so we can't expect just one
+	// td.expectEncoding(i, GeometryEnc)
 	b := td.GetField(i, tup)
 	if b != nil {
 		v = readByteString(b)
 		ok = true
 	}
 	return
+}
+
+func (td TupleDesc) GetGeometryAddr(i int, tup Tuple) (hash.Hash, bool) {
+	// TODO: we are support both Geometry and GeometryAddr for now, so we can't expect just one
+	// td.expectEncoding(i, GeomAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) GetHash128(i int, tup Tuple) (v []byte, ok bool) {
+	td.expectEncoding(i, Hash128Enc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v = b
+		ok = true
+	}
+	return
+}
+
+// GetExtended reads a byte slice from the ith field of the Tuple.
+func (td TupleDesc) GetExtended(i int, tup Tuple) ([]byte, bool) {
+	td.expectEncoding(i, ExtendedEnc)
+	v := td.GetField(i, tup)
+	return v, v != nil
+}
+
+// GetExtendedAddr reads a hash from the ith field of the Tuple.
+func (td TupleDesc) GetExtendedAddr(i int, tup Tuple) (hash.Hash, bool) {
+	td.expectEncoding(i, ExtendedAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) GetJSONAddr(i int, tup Tuple) (hash.Hash, bool) {
+	td.expectEncoding(i, JSONAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) GetStringAddr(i int, tup Tuple) (hash.Hash, bool) {
+	td.expectEncoding(i, StringAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) GetBytesAddr(i int, tup Tuple) (hash.Hash, bool) {
+	td.expectEncoding(i, BytesAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) GetCommitAddr(i int, tup Tuple) (v hash.Hash, ok bool) {
+	td.expectEncoding(i, CommitAddrEnc)
+	return td.getAddr(i, tup)
+}
+
+func (td TupleDesc) getAddr(i int, tup Tuple) (hash.Hash, bool) {
+	b := td.GetField(i, tup)
+	if b == nil {
+		return hash.Hash{}, false
+	}
+	return hash.New(b), true
 }
 
 func (td TupleDesc) expectEncoding(i int, encodings ...Encoding) {
@@ -353,6 +532,16 @@ func (td TupleDesc) expectEncoding(i int, encodings ...Encoding) {
 		}
 	}
 	panic("incorrect value encoding")
+}
+
+func (td TupleDesc) GetCell(i int, tup Tuple) (v Cell, ok bool) {
+	td.expectEncoding(i, CellEnc)
+	b := td.GetField(i, tup)
+	if b != nil {
+		v = readCell(b)
+		ok = true
+	}
+	return
 }
 
 // Format prints a Tuple as a string.
@@ -365,59 +554,116 @@ func (td TupleDesc) Format(tup Tuple) string {
 	sb.WriteString("( ")
 
 	seenOne := false
-	for i, typ := range td.Types {
+	for i := range td.Types {
 		if seenOne {
 			sb.WriteString(", ")
 		}
 		seenOne = true
-
-		if td.IsNull(i, tup) {
-			sb.WriteString("NULL")
-			continue
-		}
-
-		// todo(andy): complete cases
-		switch typ.Enc {
-		case Int8Enc:
-			v, _ := td.GetInt8(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Uint8Enc:
-			v, _ := td.GetUint8(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Int16Enc:
-			v, _ := td.GetInt16(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Uint16Enc:
-			v, _ := td.GetUint16(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Int32Enc:
-			v, _ := td.GetInt32(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Uint32Enc:
-			v, _ := td.GetUint32(i, tup)
-			sb.WriteString(strconv.Itoa(int(v)))
-		case Int64Enc:
-			v, _ := td.GetInt64(i, tup)
-			sb.WriteString(strconv.FormatInt(v, 10))
-		case Uint64Enc:
-			v, _ := td.GetUint64(i, tup)
-			sb.WriteString(strconv.FormatUint(v, 10))
-		case Float32Enc:
-			v, _ := td.GetFloat32(i, tup)
-			sb.WriteString(fmt.Sprintf("%f", v))
-		case Float64Enc:
-			v, _ := td.GetFloat64(i, tup)
-			sb.WriteString(fmt.Sprintf("%f", v))
-		case StringEnc:
-			v, _ := td.GetString(i, tup)
-			sb.WriteString(v)
-		case ByteStringEnc:
-			v, _ := td.GetBytes(i, tup)
-			sb.Write(v)
-		default:
-			sb.Write(tup.GetField(i))
-		}
+		sb.WriteString(td.FormatValue(i, tup.GetField(i)))
 	}
 	sb.WriteString(" )")
 	return sb.String()
+}
+
+func (td TupleDesc) FormatValue(i int, value []byte) string {
+	if value == nil {
+		return "NULL"
+	}
+	return td.formatValue(td.Types[i].Enc, i, value)
+}
+
+func (td TupleDesc) formatValue(enc Encoding, i int, value []byte) string {
+	switch enc {
+	case Int8Enc:
+		v := readInt8(value)
+		return strconv.Itoa(int(v))
+	case Uint8Enc:
+		v := readUint8(value)
+		return strconv.Itoa(int(v))
+	case Int16Enc:
+		v := readInt16(value)
+		return strconv.Itoa(int(v))
+	case Uint16Enc:
+		v := ReadUint16(value)
+		return strconv.Itoa(int(v))
+	case Int32Enc:
+		v := readInt32(value)
+		return strconv.Itoa(int(v))
+	case Uint32Enc:
+		v := readUint32(value)
+		return strconv.Itoa(int(v))
+	case Int64Enc:
+		v := readInt64(value)
+		return strconv.FormatInt(v, 10)
+	case Uint64Enc:
+		v := readUint64(value)
+		return strconv.FormatUint(v, 10)
+	case Float32Enc:
+		v := readFloat32(value)
+		return fmt.Sprintf("%f", v)
+	case Float64Enc:
+		v := readFloat64(value)
+		return fmt.Sprintf("%f", v)
+	case Bit64Enc:
+		v := readUint64(value)
+		return strconv.FormatUint(v, 10)
+	case DecimalEnc:
+		v := readDecimal(value)
+		return v.String()
+	case YearEnc:
+		v := readYear(value)
+		return strconv.Itoa(int(v))
+	case DateEnc:
+		v := readDate(value)
+		return v.Format("2006-01-02")
+	case TimeEnc:
+		v := readTime(value)
+		return strconv.FormatInt(v, 10)
+	case DatetimeEnc:
+		v := readDatetime(value)
+		return v.Format(time.RFC3339)
+	case EnumEnc:
+		v := readEnum(value)
+		return strconv.Itoa(int(v))
+	case SetEnc:
+		v := readSet(value)
+		return strconv.FormatUint(v, 10)
+	case StringEnc:
+		return readString(value)
+	case ByteStringEnc:
+		return hex.EncodeToString(value)
+	case Hash128Enc:
+		return hex.EncodeToString(value)
+	case BytesAddrEnc:
+		return hex.EncodeToString(value)
+	case CommitAddrEnc:
+		return hex.EncodeToString(value)
+	case CellEnc:
+		return hex.EncodeToString(value)
+	case ExtendedEnc:
+		handler := td.Handlers[i]
+		v := readExtended(handler, value)
+		str, err := handler.FormatValue(v)
+		if err != nil {
+			panic(err)
+		}
+		return str
+	case ExtendedAddrEnc:
+		return hex.EncodeToString(value)
+	default:
+		return string(value)
+	}
+}
+
+// Equals returns true if |td| and |other| have equal type slices.
+func (td TupleDesc) Equals(other TupleDesc) bool {
+	if len(td.Types) != len(other.Types) {
+		return false
+	}
+	for i, typ := range td.Types {
+		if typ != other.Types[i] {
+			return false
+		}
+	}
+	return true
 }

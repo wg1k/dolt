@@ -22,6 +22,7 @@ import (
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/nbs"
 
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -38,7 +39,7 @@ func newMemoryProllyStore() keyValStore {
 func newNBSProllyStore(dir string) keyValStore {
 	ctx := context.Background()
 	verStr := types.Format_Default.VersionString()
-	cs, err := nbs.NewLocalStore(ctx, verStr, dir, defaultMemTableSize)
+	cs, err := nbs.NewLocalStore(ctx, verStr, dir, defaultMemTableSize, nbs.NewUnlimitedMemQuotaProvider())
 	if err != nil {
 		panic(err)
 	}
@@ -47,7 +48,8 @@ func newNBSProllyStore(dir string) keyValStore {
 
 func newProllyStore(ctx context.Context, cs chunks.ChunkStore) keyValStore {
 	vrw := types.NewValueStore(cs)
-	db := datas.NewTypesDatabase(vrw)
+	ns := tree.NewNodeStore(cs)
+	db := datas.NewTypesDatabase(vrw, ns)
 	m, err := types.NewMap(ctx, vrw)
 	if err != nil {
 		panic(err)
