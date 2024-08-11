@@ -23,7 +23,7 @@ import (
 	"strings"
 )
 
-var ExpectedHeader = regexp.MustCompile(`// Copyright (2019|2020|2021|2022|2019-2020|2019-2021|2019-2022|2020-2021|2020-2022) Dolthub, Inc.
+var ExpectedHeader = regexp.MustCompile(`// Copyright (2019|2020|2021|2022|2023|2024|2019-2020|2019-2021|2019-2022|2019-2023|2019-2024|2020-2021|2020-2022|2020-2023|2020-2024|2021-2022|2021-2023|2021-2024|2022-2023|2022-2024|2023-2024) Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 \(the "License"\);
 // you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ var ExpectedHeader = regexp.MustCompile(`// Copyright (2019|2020|2021|2022|2019-
 
 `)
 
-var ExpectedHeaderForFileFromNoms = regexp.MustCompile(`// Copyright (2019|2020|2021|2022|2019-2020|2019-2021|2019-2022|2020-2021|2020-2022) Dolthub, Inc.
+var ExpectedHeaderForFileFromNoms = regexp.MustCompile(`// Copyright (2019|2020|2021|2022|2023|2019-2020|2019-2021|2019-2022|2019-2023|2020-2021|2020-2022|2020-2023|2021-2022|2021-2023|2022-2023) Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 \(the "License"\);
 // you may not use this file except in compliance with the License.
@@ -91,8 +91,6 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/cmd/noms/util/help.go", NomsPath: "cmd/util/help.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/util/kingpin_command.go", NomsPath: "cmd/util/kingpin_command.go", HadCopyrightNotice: true},
 	{Path: "store/chunks/chunk.go", NomsPath: "go/chunks/chunk.go", HadCopyrightNotice: true},
-	{Path: "store/chunks/chunk_serializer.go", NomsPath: "go/chunks/chunk_serializer.go", HadCopyrightNotice: true},
-	{Path: "store/chunks/chunk_serializer_test.go", NomsPath: "go/chunks/chunk_serializer_test.go", HadCopyrightNotice: true},
 	{Path: "store/chunks/chunk_store.go", NomsPath: "go/chunks/chunk_store.go", HadCopyrightNotice: true},
 	{Path: "store/chunks/chunk_store_common_test.go", NomsPath: "go/chunks/chunk_store_common_test.go", HadCopyrightNotice: true},
 	{Path: "store/chunks/chunk_test.go", NomsPath: "go/chunks/chunk_test.go", HadCopyrightNotice: true},
@@ -107,30 +105,14 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/cmd/noms/noms_blob_get.go", NomsPath: "cmd/noms/noms_blob_get.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_blob_get_test.go", NomsPath: "cmd/noms/noms_blob_get_test.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_blob_put.go", NomsPath: "cmd/noms/noms_blob_put.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_commit.go", NomsPath: "cmd/noms/noms_commit.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_commit_test.go", NomsPath: "cmd/noms/noms_commit_test.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_config.go", NomsPath: "cmd/noms/noms_config.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_diff.go", NomsPath: "cmd/noms/noms_diff.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_diff_test.go", NomsPath: "cmd/noms/noms_diff_test.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_ds.go", NomsPath: "cmd/noms/noms_ds.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_ds_test.go", NomsPath: "cmd/noms/noms_ds_test.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_list.go", NomsPath: "cmd/noms/noms_list.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_log.go", NomsPath: "cmd/noms/noms_log.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_log_test.go", NomsPath: "cmd/noms/noms_log_test.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_map.go", NomsPath: "cmd/noms/noms_map.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_merge.go", NomsPath: "cmd/noms/noms_merge.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_merge_test.go", NomsPath: "cmd/noms/noms_merge_test.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_root.go", NomsPath: "cmd/noms/noms_root.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_root_test.go", NomsPath: "cmd/noms/noms_root_test.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_set.go", NomsPath: "cmd/noms/noms_set.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_show.go", NomsPath: "cmd/noms/noms_show.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_show_test.go", NomsPath: "cmd/noms/noms_show_test.go", HadCopyrightNotice: true},
 	{Path: "store/cmd/noms/noms_stats.go", NomsPath: "cmd/noms/noms_stats.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_struct.go", NomsPath: "cmd/noms/noms_struct.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_sync.go", NomsPath: "cmd/noms/noms_sync.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_sync_test.go", NomsPath: "cmd/noms/noms_sync_test.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_version.go", NomsPath: "cmd/noms/noms_version.go", HadCopyrightNotice: true},
-	{Path: "store/cmd/noms/noms_version_test.go", NomsPath: "cmd/noms/noms_version_test.go", HadCopyrightNotice: true},
 	{Path: "store/config/config.go", NomsPath: "go/config/config.go", HadCopyrightNotice: true},
 	{Path: "store/config/config_test.go", NomsPath: "go/config/config_test.go", HadCopyrightNotice: true},
 	{Path: "store/config/resolver.go", NomsPath: "go/config/resolver.go", HadCopyrightNotice: true},
@@ -146,8 +128,6 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/datas/database_test.go", NomsPath: "go/datas/database_test.go", HadCopyrightNotice: true},
 	{Path: "store/datas/dataset.go", NomsPath: "go/datas/dataset.go", HadCopyrightNotice: true},
 	{Path: "store/datas/dataset_test.go", NomsPath: "go/datas/dataset_test.go", HadCopyrightNotice: true},
-	{Path: "store/datas/pull/pull.go", NomsPath: "go/datas/pull.go", HadCopyrightNotice: true},
-	{Path: "store/datas/pull/pull_test.go", NomsPath: "go/datas/pull_test.go", HadCopyrightNotice: true},
 	{Path: "store/diff/apply_patch.go", NomsPath: "go/diff/apply_patch.go", HadCopyrightNotice: true},
 	{Path: "store/diff/apply_patch_test.go", NomsPath: "go/diff/apply_patch_test.go", HadCopyrightNotice: true},
 	{Path: "store/diff/diff.go", NomsPath: "go/diff/diff.go", HadCopyrightNotice: true},
@@ -155,7 +135,6 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/diff/patch.go", NomsPath: "go/diff/patch.go", HadCopyrightNotice: true},
 	{Path: "store/diff/patch_test.go", NomsPath: "go/diff/patch_test.go", HadCopyrightNotice: true},
 	{Path: "store/diff/print_diff.go", NomsPath: "go/diff/print_diff.go", HadCopyrightNotice: true},
-	{Path: "store/diff/summary.go", NomsPath: "go/diff/summary.go", HadCopyrightNotice: true},
 	{Path: "store/hash/base32.go", NomsPath: "go/hash/base32.go", HadCopyrightNotice: true},
 	{Path: "store/hash/base32_test.go", NomsPath: "go/hash/base32_test.go", HadCopyrightNotice: true},
 	{Path: "store/hash/hash.go", NomsPath: "go/hash/hash.go", HadCopyrightNotice: true},
@@ -194,23 +173,16 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/nbs/benchmarks/main.go", NomsPath: "go/nbs/benchmarks/main.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/benchmarks/null_block_store.go", NomsPath: "go/nbs/benchmarks/null_block_store.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/block_store_test.go", NomsPath: "go/nbs/block_store_test.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/cache.go", NomsPath: "go/nbs/cache.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/conjoiner.go", NomsPath: "go/nbs/conjoiner.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/conjoiner_test.go", NomsPath: "go/nbs/conjoiner_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/dynamo_fake_test.go", NomsPath: "go/nbs/dynamo_fake_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/dynamo_manifest.go", NomsPath: "go/nbs/dynamo_manifest.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/dynamo_manifest_test.go", NomsPath: "go/nbs/dynamo_manifest_test.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/dynamo_table_reader.go", NomsPath: "go/nbs/dynamo_table_reader.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/dynamo_table_reader_test.go", NomsPath: "go/nbs/dynamo_table_reader_test.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/fd_cache.go", NomsPath: "go/nbs/fd_cache.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/fd_cache_test.go", NomsPath: "go/nbs/fd_cache_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_manifest.go", NomsPath: "go/nbs/file_manifest.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_manifest_test.go", NomsPath: "go/nbs/file_manifest_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_table_persister.go", NomsPath: "go/nbs/file_table_persister.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_table_persister_test.go", NomsPath: "go/nbs/file_table_persister_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/frag/main.go", NomsPath: "go/nbs/frag/main.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/fs_table_cache.go", NomsPath: "go/nbs/fs_table_cache.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/fs_table_cache_test.go", NomsPath: "go/nbs/fs_table_cache_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/manifest.go", NomsPath: "go/nbs/manifest.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/manifest_cache.go", NomsPath: "go/nbs/manifest_cache.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/manifest_cache_test.go", NomsPath: "go/nbs/manifest_cache_test.go", HadCopyrightNotice: true},
@@ -218,8 +190,7 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/nbs/mem_table_test.go", NomsPath: "go/nbs/mem_table_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_table_reader.go", NomsPath: "go/nbs/mmap_table_reader.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/file_table_reader_test.go", NomsPath: "go/nbs/mmap_table_reader_test.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/persisting_chunk_source.go", NomsPath: "go/nbs/persisting_chunk_source.go", HadCopyrightNotice: true},
-	{Path: "store/nbs/persisting_chunk_source_test.go", NomsPath: "go/nbs/persisting_chunk_source_test.go", HadCopyrightNotice: true},
+	{Path: "store/nbs/empty_chunk_source.go", NomsPath: "go/nbs/empty_chunk_source.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/root_tracker_test.go", NomsPath: "go/nbs/root_tracker_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/s3_fake_test.go", NomsPath: "go/nbs/s3_fake_test.go", HadCopyrightNotice: true},
 	{Path: "store/nbs/s3_table_reader.go", NomsPath: "go/nbs/s3_table_reader.go", HadCopyrightNotice: true},
@@ -246,7 +217,6 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/sloppy/sloppy_test.go", NomsPath: "go/sloppy/sloppy_test.go", HadCopyrightNotice: true},
 	{Path: "store/spec/absolute_path.go", NomsPath: "go/spec/absolute_path.go", HadCopyrightNotice: true},
 	{Path: "store/spec/absolute_path_test.go", NomsPath: "go/spec/absolute_path_test.go", HadCopyrightNotice: true},
-	{Path: "store/spec/commit_meta.go", NomsPath: "go/spec/commit_meta.go", HadCopyrightNotice: true},
 	{Path: "store/spec/spec.go", NomsPath: "go/spec/spec.go", HadCopyrightNotice: true},
 	{Path: "store/spec/spec_test.go", NomsPath: "go/spec/spec_test.go", HadCopyrightNotice: true},
 	{Path: "store/spec/util.go", NomsPath: "go/spec/util.go", HadCopyrightNotice: true},
@@ -287,6 +257,7 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/types/map_test.go", NomsPath: "go/types/map_test.go", HadCopyrightNotice: true},
 	{Path: "store/types/meta_sequence.go", NomsPath: "go/types/meta_sequence.go", HadCopyrightNotice: true},
 	{Path: "store/types/noms_kind.go", NomsPath: "go/types/noms_kind.go", HadCopyrightNotice: true},
+	{Path: "store/types/noms_kind_test.go", NomsPath: "go/types/noms_kind_test.go", HadCopyrightNotice: true},
 	{Path: "store/types/ordered_sequences.go", NomsPath: "go/types/ordered_sequences.go", HadCopyrightNotice: true},
 	{Path: "store/types/ordered_sequences_diff.go", NomsPath: "go/types/ordered_sequences_diff.go", HadCopyrightNotice: true},
 	{Path: "store/types/ordered_sequences_diff_test.go", NomsPath: "go/types/ordered_sequences_diff_test.go", HadCopyrightNotice: true},
@@ -327,10 +298,8 @@ var CopiedNomsFiles []CopiedNomsFile = []CopiedNomsFile{
 	{Path: "store/types/value_stats.go", NomsPath: "go/types/value_stats.go", HadCopyrightNotice: true},
 	{Path: "store/types/value_store.go", NomsPath: "go/types/value_store.go", HadCopyrightNotice: true},
 	{Path: "store/types/value_store_test.go", NomsPath: "go/types/value_store_test.go", HadCopyrightNotice: true},
-	{Path: "store/types/walk.go", NomsPath: "go/types/walk.go", HadCopyrightNotice: true},
 	{Path: "store/types/walk_refs.go", NomsPath: "go/types/walk_refs.go", HadCopyrightNotice: true},
 	{Path: "store/types/walk_refs_test.go", NomsPath: "go/types/walk_refs_test.go", HadCopyrightNotice: true},
-	{Path: "store/types/walk_test.go", NomsPath: "go/types/walk_test.go", HadCopyrightNotice: true},
 	{Path: "store/util/clienttest/client_test_suite.go", NomsPath: "go/util/clienttest/client_test_suite.go", HadCopyrightNotice: true},
 	{Path: "store/util/datetime/date_time.go", NomsPath: "go/util/datetime/date_time.go", HadCopyrightNotice: true},
 	{Path: "store/util/datetime/date_time_test.go", NomsPath: "go/util/datetime/date_time_test.go", HadCopyrightNotice: true},
@@ -402,7 +371,7 @@ func CheckGo() bool {
 		}
 		return nil
 	})
-	for path, _ := range nomsLookup {
+	for path := range nomsLookup {
 		fmt.Printf("ERROR: Missing noms file from CopiedNomsFiles: %v\n", path)
 		fmt.Printf("  Please update with new location or remove the reference in ./utils/copyrightshdrs/")
 		failed = true

@@ -16,15 +16,16 @@ package integration_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
+	"github.com/dolthub/dolt/go/store/types"
 )
 
 // This tests running queries against a modified subset of the stockmarket data set found here:
@@ -20127,42 +20128,47 @@ INSERT INTO join_result VALUES ('stock','ZYNE','us','2017-11-01',9.7,9.93,9.41,9
 func TestCreateTables(t *testing.T) {
 	SkipByDefaultInCI(t)
 	dEnv := dtestutils.CreateTestEnv()
+	defer dEnv.DoltDB.Close()
 	ctx := context.Background()
 
 	root, _ := dEnv.WorkingRoot(ctx)
 	var err error
-	root, err = sqle.ExecuteSql(t, dEnv, root, createTables)
+	root, err = sqle.ExecuteSql(dEnv, root, createTables)
 	require.NoError(t, err)
 
-	table, _, err := root.GetTable(ctx, "daily_summary")
+	table, _, err := root.GetTable(ctx, doltdb.TableName{Name: "daily_summary"})
 	assert.NoError(t, err)
 	assert.NotNil(t, table)
 
-	table, _, err = root.GetTable(ctx, "symbols")
+	table, _, err = root.GetTable(ctx, doltdb.TableName{Name: "symbols"})
 	assert.NoError(t, err)
 	assert.NotNil(t, table)
 }
 
 func TestInserts(t *testing.T) {
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // todo: convert to enginetests
+	}
 	SkipByDefaultInCI(t)
 	dEnv := dtestutils.CreateTestEnv()
+	defer dEnv.DoltDB.Close()
 	ctx := context.Background()
 
 	root, _ := dEnv.WorkingRoot(ctx)
 	var err error
-	root, err = sqle.ExecuteSql(t, dEnv, root, createTables)
+	root, err = sqle.ExecuteSql(dEnv, root, createTables)
 	require.NoError(t, err)
 
-	root, err = sqle.ExecuteSql(t, dEnv, root, insertRows)
+	root, err = sqle.ExecuteSql(dEnv, root, insertRows)
 	require.NoError(t, err)
 
-	table, _, err := root.GetTable(ctx, "daily_summary")
+	table, _, err := root.GetTable(ctx, doltdb.TableName{Name: "daily_summary"})
 	assert.NoError(t, err)
 	rowData, err := table.GetNomsRowData(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(7953), rowData.Len())
 
-	table, _, err = root.GetTable(ctx, "symbols")
+	table, _, err = root.GetTable(ctx, doltdb.TableName{Name: "symbols"})
 	assert.NoError(t, err)
 	rowData, err = table.GetNomsRowData(ctx)
 	assert.NoError(t, err)
@@ -20170,34 +20176,38 @@ func TestInserts(t *testing.T) {
 }
 
 func TestInsertsWithIndexes(t *testing.T) {
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // todo: convert to enginetests
+	}
 	SkipByDefaultInCI(t)
 	dEnv := dtestutils.CreateTestEnv()
+	defer dEnv.DoltDB.Close()
 	ctx := context.Background()
 
 	root, _ := dEnv.WorkingRoot(ctx)
 	var err error
-	root, err = sqle.ExecuteSql(t, dEnv, root, createTables)
+	root, err = sqle.ExecuteSql(dEnv, root, createTables)
 	require.NoError(t, err)
 
-	root, err = sqle.ExecuteSql(t, dEnv, root, createIndexes)
+	root, err = sqle.ExecuteSql(dEnv, root, createIndexes)
 	require.NoError(t, err)
 
-	root, err = sqle.ExecuteSql(t, dEnv, root, insertRows)
+	root, err = sqle.ExecuteSql(dEnv, root, insertRows)
 	require.NoError(t, err)
 
-	table, _, err := root.GetTable(ctx, "daily_summary")
+	table, _, err := root.GetTable(ctx, doltdb.TableName{Name: "daily_summary"})
 	require.NoError(t, err)
 	rowData, err := table.GetNomsIndexRowData(ctx, "idx_country")
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7953), rowData.Len())
 
-	table, _, err = root.GetTable(ctx, "symbols")
+	table, _, err = root.GetTable(ctx, doltdb.TableName{Name: "symbols"})
 	require.NoError(t, err)
 	rowData, err = table.GetNomsIndexRowData(ctx, "idx_ipoyear")
 	require.NoError(t, err)
 	assert.Equal(t, uint64(6879), rowData.Len())
 
-	table, _, err = root.GetTable(ctx, "join_result")
+	table, _, err = root.GetTable(ctx, doltdb.TableName{Name: "join_result"})
 	require.NoError(t, err)
 	rowData, err = table.GetNomsIndexRowData(ctx, "idx_country")
 	require.NoError(t, err)
@@ -20207,22 +20217,23 @@ func TestInsertsWithIndexes(t *testing.T) {
 func TestJoin(t *testing.T) {
 	SkipByDefaultInCI(t)
 	dEnv := dtestutils.CreateTestEnv()
+	defer dEnv.DoltDB.Close()
 	ctx := context.Background()
 
 	root, _ := dEnv.WorkingRoot(ctx)
 	var err error
-	root, err = sqle.ExecuteSql(t, dEnv, root, createTables)
+	root, err = sqle.ExecuteSql(dEnv, root, createTables)
 	require.NoError(t, err)
 
-	root, err = sqle.ExecuteSql(t, dEnv, root, insertRows)
+	root, err = sqle.ExecuteSql(dEnv, root, insertRows)
 	require.NoError(t, err)
 
-	rows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, `select Type, d.Symbol, Country, TradingDate, Open, High, Low, Close, Volume, OpenInt, Name, Sector, IPOYear
+	rows, err := sqle.ExecuteSelect(dEnv, root, `select Type, d.Symbol, Country, TradingDate, Open, High, Low, Close, Volume, OpenInt, Name, Sector, IPOYear
 						from daily_summary d join symbols t on d.Symbol = t.Symbol order by d.Symbol, Country, TradingDate`)
 	require.NoError(t, err)
 	assert.Equal(t, 5210, len(rows))
 
-	expectedJoinRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, `select * from join_result order by symbol, country, TradingDate`)
+	expectedJoinRows, err := sqle.ExecuteSelect(dEnv, root, `select * from join_result order by symbol, country, TradingDate`)
 	require.NoError(t, err)
 	assertResultRowsEqual(t, expectedJoinRows, rows)
 }
@@ -20250,29 +20261,4 @@ func assertResultRowsEqual(t *testing.T, expected, actual []sql.Row) {
 	if numErrors >= maxDiffs {
 		t.Logf("Encountered more than %d errors", maxDiffs)
 	}
-}
-
-func TestExplain(t *testing.T) {
-	SkipByDefaultInCI(t)
-	dEnv := dtestutils.CreateTestEnv()
-	ctx := context.Background()
-
-	root, _ := dEnv.WorkingRoot(ctx)
-	var err error
-	root, err = sqle.ExecuteSql(t, dEnv, root, createTables)
-	require.NoError(t, err)
-
-	rows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, "explain select * from daily_summary d join symbols t on d.Symbol = t.Symbol")
-	require.NoError(t, err)
-	rowStrings := make([]string, len(rows))
-	for i, row := range rows {
-		rowStrings[i] = row[0].(string)
-	}
-
-	expectedExplain := "IndexedJoin(d.Symbol = t.Symbol)\n" +
-		" ├─ TableAlias(d)\n" +
-		" │   └─ Table(daily_summary)\n" +
-		" └─ TableAlias(t)\n" +
-		"     └─ IndexedTableAccess(symbols on [symbols.Symbol])"
-	assert.Equal(t, expectedExplain, strings.Join(rowStrings, "\n"))
 }

@@ -22,9 +22,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var forceOpt = &Option{"force", "f", "", OptionalFlag, "force desc", nil}
-var messageOpt = &Option{"message", "m", "msg", OptionalValue, "msg desc", nil}
-var fileTypeOpt = &Option{"file-type", "", "", OptionalValue, "file type", nil}
+var forceOpt = &Option{"force", "f", "", OptionalFlag, "force desc", nil, false}
+var messageOpt = &Option{"message", "m", "msg", OptionalValue, "msg desc", nil, false}
+var fileTypeOpt = &Option{"file-type", "", "", OptionalValue, "file type", nil, false}
+var notOpt = &Option{"not", "", "", OptionalValue, "not desc", nil, true}
 
 func TestParsing(t *testing.T) {
 	tests := []struct {
@@ -118,16 +119,15 @@ func TestParsing(t *testing.T) {
 			expectedArgs: []string{"b", "c"},
 		},
 		{
-			name:         "--messagevalue",
-			options:      []*Option{forceOpt, messageOpt},
-			args:         []string{"b", "-messagevalue", "c"},
-			expectedOpts: map[string]string{"message": "value"},
-			expectedArgs: []string{"b", "c"},
+			name:        "--messagevalue",
+			options:     []*Option{forceOpt, messageOpt},
+			args:        []string{"b", "--messagevalue", "c"},
+			expectedErr: "error: unknown option `messagevalue'",
 		},
 		{
-			name:         "-fmfootball",
+			name:         "-fm football",
 			options:      []*Option{forceOpt, messageOpt},
-			args:         []string{"-fmfootball"},
+			args:         []string{"-fm football"},
 			expectedOpts: map[string]string{"message": "football", "force": ""},
 			expectedArgs: []string{},
 		},
@@ -139,9 +139,9 @@ func TestParsing(t *testing.T) {
 			expectedArgs: []string{"football"},
 		},
 		{
-			name:         "-mf",
+			name:         "-m f",
 			options:      []*Option{forceOpt, messageOpt},
-			args:         []string{"-mf"},
+			args:         []string{"-m f"},
 			expectedOpts: map[string]string{"message": "f"},
 			expectedArgs: []string{},
 		},
@@ -152,10 +152,17 @@ func TestParsing(t *testing.T) {
 			expectedErr: "error: no value for option `m'",
 		},
 		{
-			name:         "-mf value",
+			name:         "-m f value",
 			options:      []*Option{forceOpt, messageOpt},
-			args:         []string{"-mf", "value"},
+			args:         []string{"-m f", "value"},
 			expectedOpts: map[string]string{"message": "f"},
+			expectedArgs: []string{"value"},
+		},
+		{
+			name:         "--not string list value",
+			options:      []*Option{forceOpt, messageOpt, notOpt},
+			args:         []string{"-m f", "value", "--not", "main", "branch"},
+			expectedOpts: map[string]string{"message": "f", "not": "main,branch"},
 			expectedArgs: []string{"value"},
 		},
 		{
@@ -188,13 +195,13 @@ func TestParsing(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parser := NewArgParser()
+			parser := NewArgParserWithVariableArgs("test")
 
 			for _, opt := range test.options {
 				parser.SupportOption(opt)
 			}
 
-			exp := &ArgParseResults{test.expectedOpts, test.expectedArgs, parser}
+			exp := &ArgParseResults{test.expectedOpts, test.expectedArgs, parser, NO_POSITIONAL_ARGS}
 
 			res, err := parser.Parse(test.args)
 			if test.expectedErr != "" {
@@ -208,7 +215,7 @@ func TestParsing(t *testing.T) {
 }
 
 func TestValidation(t *testing.T) {
-	ap := NewArgParser()
+	ap := NewArgParserWithVariableArgs("test")
 	ap.SupportsString("string", "s", "string_value", "A string")
 	ap.SupportsString("string2", "", "string_value", "Another string")
 	ap.SupportsFlag("flag", "f", "A flag")
@@ -272,4 +279,47 @@ func TestValidation(t *testing.T) {
 	if apr.NArg() != 3 || apr.Arg(0) != "a" || !reflect.DeepEqual(apr.Args, expectedArgs) {
 		t.Error("Arg list issues")
 	}
+}
+
+func TestDropValue(t *testing.T) {
+	ap := NewArgParserWithVariableArgs("test")
+
+	ap.SupportsString("string", "", "string_value", "A string")
+	ap.SupportsFlag("flag", "", "A flag")
+
+	apr, err := ap.Parse([]string{"--string", "str", "--flag", "1234"})
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	newApr1 := apr.DropValue("string")
+	require.NotEqualf(t, apr, newApr1, "Original value and new value are equal")
+
+	_, hasVal := newApr1.GetValue("string")
+	if hasVal {
+		t.Error("DropValue failed to drop string")
+	}
+	_, hasVal = newApr1.GetValue("flag")
+	if !hasVal {
+		t.Error("DropValue dropped the wrong value")
+	}
+	if newApr1.NArg() != 1 || newApr1.Arg(0) != "1234" {
+		t.Error("DropValue didn't preserve args")
+	}
+
+	newApr2 := apr.DropValue("flag")
+	require.NotEqualf(t, apr, newApr2, "DropValue failes to drop flag")
+
+	_, hasVal = newApr2.GetValue("string")
+	if !hasVal {
+		t.Error("DropValue dropped the wrong value")
+	}
+	_, hasVal = newApr2.GetValue("flag")
+	if hasVal {
+		t.Error("DropValue failed to drop flag")
+	}
+	if newApr2.NArg() != 1 || newApr2.Arg(0) != "1234" {
+		t.Error("DropValue didn't preserve args")
+	}
+
 }

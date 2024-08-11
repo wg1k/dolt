@@ -89,6 +89,8 @@ func main() {
 
 	PrintDoltLicense(out)
 	PrintGoLicense(out, root)
+	PrintMuslLicense(out)
+	PrintMimallocLicense(out)
 
 	sort.Strings(mods)
 	var l string
@@ -129,6 +131,20 @@ func PrintDoltLicense(out io.Writer) {
 	fmt.Fprintf(out, "================================================================================\n")
 }
 
+func PrintMuslLicense(out io.Writer) {
+	fmt.Fprintf(out, "\n================================================================================\n")
+	fmt.Fprintf(out, "= Some copies of Dolt include portions of musl, statically linked, licensed under: =\n\n")
+	PrintLicense(out, "utils/3pdeps/MUSL_COPYRIGHT")
+	fmt.Fprintf(out, "================================================================================\n")
+}
+
+func PrintMimallocLicense(out io.Writer) {
+	fmt.Fprintf(out, "\n================================================================================\n")
+	fmt.Fprintf(out, "= Some copies of Dolt include portions of mimalloc, statically linked, licensed under: =\n\n")
+	PrintLicense(out, "utils/3pdeps/MIMALLOC_LICENSE")
+	fmt.Fprintf(out, "================================================================================\n")
+}
+
 func PrintGoLicense(out io.Writer, root string) {
 	filepath := FindLicenseFile(root, []string{"LICENSE", "../LICENSE"})
 	fmt.Fprintf(out, "\n================================================================================\n")
@@ -143,6 +159,7 @@ var StandardCandidates = []string{
 	"LICENSE.md",
 	"COPYING",
 	"LICENSE-MIT",
+	"UNLICENSE",
 }
 
 func PrintPkgLicense(out io.Writer, pkg string, dir string) {

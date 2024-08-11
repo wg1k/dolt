@@ -31,20 +31,21 @@ import (
 	dsqle "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
-	"github.com/dolthub/dolt/go/libraries/utils/config"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
-func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *env.DoltEnv, *doltdb.RootValue, dsqle.Database, []*indexTuple) {
+func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *sql.Context, []*indexTuple) {
 	dEnv := dtestutils.CreateTestEnv()
-	root, err := dEnv.WorkingRoot(context.Background())
+	tmpDir, err := dEnv.TempTableFilesDir()
 	require.NoError(t, err)
-	opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
-	db := dsqle.NewDatabase("dolt", dEnv.DbData(), opts)
-	engine, sqlCtx, err := dsqle.NewTestEngine(t, dEnv, context.Background(), db, root)
+	opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: tmpDir}
+	db, err := dsqle.NewDatabase(context.Background(), "dolt", dEnv.DbData(), opts)
 	require.NoError(t, err)
 
-	_, iter, err := engine.Query(sqlCtx, fmt.Sprintf(`CREATE TABLE %s (
+	engine, sqlCtx, err := dsqle.NewTestEngine(dEnv, context.Background(), db)
+	require.NoError(t, err)
+
+	_, iter, _, err := engine.Query(sqlCtx, fmt.Sprintf(`CREATE TABLE %s (
 		pk bigint PRIMARY KEY,
 		v1 bigint,
 		v2 bigint,
@@ -54,7 +55,7 @@ func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *e
 	require.NoError(t, err)
 	require.NoError(t, drainIter(sqlCtx, iter))
 
-	_, iter, err = engine.Query(sqlCtx, insertQuery)
+	_, iter, _, err = engine.Query(sqlCtx, insertQuery)
 	require.NoError(t, err)
 	require.NoError(t, drainIter(sqlCtx, iter))
 
@@ -70,7 +71,7 @@ func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *e
 
 	table := dsqle.DoltTableFromAlterableTable(sqlCtx, tbl)
 
-	idxv1RowData, err := table.GetNomsIndexRowData(context.Background(), idxv1.Name())
+	idxv1RowData, err := table.GetIndexRowData(context.Background(), idxv1.Name())
 	require.NoError(t, err)
 	idxv1Cols := make([]schema.Column, idxv1.Count())
 	for i, tag := range idxv1.IndexedColumnTags() {
@@ -94,21 +95,16 @@ func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *e
 		cols: idxv2v1Cols,
 	}
 
-	mrEnv, err := env.DoltEnvAsMultiEnv(context.Background(), dEnv)
+	mrEnv, err := env.MultiEnvForDirectory(context.Background(), dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
 	require.NoError(t, err)
 	b := env.GetDefaultInitBranch(dEnv.Config)
-	pro := dsqle.NewDoltDatabaseProvider(b, mrEnv.FileSystem(), db)
+	pro, err := dsqle.NewDoltDatabaseProviderWithDatabase(b, mrEnv.FileSystem(), db, dEnv.FS)
+	if err != nil {
+		return nil, nil, nil
+	}
+
 	pro = pro.WithDbFactoryUrl(doltdb.InMemDoltDB)
-
 	engine = sqle.NewDefault(pro)
-
-	// Get an updated root to use for the rest of the test
-	ctx := sql.NewEmptyContext()
-	sess, err := dsess.NewDoltSession(ctx, ctx.Session.(*sql.BaseSession), pro, config.NewEmptyMapConfig(), getDbState(t, db, dEnv))
-	require.NoError(t, err)
-	roots, ok := sess.GetRoots(ctx, db.Name())
-	require.True(t, ok)
-	err = sess.SetRoot(sqlCtx, db.Name(), roots.Working)
 
 	it := []*indexTuple{
 		idxv1ToTuple,
@@ -119,7 +115,7 @@ func setupIndexes(t *testing.T, tableName, insertQuery string) (*sqle.Engine, *e
 		},
 	}
 
-	return engine, dEnv, roots.Working, db, it
+	return engine, sqlCtx, it
 }
 
 // indexTuple converts integers into the appropriate tuple for comparison against ranges
@@ -173,12 +169,22 @@ func drainIter(ctx *sql.Context, iter sql.RowIter) error {
 	return iter.Close(ctx)
 }
 
-func getDbState(t *testing.T, db sql.Database, dEnv *env.DoltEnv) dsess.InitialDbState {
+func getDbState(t *testing.T, db sql.Database, dEnv *env.DoltEnv) (dsess.InitialDbState, error) {
 	ctx := context.Background()
 
-	head := dEnv.RepoStateReader().CWBHeadSpec()
-	headCommit, err := dEnv.DoltDB.Resolve(ctx, head, dEnv.RepoStateReader().CWBHeadRef())
+	headSpec, err := dEnv.RepoStateReader().CWBHeadSpec()
+	if err != nil {
+		return dsess.InitialDbState{}, err
+	}
+	headRef, err := dEnv.RepoStateReader().CWBHeadRef()
+	if err != nil {
+		return dsess.InitialDbState{}, err
+	}
+	optCmt, err := dEnv.DoltDB.Resolve(ctx, headSpec, headRef)
 	require.NoError(t, err)
+
+	headCommit, ok := optCmt.ToCommit()
+	require.True(t, ok)
 
 	ws, err := dEnv.WorkingSet(ctx)
 	require.NoError(t, err)
@@ -189,5 +195,5 @@ func getDbState(t *testing.T, db sql.Database, dEnv *env.DoltEnv) dsess.InitialD
 		WorkingSet: ws,
 		DbData:     dEnv.DbData(),
 		Remotes:    dEnv.RepoState.Remotes,
-	}
+	}, nil
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sqlfmt
+package sqlfmt_test
 
 import (
 	"testing"
@@ -25,6 +25,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlfmt"
 	"github.com/dolthub/dolt/go/libraries/utils/set"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -52,64 +53,95 @@ type updateTest struct {
 }
 
 func TestTableDropStmt(t *testing.T) {
-	stmt := DropTableStmt("table_name")
+	stmt := sqlfmt.DropTableStmt("table_name")
 
 	assert.Equal(t, expectedDropSql, stmt)
 }
 
 func TestTableDropIfExistsStmt(t *testing.T) {
-	stmt := DropTableIfExistsStmt("table_name")
+	stmt := sqlfmt.DropTableIfExistsStmt("table_name")
 
 	assert.Equal(t, expectedDropIfExistsSql, stmt)
 }
 
 func TestAlterTableAddColStmt(t *testing.T) {
 	newColDef := "`c0` BIGINT NOT NULL"
-	stmt := AlterTableAddColStmt("table_name", newColDef)
+	stmt := sqlfmt.AlterTableAddColStmt("table_name", newColDef)
 
 	assert.Equal(t, expectedAddColSql, stmt)
 }
 
 func TestAlterTableDropColStmt(t *testing.T) {
-	stmt := AlterTableDropColStmt("table_name", "first_name")
+	stmt := sqlfmt.AlterTableDropColStmt("table_name", "first_name")
 
 	assert.Equal(t, expectedDropColSql, stmt)
 }
 
 func TestAlterTableRenameColStmt(t *testing.T) {
-	stmt := AlterTableRenameColStmt("table_name", "id", "pk")
+	stmt := sqlfmt.AlterTableRenameColStmt("table_name", "id", "pk")
 
 	assert.Equal(t, expectedRenameColSql, stmt)
 }
 
 func TestRenameTableStmt(t *testing.T) {
-	stmt := RenameTableStmt("table_name", "new_table_name")
+	stmt := sqlfmt.RenameTableStmt("table_name", "new_table_name")
 
 	assert.Equal(t, expectedRenameTableSql, stmt)
+}
+
+func newRow(sch schema.Schema, id uuid.UUID, name string, age uint, isMarried bool, title *string) row.Row {
+	var titleVal types.Value
+	if title != nil {
+		titleVal = types.String(*title)
+	}
+
+	married := types.Int(0)
+	if isMarried {
+		married = types.Int(1)
+	}
+
+	taggedVals := row.TaggedValues{
+		dtestutils.IdTag:        types.String(id.String()),
+		dtestutils.NameTag:      types.String(name),
+		dtestutils.AgeTag:       types.Uint(age),
+		dtestutils.IsMarriedTag: married,
+		dtestutils.TitleTag:     titleVal,
+	}
+
+	r, err := row.New(types.Format_Default, sch, taggedVals)
+
+	if err != nil {
+		panic(err)
+	}
+
+	return r
 }
 
 func TestRowAsInsertStmt(t *testing.T) {
 	id := uuid.MustParse("00000000-0000-0000-0000-000000000000")
 	tableName := "people"
 
+	sch, err := dtestutils.Schema()
+	require.NoError(t, err)
+
 	tests := []test{
 		{
 			name:           "simple row",
-			row:            dtestutils.NewTypedRow(id, "some guy", 100, false, strPointer("normie")),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','some guy',100,FALSE,'normie');",
+			row:            newRow(sch, id, "some guy", 100, false, strPointer("normie")),
+			sch:            sch,
+			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','some guy',100,0,'normie');",
 		},
 		{
 			name:           "embedded quotes",
-			row:            dtestutils.NewTypedRow(id, `It's "Mister Perfect" to you`, 100, false, strPointer("normie")),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','It\\'s \\\"Mister Perfect\\\" to you',100,FALSE,'normie');",
+			row:            newRow(sch, id, `It's "Mister Perfect" to you`, 100, false, strPointer("normie")),
+			sch:            sch,
+			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','It\\'s \\\"Mister Perfect\\\" to you',100,0,'normie');",
 		},
 		{
 			name:           "null values",
-			row:            dtestutils.NewTypedRow(id, "some guy", 100, false, nil),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','some guy',100,FALSE,NULL);",
+			row:            newRow(sch, id, "some guy", 100, false, nil),
+			sch:            sch,
+			expectedOutput: "INSERT INTO `people` (`id`,`name`,`age`,`is_married`,`title`) VALUES ('00000000-0000-0000-0000-000000000000','some guy',100,0,NULL);",
 		},
 	}
 
@@ -127,7 +159,7 @@ func TestRowAsInsertStmt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stmt, err := RowAsInsertStmt(tt.row, tableName, tt.sch)
+			stmt, err := sqlfmt.RowAsInsertStmt(tt.row, tableName, tt.sch)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedOutput, stmt)
 		})
@@ -152,7 +184,7 @@ func TestRowAsDeleteStmt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stmt, err := RowAsDeleteStmt(tt.row, tableName, tt.sch)
+			stmt, err := sqlfmt.RowAsDeleteStmt(tt.row, tableName, tt.sch)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedOutput, stmt)
 		})
@@ -163,32 +195,35 @@ func TestRowAsUpdateStmt(t *testing.T) {
 	id := uuid.MustParse("00000000-0000-0000-0000-000000000000")
 	tableName := "people"
 
+	sch, err := dtestutils.Schema()
+	require.NoError(t, err)
+
 	tests := []updateTest{
 		{
 			name:           "simple row",
-			row:            dtestutils.NewTypedRow(id, "some guy", 100, false, strPointer("normie")),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "UPDATE `people` SET `name`='some guy',`age`=100,`is_married`=FALSE,`title`='normie' WHERE (`id`='00000000-0000-0000-0000-000000000000');",
+			row:            newRow(sch, id, "some guy", 100, false, strPointer("normie")),
+			sch:            sch,
+			expectedOutput: "UPDATE `people` SET `name`='some guy',`age`=100,`is_married`=0,`title`='normie' WHERE (`id`='00000000-0000-0000-0000-000000000000');",
 			collDiff:       set.NewStrSet([]string{"name", "age", "is_married", "title"}),
 		},
 		{
 			name:           "embedded quotes",
-			row:            dtestutils.NewTypedRow(id, `It's "Mister Perfect" to you`, 100, false, strPointer("normie")),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "UPDATE `people` SET `name`='It\\'s \\\"Mister Perfect\\\" to you',`age`=100,`is_married`=FALSE,`title`='normie' WHERE (`id`='00000000-0000-0000-0000-000000000000');",
+			row:            newRow(sch, id, `It's "Mister Perfect" to you`, 100, false, strPointer("normie")),
+			sch:            sch,
+			expectedOutput: "UPDATE `people` SET `name`='It\\'s \\\"Mister Perfect\\\" to you',`age`=100,`is_married`=0,`title`='normie' WHERE (`id`='00000000-0000-0000-0000-000000000000');",
 			collDiff:       set.NewStrSet([]string{"name", "age", "is_married", "title"}),
 		},
 		{
 			name:           "null values",
-			row:            dtestutils.NewTypedRow(id, "some guy", 100, false, nil),
-			sch:            dtestutils.TypedSchema,
-			expectedOutput: "UPDATE `people` SET `name`='some guy',`age`=100,`is_married`=FALSE,`title`=NULL WHERE (`id`='00000000-0000-0000-0000-000000000000');",
+			row:            newRow(sch, id, "some guy", 100, false, nil),
+			sch:            sch,
+			expectedOutput: "UPDATE `people` SET `name`='some guy',`age`=100,`is_married`=0,`title`=NULL WHERE (`id`='00000000-0000-0000-0000-000000000000');",
 			collDiff:       set.NewStrSet([]string{"name", "age", "is_married", "title"}),
 		},
 		{
 			name:           "partial update",
-			row:            dtestutils.NewTypedRow(id, "some guy", 100, false, nil),
-			sch:            dtestutils.TypedSchema,
+			row:            newRow(sch, id, "some guy", 100, false, nil),
+			sch:            sch,
 			expectedOutput: "UPDATE `people` SET `name`='some guy' WHERE (`id`='00000000-0000-0000-0000-000000000000');",
 			collDiff:       set.NewStrSet([]string{"name"}),
 		},
@@ -209,7 +244,7 @@ func TestRowAsUpdateStmt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stmt, err := RowAsUpdateStmt(tt.row, tableName, tt.sch, tt.collDiff)
+			stmt, err := sqlfmt.RowAsUpdateStmt(tt.row, tableName, tt.sch, tt.collDiff)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedOutput, stmt)
 		})
@@ -273,7 +308,7 @@ func TestValueAsSqlString(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			act, err := valueAsSqlString(test.ti, test.val)
+			act, err := sqlfmt.ValueAsSqlString(test.ti, test.val)
 			require.NoError(t, err)
 			assert.Equal(t, test.exp, act)
 		})

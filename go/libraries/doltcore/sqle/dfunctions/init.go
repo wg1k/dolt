@@ -17,30 +17,23 @@ package dfunctions
 import "github.com/dolthub/go-mysql-server/sql"
 
 var DoltFunctions = []sql.Function{
-	sql.Function1{Name: HashOfFuncName, Fn: NewHashOf},
-	sql.FunctionN{Name: CommitFuncName, Fn: NewCommitFunc},
-	sql.FunctionN{Name: MergeFuncName, Fn: NewMergeFunc},
+	sql.Function1{Name: HashOfFuncName, Fn: NewHashOfFunc(HashOfFuncName)},
+	sql.Function1{Name: DeprecatedHashOfFuncName, Fn: NewHashOfFunc(DeprecatedHashOfFuncName)},
 	sql.Function0{Name: VersionFuncName, Fn: NewVersion},
-	sql.FunctionN{Name: DoltCommitFuncName, Fn: NewDoltCommitFunc},
-	sql.FunctionN{Name: DoltAddFuncName, Fn: NewDoltAddFunc},
-	sql.FunctionN{Name: DoltResetFuncName, Fn: NewDoltResetFunc},
-	sql.FunctionN{Name: DoltCheckoutFuncName, Fn: NewDoltCheckoutFunc},
-	sql.FunctionN{Name: DoltMergeFuncName, Fn: NewDoltMergeFunc},
+	sql.Function0{Name: StorageFormatFuncName, Fn: NewStorageFormat},
 	sql.Function0{Name: ActiveBranchFuncName, Fn: NewActiveBranchFunc},
 	sql.Function2{Name: DoltMergeBaseFuncName, Fn: NewMergeBase},
-	sql.FunctionN{Name: ConstraintsVerifyFuncName, Fn: NewConstraintsVerifyFunc},
-	sql.FunctionN{Name: ConstraintsVerifyAllFuncName, Fn: NewConstraintsVerifyAllFunc},
-	sql.FunctionN{Name: RevertFuncName, Fn: NewRevertFunc},
-	sql.FunctionN{Name: DoltPullFuncName, Fn: NewPullFunc},
-	sql.FunctionN{Name: DoltFetchFuncName, Fn: NewFetchFunc},
-	sql.FunctionN{Name: DoltPushFuncName, Fn: NewPushFunc},
-	sql.FunctionN{Name: DoltBranchFuncName, Fn: NewDoltBranchFunc},
+	sql.Function2{Name: HasAncestorFuncName, Fn: NewHasAncestor},
+	sql.Function1{Name: HashOfTableFuncName, Fn: NewHashOfTable},
+	sql.FunctionN{Name: HashOfDatabaseFuncName, Fn: NewHashOfDatabase},
 }
 
 // DolthubApiFunctions are the DoltFunctions that get exposed to Dolthub Api.
 var DolthubApiFunctions = []sql.Function{
-	sql.Function1{Name: HashOfFuncName, Fn: NewHashOf},
+	sql.Function1{Name: HashOfFuncName, Fn: NewHashOfFunc(HashOfFuncName)},
+	sql.Function1{Name: DeprecatedHashOfFuncName, Fn: NewHashOfFunc(DeprecatedHashOfFuncName)},
 	sql.Function0{Name: VersionFuncName, Fn: NewVersion},
+	sql.Function0{Name: StorageFormatFuncName, Fn: NewStorageFormat},
 	sql.Function0{Name: ActiveBranchFuncName, Fn: NewActiveBranchFunc},
 	sql.Function2{Name: DoltMergeBaseFuncName, Fn: NewMergeBase},
 }

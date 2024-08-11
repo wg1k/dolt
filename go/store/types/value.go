@@ -80,7 +80,7 @@ type LesserValuable interface {
 	// String) then the natural ordering is used. For other Noms values the Hash of the value is
 	// used. When comparing Noms values of different type the following ordering is used:
 	// Bool < Float < String < everything else.
-	Less(nbf *NomsBinFormat, other LesserValuable) (bool, error)
+	Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error)
 }
 
 // Emptyable is an interface for Values which may or may not be empty
@@ -101,10 +101,6 @@ type Value interface {
 
 	// isPrimitive returns whether the Value is a primitive type
 	isPrimitive() bool
-
-	// WalkValues iterates over the immediate children of this value in the DAG, if any, not including
-	// Type()
-	WalkValues(context.Context, ValueCallback) error
 
 	// HumanReadableString returns a human-readable string version of this Value (not meant for re-parsing)
 	HumanReadableString() string
@@ -155,21 +151,20 @@ func (vs ValueSlice) Contains(nbf *NomsBinFormat, val Value) bool {
 
 type ValueSort struct {
 	Values []Value
-	Nbf    *NomsBinFormat
 }
 
 func (vs ValueSort) Len() int      { return len(vs.Values) }
 func (vs ValueSort) Swap(i, j int) { vs.Values[i], vs.Values[j] = vs.Values[j], vs.Values[i] }
-func (vs ValueSort) Less(i, j int) (bool, error) {
-	return vs.Values[i].Less(vs.Nbf, vs.Values[j])
+func (vs ValueSort) Less(ctx context.Context, nbf *NomsBinFormat, i, j int) (bool, error) {
+	return vs.Values[i].Less(ctx, nbf, vs.Values[j])
 }
 
 func (vs ValueSort) Equals(other ValueSort) bool {
 	return ValueSlice(vs.Values).Equals(ValueSlice(other.Values))
 }
 
-func (vs ValueSort) Contains(v Value) bool {
-	return ValueSlice(vs.Values).Contains(vs.Nbf, v)
+func (vs ValueSort) Contains(nbf *NomsBinFormat, v Value) bool {
+	return ValueSlice(vs.Values).Contains(nbf, v)
 }
 
 type valueReadWriter interface {
@@ -203,7 +198,6 @@ func (vs TupleSlice) Contains(nbf *NomsBinFormat, v Tuple) bool {
 
 type TupleSort struct {
 	Tuples []Tuple
-	Nbf    *NomsBinFormat
 }
 
 func (vs TupleSort) Len() int {
@@ -214,8 +208,8 @@ func (vs TupleSort) Swap(i, j int) {
 	vs.Tuples[i], vs.Tuples[j] = vs.Tuples[j], vs.Tuples[i]
 }
 
-func (vs TupleSort) Less(i, j int) (bool, error) {
-	res, err := vs.Tuples[i].TupleCompare(vs.Nbf, vs.Tuples[j])
+func (vs TupleSort) Less(ctx context.Context, nbf *NomsBinFormat, i, j int) (bool, error) {
+	res, err := vs.Tuples[i].TupleCompare(ctx, nbf, vs.Tuples[j])
 	if err != nil {
 		return false, err
 	}
@@ -227,8 +221,8 @@ func (vs TupleSort) Equals(other TupleSort) bool {
 	return TupleSlice(vs.Tuples).Equals(other.Tuples)
 }
 
-func (vs TupleSort) Contains(v Tuple) bool {
-	return TupleSlice(vs.Tuples).Contains(vs.Nbf, v)
+func (vs TupleSort) Contains(nbf *NomsBinFormat, v Tuple) bool {
+	return TupleSlice(vs.Tuples).Contains(nbf, v)
 }
 
 type valueImpl struct {
@@ -279,7 +273,7 @@ func (v valueImpl) Equals(other Value) bool {
 	return false
 }
 
-func (v valueImpl) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v valueImpl) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	res, err := valueCompare(nbf, v, other.(Value))
 	if err != nil {
 		return false, nil
@@ -289,7 +283,7 @@ func (v valueImpl) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) 
 	return isLess, nil
 }
 
-func (v valueImpl) Compare(nbf *NomsBinFormat, other LesserValuable) (int, error) {
+func (v valueImpl) Compare(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (int, error) {
 	return valueCompare(nbf, v, other.(Value))
 }
 
@@ -310,4 +304,60 @@ type asValueImpl interface {
 
 func (v valueImpl) Kind() NomsKind {
 	return NomsKind(v.buff[0])
+}
+
+// GhostValue is a placeholder for a value that has not been pulled from a remote. The structure holds no information,
+// All methods will panic if called.
+type GhostValue struct {
+	hash hash.Hash
+}
+
+var _ Value = GhostValue{}
+
+func (g GhostValue) Kind() NomsKind {
+	panic("Error: GhostValue.Kind() called.")
+}
+
+func (g GhostValue) Value(_ context.Context) (Value, error) {
+	panic("Error: GhostValue.Value() called.")
+}
+
+func (g GhostValue) Less(_ context.Context, _ *NomsBinFormat, _ LesserValuable) (bool, error) {
+	panic("Error: GhostValue.Less() called.")
+}
+
+func (g GhostValue) Equals(_ Value) bool {
+	panic("Error: GhostValue.Equals() called.")
+}
+
+func (g GhostValue) Hash(_ *NomsBinFormat) (hash.Hash, error) {
+	return g.hash, nil
+}
+
+func (g GhostValue) isPrimitive() bool {
+	panic("Error: GhostValue.isPrimitive() called.")
+}
+
+func (g GhostValue) HumanReadableString() string {
+	panic("Error: GhostValue.HumanReadableString() called.")
+}
+
+func (g GhostValue) walkRefs(_ *NomsBinFormat, _ RefCallback) error {
+	panic("Error: GhostValue.walkRefs() called.")
+}
+
+func (g GhostValue) typeOf() (*Type, error) {
+	panic("Error: GhostValue.typeOf() called.")
+}
+
+func (g GhostValue) writeTo(_ nomsWriter, _ *NomsBinFormat) error {
+	panic("Error: GhostValue.writeTo() called.")
+}
+
+func (g GhostValue) readFrom(_ *NomsBinFormat, _ *binaryNomsReader) (Value, error) {
+	panic("Error: GhostValue.readFrom() called.")
+}
+
+func (g GhostValue) skip(_ *NomsBinFormat, _ *binaryNomsReader) {
+	panic("Error: GhostValue.skip() called.")
 }

@@ -37,13 +37,13 @@ var ErrNoPrimaryKeyColumns = errors.New("no primary key columns")
 var ErrNonAutoIncType = errors.New("column type cannot be auto incremented")
 
 var EmptyColColl = &ColCollection{
-	[]Column{},
-	[]uint64{},
-	[]uint64{},
-	map[uint64]Column{},
-	map[string]Column{},
-	map[string]Column{},
-	map[uint64]int{},
+	cols:           []Column{},
+	Tags:           []uint64{},
+	SortedTags:     []uint64{},
+	TagToCol:       map[uint64]Column{},
+	NameToCol:      map[string]Column{},
+	LowerNameToCol: map[string]Column{},
+	TagToIdx:       map[uint64]int{},
 }
 
 // ColCollection is a collection of columns. As a stand-alone collection, all columns in the collection must have unique
@@ -51,6 +51,10 @@ var EmptyColColl = &ColCollection{
 // See schema.ValidateForInsert for details.
 type ColCollection struct {
 	cols []Column
+	// virtualColumns stores the indexes of any virtual columns in the collection
+	virtualColumns []int
+	// storedIndexes stores the indexes of the stored columns in the collection
+	storedIndexes []int
 	// Tags is a list of all the tags in the ColCollection in their original order.
 	Tags []uint64
 	// SortedTags is a list of all the tags in the ColCollection in sorted order.
@@ -63,6 +67,8 @@ type ColCollection struct {
 	LowerNameToCol map[string]Column
 	// TagToIdx is a map from a tag to the column index
 	TagToIdx map[uint64]int
+	// tagToStorageIndex is a map from a tag to the physical storage column index
+	tagToStorageIndex map[uint64]int
 }
 
 // NewColCollection creates a new collection from a list of columns. If any columns have the same tag, by-tag lookups in
@@ -78,8 +84,12 @@ func NewColCollection(cols ...Column) *ColCollection {
 	nameToCol := make(map[string]Column, len(cols))
 	lowerNameToCol := make(map[string]Column, len(cols))
 	tagToIdx := make(map[uint64]int, len(cols))
+	tagToStorageIndex := make(map[uint64]int, len(cols))
+	var virtualColumns []int
 
 	var columns []Column
+	var storedIndexes []int
+	storageIdx := 0
 	for i, col := range cols {
 		// If multiple columns have the same tag, the last one is used for tag lookups.
 		// Columns must have unique tags to pass schema.ValidateForInsert.
@@ -96,18 +106,29 @@ func NewColCollection(cols ...Column) *ColCollection {
 		if _, ok := lowerNameToCol[lowerCaseName]; !ok {
 			lowerNameToCol[lowerCaseName] = cols[i]
 		}
+
+		if col.Virtual {
+			virtualColumns = append(virtualColumns, i)
+		} else {
+			storedIndexes = append(storedIndexes, i)
+			tagToStorageIndex[col.Tag] = storageIdx
+			storageIdx++
+		}
 	}
 
 	sort.Slice(sortedTags, func(i, j int) bool { return sortedTags[i] < sortedTags[j] })
 
 	return &ColCollection{
-		cols:           columns,
-		Tags:           tags,
-		SortedTags:     sortedTags,
-		TagToCol:       tagToCol,
-		NameToCol:      nameToCol,
-		LowerNameToCol: lowerNameToCol,
-		TagToIdx:       tagToIdx,
+		cols:              columns,
+		virtualColumns:    virtualColumns,
+		storedIndexes:     storedIndexes,
+		tagToStorageIndex: tagToStorageIndex,
+		Tags:              tags,
+		SortedTags:        sortedTags,
+		TagToCol:          tagToCol,
+		NameToCol:         nameToCol,
+		LowerNameToCol:    lowerNameToCol,
+		TagToIdx:          tagToIdx,
 	}
 }
 
@@ -116,10 +137,6 @@ func (cc *ColCollection) GetColumns() []Column {
 	colsCopy := make([]Column, len(cc.cols))
 	copy(colsCopy, cc.cols)
 	return colsCopy
-}
-
-func (cc *ColCollection) GetAtIndex(i int) Column {
-	return cc.cols[i]
 }
 
 // GetColumnNames returns a list of names of the columns.
@@ -177,7 +194,7 @@ func (cc *ColCollection) Iter(cb func(tag uint64, col Column) (stop bool, err er
 	return nil
 }
 
-// IterInSortOrder iterates over all the columns from lowest tag to highest tag.
+// IterInSortedOrder iterates over all the columns from lowest tag to highest tag.
 func (cc *ColCollection) IterInSortedOrder(cb func(tag uint64, col Column) (stop bool)) {
 	for _, tag := range cc.SortedTags {
 		val := cc.TagToCol[tag]
@@ -199,7 +216,7 @@ func (cc *ColCollection) GetByName(name string) (Column, bool) {
 	return InvalidCol, false
 }
 
-// GetByNameCaseInensitive takes the name of a column and returns the column and true if there is a column with that
+// GetByNameCaseInsensitive takes the name of a column and returns the column and true if there is a column with that
 // name ignoring case. Otherwise InvalidCol and false are returned. If multiple columns have the same case-insensitive
 // name, the first declared one is returned.
 func (cc *ColCollection) GetByNameCaseInsensitive(name string) (Column, bool) {
@@ -224,9 +241,20 @@ func (cc *ColCollection) GetByTag(tag uint64) (Column, bool) {
 	return InvalidCol, false
 }
 
-// GetByIndex returns a column with a given index
+// GetByIndex returns the Nth column in the collection
 func (cc *ColCollection) GetByIndex(idx int) Column {
 	return cc.cols[idx]
+}
+
+// GetByStoredIndex returns the Nth stored column (omitting virtual columns from index calculation)
+func (cc *ColCollection) GetByStoredIndex(idx int) Column {
+	return cc.cols[cc.storedIndexes[idx]]
+}
+
+// StoredIndexByTag returns the storage index of the column with the given tag, ignoring virtual columns
+func (cc *ColCollection) StoredIndexByTag(tag uint64) (int, bool) {
+	idx, ok := cc.tagToStorageIndex[tag]
+	return idx, ok
 }
 
 // Size returns the number of columns in the collection.
@@ -234,42 +262,31 @@ func (cc *ColCollection) Size() int {
 	return len(cc.cols)
 }
 
+// StoredSize returns the number of non-virtual columns in the collection
+func (cc *ColCollection) StoredSize() int {
+	return len(cc.storedIndexes)
+}
+
+// Contains returns whether this column collection contains a column with the name given, case insensitive
+func (cc *ColCollection) Contains(name string) bool {
+	_, ok := cc.GetByNameCaseInsensitive(name)
+	return ok
+}
+
 // ColCollsAreEqual determines whether two ColCollections are equal.
 func ColCollsAreEqual(cc1, cc2 *ColCollection) bool {
 	if cc1.Size() != cc2.Size() {
 		return false
 	}
-
 	// Pks Cols need to be in the same order and equivalent.
 	for i := 0; i < cc1.Size(); i++ {
-		if !cc1.GetAtIndex(i).Equals(cc2.GetAtIndex(i)) {
+		// Test that the columns are identical, but don't worry about tags matching, since
+		// different tags could be generated depending on how the schemas were created.
+		if !cc1.cols[i].EqualsWithoutTag(cc2.cols[i]) {
 			return false
 		}
 	}
-
 	return true
-}
-
-// ColCollsAreCompatible determines whether two ColCollections are compatible with each other. Compatible columns have
-// the same tags and storage types, but may have different names, constraints or SQL type parameters.
-func ColCollsAreCompatible(cc1, cc2 *ColCollection) bool {
-	if cc1.Size() != cc2.Size() {
-		return false
-	}
-
-	areCompatible := true
-	_ = cc1.Iter(func(tag uint64, col1 Column) (stop bool, err error) {
-		col2, ok := cc2.GetByTag(tag)
-
-		if !ok || !col1.Compatible(col2) {
-			areCompatible = false
-			return true, nil
-		}
-
-		return false, nil
-	})
-
-	return areCompatible
 }
 
 // MapColCollection applies a function to each column in a ColCollection and creates a new ColCollection from the results.
@@ -291,35 +308,4 @@ func FilterColCollection(cc *ColCollection, cb func(col Column) bool) *ColCollec
 		}
 	}
 	return NewColCollection(filtered...)
-}
-
-func ColCollUnion(colColls ...*ColCollection) (*ColCollection, error) {
-	var allTags = make(map[uint64]bool)
-	var allCols []Column
-	for _, sch := range colColls {
-		err := sch.Iter(func(tag uint64, col Column) (stop bool, err error) {
-			// skip if already seen
-			if _, ok := allTags[tag]; ok {
-				return false, nil
-			}
-			allCols = append(allCols, col)
-			allTags[tag] = true
-			return false, nil
-		})
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return NewColCollection(allCols...), nil
-}
-
-// ColCollectionSetDifference returns the set difference leftCC - rightCC.
-func ColCollectionSetDifference(leftCC, rightCC *ColCollection) (d *ColCollection) {
-	d = FilterColCollection(leftCC, func(col Column) bool {
-		_, ok := rightCC.GetByTag(col.Tag)
-		return !ok
-	})
-	return d
 }

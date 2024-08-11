@@ -28,7 +28,6 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/json"
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
@@ -73,6 +72,7 @@ func TestDbRevision(t *testing.T) {
 					query: "show databases",
 					rows: []sql.Row{
 						{"dolt"},
+						{"information_schema"},
 					},
 				},
 				{
@@ -140,7 +140,7 @@ func TestDbRevision(t *testing.T) {
 					query: func() string {
 						return fmt.Sprintf("select * from `dolt/%s`.myTable", cm1.String())
 					},
-					rows: []sql.Row{},
+					rows: nil,
 				},
 			},
 		},
@@ -150,10 +150,13 @@ func TestDbRevision(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			dEnv := dtestutils.CreateTestEnv()
+			defer dEnv.DoltDB.Close()
+
+			cliCtx, _ := cmd.NewArgFreeCliContext(ctx, dEnv)
 
 			setup := append(setupCommon, test.setup...)
 			for _, c := range setup {
-				exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+				exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 				require.Equal(t, 0, exitCode)
 			}
 
@@ -166,22 +169,26 @@ func TestDbRevision(t *testing.T) {
 			require.NotEqual(t, cm3, hash.Hash{})
 
 			for _, a := range test.asserts {
-				makeTestAssertion(t, a, dEnv, root)
+				t.Run(a.query, func(t *testing.T) {
+					makeTestAssertion(t, a, dEnv, root)
+				})
 			}
 			for _, a2 := range test.asserts2 {
 				a := testAssert{
 					query: a2.query(),
 					rows:  a2.rows,
 				}
-				makeTestAssertion(t, a, dEnv, root)
+				t.Run(a.query, func(t *testing.T) {
+					makeTestAssertion(t, a, dEnv, root)
+				})
 			}
 		})
 	}
 }
 
-func populateCommitHashes(t *testing.T, dEnv *env.DoltEnv, root *doltdb.RootValue) (cm1, cm2, cm3 hash.Hash) {
+func populateCommitHashes(t *testing.T, dEnv *env.DoltEnv, root doltdb.RootValue) (cm1, cm2, cm3 hash.Hash) {
 	q := "SELECT commit_hash FROM dolt_log;"
-	rows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, q)
+	rows, err := sqle.ExecuteSelect(dEnv, root, q)
 	require.NoError(t, err)
 	assert.Len(t, rows, 4)
 	cm3 = hash.Parse(rows[0][0].(string))
@@ -190,24 +197,8 @@ func populateCommitHashes(t *testing.T, dEnv *env.DoltEnv, root *doltdb.RootValu
 	return
 }
 
-func makeTestAssertion(t *testing.T, a testAssert, dEnv *env.DoltEnv, root *doltdb.RootValue) {
-	actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, a.query)
+func makeTestAssertion(t *testing.T, a testAssert, dEnv *env.DoltEnv, root doltdb.RootValue) {
+	actRows, err := sqle.ExecuteSelect(dEnv, root, a.query)
 	require.NoError(t, err)
-
-	require.Equal(t, len(a.rows), len(actRows))
-	for i := range a.rows {
-		assert.Equal(t, len(a.rows[i]), len(actRows[i]))
-		for j := range a.rows[i] {
-			exp, act := a.rows[i][j], actRows[i][j]
-
-			// special logic for comparing JSONValues
-			if js, ok := exp.(json.NomsJSON); ok {
-				cmp, err := js.Compare(sql.NewEmptyContext(), act.(json.NomsJSON))
-				require.NoError(t, err)
-				assert.Zero(t, cmp)
-			} else {
-				assert.Equal(t, exp, act)
-			}
-		}
-	}
+	assert.Equal(t, a.rows, actRows)
 }

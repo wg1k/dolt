@@ -24,7 +24,6 @@ package tree
 import (
 	"crypto/sha512"
 	"encoding/binary"
-	"fmt"
 	"math"
 
 	"github.com/kch42/buzhash"
@@ -54,17 +53,17 @@ var levelSalt = [...]uint64{
 	saltFromLevel(15),
 }
 
-//  splitterFactory makes a nodeSplitter.
+// splitterFactory makes a nodeSplitter.
 type splitterFactory func(level uint8) nodeSplitter
 
 var defaultSplitterFactory splitterFactory = newKeySplitter
 
-// nodeSplitter decides where NodeItem streams should be split into chunks.
+// nodeSplitter decides where Item streams should be split into chunks.
 type nodeSplitter interface {
 	// Append provides more nodeItems to the splitter. Splitter's make chunk
-	// boundary decisions based on the NodeItem contents. Upon return, callers
+	// boundary decisions based on the Item contents. Upon return, callers
 	// can use CrossedBoundary() to see if a chunk boundary has crossed.
-	Append(items ...NodeItem) error
+	Append(key, values Item) error
 
 	// CrossedBoundary returns true if the provided nodeItems have caused a chunk
 	// boundary to be crossed.
@@ -75,7 +74,7 @@ type nodeSplitter interface {
 }
 
 // rollingHashSplitter is a nodeSplitter that makes chunk boundary decisions using
-// a rolling value hasher that processes NodeItem pairs in a byte-wise fashion.
+// a rolling value hasher that processes Item pairs in a byte-wise fashion.
 //
 // rollingHashSplitter uses a dynamic hash pattern designed to constrain the chunk
 // Size distribution by reducing the likelihood of forming very large or very small
@@ -113,11 +112,12 @@ func newRollingHashSplitter(salt uint8) nodeSplitter {
 var _ splitterFactory = newRollingHashSplitter
 
 // Append implements NodeSplitter
-func (sns *rollingHashSplitter) Append(items ...NodeItem) (err error) {
-	for _, it := range items {
-		for _, byt := range it {
-			_ = sns.hashByte(byt)
-		}
+func (sns *rollingHashSplitter) Append(key, value Item) (err error) {
+	for _, byt := range key {
+		_ = sns.hashByte(byt)
+	}
+	for _, byt := range value {
+		_ = sns.hashByte(byt)
 	}
 	return nil
 }
@@ -164,11 +164,7 @@ func rollingHashPattern(offset uint32) uint32 {
 }
 
 // keySplitter is a nodeSplitter that makes chunk boundary decisions on the hash of
-// the key of a NodeItem pair. In contrast to the rollingHashSplitter, keySplitter
-// tries to create chunks that have an average number of NodeItem pairs, rather than
-// an average number of bytes. However, because the target number of NodeItem pairs
-// is computed directly from the chunk size and count, the practical difference in
-// the distribution of chunk sizes is minimal.
+// the key of an Item pair.
 //
 // keySplitter uses a dynamic threshold modeled on a weibull distribution
 // (https://en.wikipedia.org/wiki/Weibull_distribution). As the size of the current
@@ -181,16 +177,6 @@ type keySplitter struct {
 	salt uint64
 }
 
-const (
-	targetSize float64 = 4096
-	maxUint32  float64 = math.MaxUint32
-
-	// weibull params
-	K  = 5.0
-	B  = 2.0 / (3.0 * targetSize)
-	KB = K * B
-)
-
 func newKeySplitter(level uint8) nodeSplitter {
 	return &keySplitter{
 		salt: levelSalt[level],
@@ -199,14 +185,9 @@ func newKeySplitter(level uint8) nodeSplitter {
 
 var _ splitterFactory = newKeySplitter
 
-func (ks *keySplitter) Append(items ...NodeItem) error {
-	if len(items) != 2 {
-		return fmt.Errorf("expected 2 nodeItems, %d were passed", len(items))
-	}
-
-	// todo(andy): account for key/value offsets, vtable, etc.
-	ks.size += uint32(len(items[0]) + len(items[1]))
-	ks.count++
+func (ks *keySplitter) Append(key, value Item) error {
+	thisSize := uint32(len(key) + len(value))
+	ks.size += thisSize
 
 	if ks.size < minChunkSize {
 		return nil
@@ -216,9 +197,8 @@ func (ks *keySplitter) Append(items ...NodeItem) error {
 		return nil
 	}
 
-	t := ks.getThreshold()
-	h := xxHash32(items[0], ks.salt)
-	ks.crossedBoundary = h < t
+	h := xxHash32(key, ks.salt)
+	ks.crossedBoundary = weibullCheck(ks.size, thisSize, h)
 	return nil
 }
 
@@ -227,20 +207,53 @@ func (ks *keySplitter) CrossedBoundary() bool {
 }
 
 func (ks *keySplitter) Reset() {
-	ks.count, ks.size = 0, 0
+	ks.size = 0
 	ks.crossedBoundary = false
 }
 
-// getThreshold computes the current probability threshold using the weibull distribution.
-// see: https://en.wikipedia.org/wiki/Weibull_distribution#Alternative_parameterizations
-func (ks *keySplitter) getThreshold() uint32 {
-	avgSz := float64(ks.size) / float64(ks.count)
-	x := float64(ks.size) / targetSize
+const (
+	targetSize float64 = 4096
+	maxUint32  float64 = math.MaxUint32
 
-	x4 := x * x * x * x // x ^ (K-1)
-	x5 := x * x4        // x ^  K
-	p := KB * x4 * math.Exp(-B*x5)
-	return uint32(p * maxUint32 * avgSz)
+	// weibull params
+	K = 4.
+
+	// TODO: seems like this should be targetSize / math.Gamma(1 + 1/K).
+	L = targetSize
+)
+
+// weibullCheck returns true if we should split
+// at |hash| for a given record inserted into a
+// chunk of size |size|, where the record's size
+// is |thisSize|. |size| is the size of the chunk
+// after the record is inserted, so includes
+// |thisSize| in it.
+//
+// weibullCheck attempts to form chunks whose
+// sizes match the weibull distribution.
+//
+// The logic is as follows: given that we haven't
+// split on any of the records up to |size - thisSize|,
+// the probability that we should split on this record
+// is (CDF(end) - CDF(start)) / (1 - CDF(start)), or,
+// the precentage of the remaining portion of the CDF
+// that this record actually covers. We split is |hash|,
+// treated as a uniform random number between [0,1),
+// is less than this percentage.
+func weibullCheck(size, thisSize, hash uint32) bool {
+	startx := float64(size - thisSize)
+	start := -math.Expm1(-math.Pow(startx/L, K))
+
+	endx := float64(size)
+	end := -math.Expm1(-math.Pow(endx/L, K))
+
+	p := float64(hash) / maxUint32
+	d := 1 - start
+	if d <= 0 {
+		return true
+	}
+	target := (end - start) / d
+	return p < target
 }
 
 func xxHash32(b []byte, salt uint64) uint32 {

@@ -40,7 +40,7 @@ func (v InlineBlob) Equals(other Value) bool {
 	return bytes.Equal(v, v2)
 }
 
-func (v InlineBlob) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v InlineBlob) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if v2, ok := other.(InlineBlob); ok {
 		return bytes.Compare(v, v2) == -1, nil
 	}
@@ -53,10 +53,6 @@ func (v InlineBlob) Hash(nbf *NomsBinFormat) (hash.Hash, error) {
 
 func (v InlineBlob) isPrimitive() bool {
 	return true
-}
-
-func (v InlineBlob) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
 }
 
 func (v InlineBlob) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {

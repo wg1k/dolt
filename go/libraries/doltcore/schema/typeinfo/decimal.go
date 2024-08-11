@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/shopspring/decimal"
 
 	"github.com/dolthub/dolt/go/store/types"
@@ -59,7 +60,7 @@ func CreateDecimalTypeFromParams(params map[string]string) (TypeInfo, error) {
 	} else {
 		return nil, fmt.Errorf(`create decimal type info is missing param "%v"`, decimalTypeParam_Scale)
 	}
-	sqlDecimalType, err := sql.CreateDecimalType(precision, scale)
+	sqlDecimalType, err := gmstypes.CreateColumnDecimalType(precision, scale)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +102,19 @@ func (ti *decimalType) ConvertValueToNomsValue(ctx context.Context, vrw types.Va
 	if v == nil {
 		return types.NullValue, nil
 	}
-	decVal, err := ti.sqlDecimalType.ConvertToDecimal(v)
+	decVal, err := ti.sqlDecimalType.ConvertToNullDecimal(v)
 	if err != nil {
 		return nil, err
 	}
 	if !decVal.Valid {
 		return nil, fmt.Errorf(`"%v" has unexpectedly encountered a null value from embedded type`, ti.String())
 	}
-	return types.Decimal(decVal.Decimal), nil
+	dec, _, err := ti.sqlDecimalType.BoundsCheck(decVal.Decimal)
+	if err != nil {
+		return nil, err
+	}
+
+	return types.Decimal(dec), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -155,7 +161,7 @@ func (ti *decimalType) GetTypeParams() map[string]string {
 // IsValid implements TypeInfo interface.
 func (ti *decimalType) IsValid(v types.Value) bool {
 	if val, ok := v.(types.Decimal); ok {
-		_, err := ti.sqlDecimalType.Convert(decimal.Decimal(val))
+		_, _, err := ti.sqlDecimalType.Convert(decimal.Decimal(val))
 		if err != nil {
 			return false
 		}
@@ -227,7 +233,7 @@ func decimalTypeConverter(ctx context.Context, src *decimalType, destTi TypeInfo
 			if !ok {
 				return nil, fmt.Errorf("unexpected type converting decimal to enum: %T", v)
 			}
-			uintVal, err := sql.Uint64.Convert(decimal.Decimal(val))
+			uintVal, _, err := gmstypes.Uint64.Convert(decimal.Decimal(val))
 			if err != nil {
 				return nil, err
 			}
@@ -237,6 +243,8 @@ func decimalTypeConverter(ctx context.Context, src *decimalType, destTi TypeInfo
 			return dest.ConvertValueToNomsValue(ctx, vrw, uintVal)
 		}, true, nil
 	case *floatType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
@@ -262,6 +270,12 @@ func decimalTypeConverter(ctx context.Context, src *decimalType, destTi TypeInfo
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
@@ -315,7 +329,7 @@ func decimalTypeConverter(ctx context.Context, src *decimalType, destTi TypeInfo
 			if !ok {
 				return nil, fmt.Errorf("unexpected type converting decimal to year: %T", v)
 			}
-			intVal, err := sql.Int64.Convert(decimal.Decimal(val))
+			intVal, _, err := gmstypes.Int64.Convert(decimal.Decimal(val))
 			if err != nil {
 				return nil, err
 			}

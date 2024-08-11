@@ -22,26 +22,31 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlfmt"
 )
 
 var errUnblameableTable = errors.New("unable to generate blame view for table without primary key")
 
 const (
+	// todo: force /*+ JOIN_ORDER(sd,ld) */ for testing consistency
 	viewExpressionTemplate = `
 				WITH sorted_diffs_by_pk
 				         AS (SELECT
-				                 %s,
+				                 %s,  -- allToPks
 				                 to_commit,
 				                 to_commit_date,
+								 diff_type,
 				                 ROW_NUMBER() OVER (
-				                     PARTITION BY %s
-				                     ORDER BY to_commit_date DESC) row_num
+				                     PARTITION BY 
+										%s  -- pksPartitionByExpression
+				                     ORDER BY 
+										coalesce(to_commit_date, from_commit_date) DESC
+								) row_num
 				             FROM
-				                 dolt_diff_%s 
-				             WHERE %s
+				                 ` + "`dolt_diff_%s`" + ` -- tableName
 				            )
 				SELECT
-				    %s
+				    %s  -- pksSelectExpression
 				    sd.to_commit as commit,
 				    sd.to_commit_date as commit_date,
 				    dl.committer,
@@ -53,15 +58,17 @@ const (
 				WHERE
 				    dl.commit_hash = sd.to_commit
 				    and sd.row_num = 1
-				ORDER BY %s;
+				    and sd.diff_type <> 'removed'
+				ORDER BY 
+					%s  -- pksOrderByExpression;
 `
 )
 
 // NewBlameView returns a view expression for the DOLT_BLAME system view for the specified table.
 // The DOLT_BLAME system view is a view on the DOLT_DIFF system table that shows the latest commit
 // for each primary key in the specified table.
-func NewBlameView(ctx *sql.Context, tableName string, root *doltdb.RootValue) (string, error) {
-	table, _, ok, err := root.GetTableInsensitive(ctx, tableName)
+func NewBlameView(ctx *sql.Context, tableName string, root doltdb.RootValue) (string, error) {
+	table, _, ok, err := doltdb.GetTableInsensitive(ctx, root, doltdb.TableName{Name: tableName})
 	if err != nil {
 		return "", err
 	}
@@ -91,23 +98,26 @@ func createDoltBlameViewExpression(tableName string, pks []schema.Column) (strin
 	}
 
 	allToPks := ""
-	pksNotNullExpression := ""
+	pksPartitionByExpression := ""
 	pksOrderByExpression := ""
 	pksSelectExpression := ""
 
 	for i, pk := range pks {
 		if i > 0 {
 			allToPks += ", "
-			pksNotNullExpression += " AND "
+			pksPartitionByExpression += ", "
 			pksOrderByExpression += ", "
 		}
 
-		allToPks += "to_" + pk.Name
-		pksNotNullExpression += "to_" + pk.Name + " IS NOT NULL "
-		pksOrderByExpression += "sd.to_" + pk.Name + " ASC "
-		pksSelectExpression += "sd.to_" + pk.Name + " AS " + pk.Name + ", "
+		toPk := sqlfmt.QuoteIdentifier("to_" + pk.Name)
+		fromPk := sqlfmt.QuoteIdentifier("from_" + pk.Name)
+
+		allToPks += toPk
+		pksPartitionByExpression += fmt.Sprintf("coalesce(%s, %s)", toPk, fromPk)
+		pksOrderByExpression += fmt.Sprintf("sd.%s ASC ", toPk)
+		pksSelectExpression += fmt.Sprintf("sd.%s AS %s, ", toPk, sqlfmt.QuoteIdentifier(pk.Name))
 	}
 
-	return fmt.Sprintf(viewExpressionTemplate, allToPks, allToPks, tableName,
-		pksNotNullExpression, pksSelectExpression, pksOrderByExpression), nil
+	return fmt.Sprintf(viewExpressionTemplate, allToPks, pksPartitionByExpression, tableName,
+		pksSelectExpression, pksOrderByExpression), nil
 }

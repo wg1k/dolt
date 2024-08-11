@@ -40,7 +40,7 @@ func newSet(seq orderedSequence) Set {
 }
 
 func NewSet(ctx context.Context, vrw ValueReadWriter, v ...Value) (Set, error) {
-	data := buildSetData(vrw.Format(), v)
+	data := buildSetData(ctx, vrw, v)
 	ch, err := newEmptySetSequenceChunker(ctx, vrw)
 
 	if err != nil {
@@ -96,7 +96,7 @@ func readSetInput(ctx context.Context, vrw ValueReadWriter, ae *atomicerr.Atomic
 	var lastV Value
 	for v := range vChan {
 		if lastV != nil {
-			isLess, err := lastV.Less(vrw.Format(), v)
+			isLess, err := lastV.Less(ctx, vrw.Format(), v)
 
 			if ae.SetIfErrAndCheck(err) {
 				return
@@ -147,14 +147,6 @@ func (s Set) asSequence() sequence {
 // Value interface
 func (s Set) Value(ctx context.Context) (Value, error) {
 	return s, nil
-}
-
-func (s Set) WalkValues(ctx context.Context, cb ValueCallback) error {
-	err := iterAll(ctx, s, func(v Value, idx uint64) error {
-		return cb(v)
-	})
-
-	return err
 }
 
 func (s Set) First(ctx context.Context) (Value, error) {
@@ -278,12 +270,12 @@ func (s Set) Edit() *SetEditor {
 	return NewSetEditor(s)
 }
 
-func buildSetData(nbf *NomsBinFormat, values ValueSlice) ValueSlice {
+func buildSetData(ctx context.Context, vr ValueReader, values ValueSlice) ValueSlice {
 	if len(values) == 0 {
 		return ValueSlice{}
 	}
 
-	SortWithErroringLess(ValueSort{values, nbf})
+	SortWithErroringLess(ctx, vr.Format(), ValueSort{values})
 
 	uniqueSorted := make(ValueSlice, 0, len(values))
 	last := values[0]
@@ -299,7 +291,7 @@ func buildSetData(nbf *NomsBinFormat, values ValueSlice) ValueSlice {
 }
 
 func makeSetLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
-	return func(level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
+	return func(ctx context.Context, level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
 		d.PanicIfFalse(level == 0)
 		setData := make([]Value, len(items))
 
@@ -308,7 +300,7 @@ func makeSetLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
 			v := item.(Value)
 
 			if lastValue != nil {
-				isLess, err := lastValue.Less(vrw.Format(), v)
+				isLess, err := lastValue.Less(ctx, vrw.Format(), v)
 
 				if err != nil {
 					return nil, orderedKey{}, 0, err

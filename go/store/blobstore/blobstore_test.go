@@ -19,15 +19,21 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/maphash"
 	"log"
 	"math/rand"
 	"os"
 	"reflect"
 	"runtime"
+	"strconv"
 	"testing"
 
 	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
+	"github.com/oracle/oci-go-sdk/v65/common"
+	"github.com/oracle/oci-go-sdk/v65/objectstorage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -37,12 +43,18 @@ const (
 
 var (
 	ctx           context.Context
-	bucket        *storage.BucketHandle
+	gcsBucket     *storage.BucketHandle
 	testGCSBucket string
+	osProvider    common.ConfigurationProvider
+	osClient      objectstorage.ObjectStorageClient
+	testOCIBucket string
 )
 
+const envTestGSBucket = "TEST_GCS_BUCKET"
+const envTestOCIBucket = "TEST_OCI_BUCKET"
+
 func init() {
-	testGCSBucket = os.Getenv("TEST_GCS_BUCKET")
+	testGCSBucket = os.Getenv(envTestGSBucket)
 	if testGCSBucket != "" {
 		ctx = context.Background()
 		gcs, err := storage.NewClient(ctx)
@@ -51,7 +63,18 @@ func init() {
 			panic("Could not create GCSBlobstore")
 		}
 
-		bucket = gcs.Bucket(testGCSBucket)
+		gcsBucket = gcs.Bucket(testGCSBucket)
+	}
+	testOCIBucket = os.Getenv(envTestOCIBucket)
+	if testOCIBucket != "" {
+		osProvider = common.DefaultConfigProvider()
+
+		client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(osProvider)
+		if err != nil {
+			panic("Could not create OCIBlobstore")
+		}
+
+		osClient = client
 	}
 }
 
@@ -62,9 +85,18 @@ type BlobstoreTest struct {
 	rmwIterations  int
 }
 
+func appendOCITest(tests []BlobstoreTest) []BlobstoreTest {
+	if testOCIBucket != "" {
+		ociTest := BlobstoreTest{"oci", &OCIBlobstore{osProvider, osClient, testOCIBucket, "", uuid.New().String() + "/", 2}, 4, 4}
+		tests = append(tests, ociTest)
+	}
+
+	return tests
+}
+
 func appendGCSTest(tests []BlobstoreTest) []BlobstoreTest {
 	if testGCSBucket != "" {
-		gcsTest := BlobstoreTest{"gcs", &GCSBlobstore{bucket, testGCSBucket, uuid.New().String() + "/"}, 4, 4}
+		gcsTest := BlobstoreTest{"gcs", &GCSBlobstore{gcsBucket, testGCSBucket, uuid.New().String() + "/"}, 4, 4}
 		tests = append(tests, gcsTest)
 	}
 
@@ -83,9 +115,10 @@ func appendLocalTest(tests []BlobstoreTest) []BlobstoreTest {
 
 func newBlobStoreTests() []BlobstoreTest {
 	var tests []BlobstoreTest
-	tests = append(tests, BlobstoreTest{"inmem", NewInMemoryBlobstore(), 10, 20})
+	tests = append(tests, BlobstoreTest{"inmem", NewInMemoryBlobstore(""), 10, 20})
 	tests = appendLocalTest(tests)
 	tests = appendGCSTest(tests)
+	tests = appendOCITest(tests)
 
 	return tests
 }
@@ -148,7 +181,7 @@ func TestGetMissing(t *testing.T) {
 // in an io.Reader
 func CheckAndPutBytes(ctx context.Context, bs Blobstore, expectedVersion, key string, data []byte) (string, error) {
 	reader := bytes.NewReader(data)
-	return bs.CheckAndPut(ctx, expectedVersion, key, reader)
+	return bs.CheckAndPut(ctx, expectedVersion, key, int64(len(data)), reader)
 }
 
 func testCheckAndPutError(t *testing.T, bs Blobstore) {
@@ -230,7 +263,6 @@ func readModifyWrite(bs Blobstore, key string, iterations int, doneChan chan int
 		newData[dataSize] = byte(dataSize)
 
 		_, err = CheckAndPutBytes(context.Background(), bs, ver, key, newData)
-
 		if err == nil {
 			updates++
 			failures = 0
@@ -376,4 +408,67 @@ func TestPanicOnNegativeRangeLength(t *testing.T) {
 	}()
 
 	NewBlobRange(0, -1)
+}
+
+func TestConcatenate(t *testing.T) {
+	tests := newBlobStoreTests()
+	for _, test := range tests {
+		if test.bsType != "oci" {
+			t.Run(test.bsType, func(t *testing.T) {
+				testConcatenate(t, test.bs, 1)
+				testConcatenate(t, test.bs, 4)
+				testConcatenate(t, test.bs, 16)
+				testConcatenate(t, test.bs, 32)
+				testConcatenate(t, test.bs, 64)
+			})
+		}
+	}
+}
+
+func testConcatenate(t *testing.T, bs Blobstore, cnt int) {
+	ctx := context.Background()
+	type blob struct {
+		key  string
+		data []byte
+	}
+	blobs := make([]blob, cnt)
+	keys := make([]string, cnt)
+
+	for i := range blobs {
+		b := make([]byte, 64)
+		rand.Read(b)
+		keys[i] = blobName(b)
+		_, err := bs.Put(ctx, keys[i], int64(len(b)), bytes.NewReader(b))
+		require.NoError(t, err)
+		blobs[i] = blob{
+			key:  keys[i],
+			data: b,
+		}
+	}
+
+	composite := uuid.New().String()
+	_, err := bs.Concatenate(ctx, composite, keys)
+	assert.NoError(t, err)
+
+	var off int64
+	for i := range blobs {
+		length := int64(len(blobs[i].data))
+		rdr, _, err := bs.Get(ctx, composite, BlobRange{
+			offset: off,
+			length: length,
+		})
+		assert.NoError(t, err)
+
+		act := make([]byte, length)
+		n, err := rdr.Read(act)
+		assert.NoError(t, err)
+		assert.Equal(t, int(length), n)
+		assert.Equal(t, blobs[i].data, act)
+		off += length
+	}
+}
+
+func blobName(b []byte) string {
+	h := maphash.Bytes(maphash.MakeSeed(), b)
+	return strconv.Itoa(int(h))
 }

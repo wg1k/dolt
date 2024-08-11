@@ -34,6 +34,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/spec"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -61,27 +62,36 @@ func (cmd RootsCmd) RequiresRepo() bool {
 
 // Description returns a description of the command
 func (cmd RootsCmd) Description() string {
-	return "Displays the current Dolt cli version."
+	return "Displays store root values (or potential store root values) that we find in the current database."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd RootsCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd RootsCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
+	return false
+}
+
+func (cmd RootsCmd) Docs() *cli.CommandDocumentation {
 	return nil
 }
 
 func (cmd RootsCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	ap.SupportsInt(numFilesParam, "n", "number", "Number of table files to scan.")
 	return ap
 }
 
 // Exec executes the command
-func (cmd RootsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd RootsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, _ := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, cli.CommandDocumentationContent{}, ap))
+	help, _ := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cli.CommandDocumentationContent{}, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	dir := filepath.Join(dEnv.GetDoltDir(), dbfactory.DataDir)
+	doltDir := dEnv.GetDoltDir()
+	if doltDir == "" {
+		cli.Println(color.YellowString("can no longer find a database on disk"))
+		return 1
+	}
+
+	dir := filepath.Join(doltDir, dbfactory.DataDir)
 	oldgen := filepath.Join(dir, "oldgen")
 	itr, err := NewTableFileIter([]string{dir, oldgen}, dEnv.FS)
 
@@ -114,7 +124,7 @@ func (cmd RootsCmd) processTableFile(ctx context.Context, path string, modified 
 
 	defer rdCloser.Close()
 
-	return nbs.IterChunks(rdCloser.(io.ReadSeeker), func(chunk chunks.Chunk) (stop bool, err error) {
+	return nbs.IterChunks(ctx, rdCloser.(io.ReadSeeker), func(chunk chunks.Chunk) (stop bool, err error) {
 		//Want a clean db every loop
 		sp, _ := spec.ForDatabase("mem")
 		vrw := sp.GetVRW(ctx)
@@ -147,8 +157,17 @@ func (cmd RootsCmd) processTableFile(ctx context.Context, path string, modified 
 				cli.Println()
 			}
 		} else if sm, ok := value.(types.SerialMessage); ok {
-			if serial.GetFileID([]byte(sm)) == serial.StoreRootFileID {
-				err := types.WriteEncodedValue(ctx, cli.OutStream, value)
+			if serial.GetFileID(sm) == serial.StoreRootFileID {
+				msg, err := serial.TryGetRootAsStoreRoot([]byte(sm), serial.MessagePrefixSz)
+				if err != nil {
+					return false, err
+				}
+				ambytes := msg.AddressMapBytes()
+				node, err := tree.NodeFromBytes(ambytes)
+				if err != nil {
+					return false, err
+				}
+				err = tree.OutputAddressMapNode(cli.OutStream, node)
 				if err != nil {
 					return false, err
 				}

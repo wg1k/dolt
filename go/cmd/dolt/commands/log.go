@@ -15,57 +15,51 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/fatih/color"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
-	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions/commitwalk"
+	"github.com/dolthub/dolt/go/libraries/doltcore/merge"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
-	"github.com/dolthub/dolt/go/store/datas"
-	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/util/outputpager"
 )
-
-const (
-	numLinesParam   = "number"
-	mergesParam     = "merges"
-	minParentsParam = "min-parents"
-	parentsParam    = "parents"
-	decorateParam   = "decorate"
-	oneLineParam    = "oneline"
-)
-
-type logOpts struct {
-	numLines    int
-	showParents bool
-	minParents  int
-	decoration  string
-	oneLine     bool
-}
-
-type logNode struct {
-	commitMeta   *datas.CommitMeta
-	commitHash   hash.Hash
-	parentHashes []hash.Hash
-	branchNames  []string
-	isHead       bool
-}
 
 var logDocs = cli.CommandDocumentationContent{
 	ShortDesc: `Show commit logs`,
 	LongDesc: `Shows the commit logs
 
-The command takes options to control what is shown and how.`,
+The command takes options to control what is shown and how. 
+
+{{.EmphasisLeft}}dolt log{{.EmphasisRight}}
+  Lists commit logs from current HEAD when no options provided.
+	
+{{.EmphasisLeft}}dolt log [<revisions>...]{{.EmphasisRight}}
+  Lists commit logs starting from revision. If multiple revisions provided, lists logs reachable by all revisions.
+	
+{{.EmphasisLeft}}dolt log [<revisions>...] -- <table>{{.EmphasisRight}}
+  Lists commit logs starting from revisions, only including commits with changes to table.
+	
+{{.EmphasisLeft}}dolt log <revisionB>..<revisionA>{{.EmphasisRight}}
+{{.EmphasisLeft}}dolt log <revisionA> --not <revisionB>{{.EmphasisRight}}
+{{.EmphasisLeft}}dolt log ^<revisionB> <revisionA>{{.EmphasisRight}}
+  Different ways to list two dot logs. These will list commit logs for revisionA, while excluding commits from revisionB. The table option is not supported for two dot log.
+	
+{{.EmphasisLeft}}dolt log <revisionB>...<revisionA>{{.EmphasisRight}}
+{{.EmphasisLeft}}dolt log <revisionA> <revisionB> --not $(dolt merge-base <revisionA> <revisionB>){{.EmphasisRight}}
+  Different ways to list three dot logs. These will list commit logs reachable by revisionA OR revisionB, while excluding commits reachable by BOTH revisionA AND revisionB.`,
 	Synopsis: []string{
-		`[-n {{.LessThan}}num_commits{{.GreaterThan}}] [{{.LessThan}}commit{{.GreaterThan}}] [[--] {{.LessThan}}table{{.GreaterThan}}]`,
+		`[-n {{.LessThan}}num_commits{{.GreaterThan}}] [{{.LessThan}}revision-range{{.GreaterThan}}] [[--] {{.LessThan}}table{{.GreaterThan}}]`,
 	},
 }
 
@@ -86,420 +80,398 @@ func (cmd LogCmd) EventType() eventsapi.ClientEventType {
 	return eventsapi.ClientEventType_LOG
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd LogCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd LogCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, logDocs, ap))
+	return cli.NewCommandDocumentation(logDocs, ap)
 }
 
 func (cmd LogCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsInt(numLinesParam, "n", "num_commits", "Limit the number of commits to output.")
-	ap.SupportsInt(minParentsParam, "", "parent_count", "The minimum number of parents a commit must have to be included in the log.")
-	ap.SupportsFlag(mergesParam, "", "Equivalent to min-parents == 2, this will limit the log to commits with 2 or more parents.")
-	ap.SupportsFlag(parentsParam, "", "Shows all parents of each commit in the log.")
-	ap.SupportsString(decorateParam, "", "decorate_fmt", "Shows refs next to commits. Valid options are short, full, no, and auto")
-	ap.SupportsFlag(oneLineParam, "", "Shows logs in a compact format.")
-	return ap
+	return cli.CreateLogArgParser(false)
+}
+
+func (cmd LogCmd) RequiresRepo() bool {
+	return false
 }
 
 // Exec executes the command
-func (cmd LogCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
-	return cmd.logWithLoggerFunc(ctx, commandStr, args, dEnv)
+func (cmd LogCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
+	return cmd.logWithLoggerFunc(ctx, commandStr, args, dEnv, cliCtx)
 }
 
-func (cmd LogCmd) logWithLoggerFunc(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd LogCmd) logWithLoggerFunc(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, logDocs, ap))
-	apr := cli.ParseArgsOrDie(ap, args, help)
-
-	if apr.NArg() > 2 {
-		usage()
-		return 1
+	apr, _, terminate, status := ParseArgsOrPrintHelp(ap, commandStr, args, logDocs)
+	if terminate {
+		return status
 	}
 
-	minParents := apr.GetIntOrDefault(minParentsParam, 0)
-	if apr.Contains(mergesParam) {
-		minParents = 2
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
+	if err != nil {
+		return handleErrAndExit(err)
+	}
+	if closeFunc != nil {
+		defer closeFunc()
 	}
 
-	decorateOption := apr.GetValueOrDefault(decorateParam, "auto")
-	switch decorateOption {
-	case "short", "full", "auto", "no":
-	default:
-		cli.PrintErrln(color.HiRedString("fatal: invalid --decorate option: " + decorateOption))
-		return 1
+	query, err := constructInterpolatedDoltLogQuery(apr, queryist, sqlCtx)
+	if err != nil {
+		return handleErrAndExit(err)
 	}
-	opts := logOpts{
-		numLines:    apr.GetIntOrDefault(numLinesParam, -1),
-		showParents: apr.Contains(parentsParam),
-		minParents:  minParents,
-		oneLine:     apr.Contains(oneLineParam),
-		decoration:  decorateOption,
+	logRows, err := GetRowsForSql(queryist, sqlCtx, query)
+	if err != nil {
+		return handleErrAndExit(err)
 	}
 
-	// Just dolt log
-	if apr.NArg() == 0 {
-		return logCommits(ctx, dEnv, dEnv.RepoStateReader().CWBHeadSpec(), opts)
-	} else if apr.NArg() == 1 { // dolt log <ref/table>
-		argIsRef := actions.ValidateIsRef(ctx, apr.Arg(0), dEnv.DoltDB, dEnv.RepoStateReader())
-
-		if argIsRef {
-			cs, err := doltdb.NewCommitSpec(apr.Arg(0))
-			if err != nil {
-				cli.PrintErrln(color.HiRedString("invalid commit %s\n", apr.Arg(0)))
-			}
-			return logCommits(ctx, dEnv, cs, opts)
-		} else {
-			return handleErrAndExit(logTableCommits(ctx, dEnv, opts, dEnv.RepoStateReader().CWBHeadSpec(), apr.Arg(0)))
-		}
-	} else { // dolt log ref table
-		cs, err := doltdb.NewCommitSpec(apr.Arg(0))
-		if err != nil {
-			cli.PrintErrln(color.HiRedString("invalid commit %s\n", apr.Arg(0)))
-		}
-		return handleErrAndExit(logTableCommits(ctx, dEnv, opts, cs, apr.Arg(1)))
-	}
+	return handleErrAndExit(logCommits(apr, logRows, queryist, sqlCtx))
 }
 
-func logCommits(ctx context.Context, dEnv *env.DoltEnv, cs *doltdb.CommitSpec, opts logOpts) int {
-	commit, err := dEnv.DoltDB.Resolve(ctx, cs, dEnv.RepoStateReader().CWBHeadRef())
+// constructInterpolatedDoltLogQuery generates the sql query necessary to call the DOLT_LOG() function.
+// Also interpolates this query to prevent sql injection.
+func constructInterpolatedDoltLogQuery(apr *argparser.ArgParseResults, queryist cli.Queryist, sqlCtx *sql.Context) (string, error) {
+	var params []interface{}
 
-	if err != nil {
-		cli.PrintErrln(color.HiRedString("Fatal error: cannot get HEAD commit for current branch."))
-		return 1
-	}
+	var buffer bytes.Buffer
+	var first bool
+	first = true
 
-	cHashToRefs := map[hash.Hash][]string{}
+	buffer.WriteString("select commit_hash from dolt_log(")
 
-	// Get all branches
-	branches, err := dEnv.DoltDB.GetBranchesWithHashes(ctx)
-	if err != nil {
-		cli.PrintErrln(color.HiRedString("Fatal error: cannot get Branch information."))
-		return 1
-	}
-	for _, b := range branches {
-		refName := b.Ref.String()
-		if opts.decoration != "full" {
-			refName = b.Ref.GetPath() // trim out "refs/heads/"
+	writeToBuffer := func(s string) {
+		if !first {
+			buffer.WriteString(", ")
 		}
-		refName = fmt.Sprintf("\033[32;1m%s\033[0m", refName) // branch names are bright green (32;1m)
-		cHashToRefs[b.Hash] = append(cHashToRefs[b.Hash], refName)
+		buffer.WriteString(s)
+		first = false
 	}
 
-	// Get all remote branches
-	remotes, err := dEnv.DoltDB.GetRemotesWithHashes(ctx)
-	if err != nil {
-		cli.PrintErrln(color.HiRedString("Fatal error: cannot get Branch information."))
-		return 1
-	}
-	for _, r := range remotes {
-		refName := r.Ref.String()
-		if opts.decoration != "full" {
-			refName = r.Ref.GetPath() // trim out "refs/remotes/"
+	if apr.PositionalArgsSeparatorIndex >= 0 {
+		for i := 0; i < apr.PositionalArgsSeparatorIndex; i++ {
+			writeToBuffer("?")
+			params = append(params, apr.Arg(i))
 		}
-		refName = fmt.Sprintf("\033[31;1m%s\033[0m", refName) // remote names are bright red (31;1m)
-		cHashToRefs[r.Hash] = append(cHashToRefs[r.Hash], refName)
-	}
-
-	// Get all tags
-	tags, err := dEnv.DoltDB.GetTagsWithHashes(ctx)
-	if err != nil {
-		cli.PrintErrln(color.HiRedString("Fatal error: cannot get Tag information."))
-		return 1
-	}
-	for _, t := range tags {
-		refName := t.Ref.String()
-		if opts.decoration != "full" {
-			refName = t.Ref.GetPath() // trim out "refs/tags/"
+		var tableNames []string
+		for i := apr.PositionalArgsSeparatorIndex; i < apr.NArg(); i++ {
+			tableNames = append(tableNames, apr.Arg(i))
 		}
-		refName = fmt.Sprintf("\033[33;1mtag: %s\033[0m", refName) // tags names are bright yellow (33;1m)
-		cHashToRefs[t.Hash] = append(cHashToRefs[t.Hash], refName)
+		if len(tableNames) > 0 {
+			params = append(params, strings.Join(tableNames, ","))
+			writeToBuffer("'--tables'")
+			writeToBuffer("?")
+		}
+	} else {
+		var existingTables map[string]bool
+		seenRevs := make(map[string]bool, apr.NArg())
+		finishedRevs := false
+		var tableNames []string
+		for i, arg := range apr.Args {
+			// once we encounter a rev we can't resolve, we assume the rest are table names
+			if finishedRevs {
+				if _, ok := existingTables[arg]; !ok {
+					return "", fmt.Errorf("error: table %s does not exist", arg)
+				}
+				tableNames = append(tableNames, arg)
+			} else {
+				if strings.Contains(arg, "..") || strings.HasPrefix(arg, "^") || strings.HasPrefix(arg, "refs/") || strings.HasPrefix(arg, "remotes/") {
+					writeToBuffer("?")
+					params = append(params, arg)
+				} else {
+					_, err := GetRowsForSql(queryist, sqlCtx, "select hashof('"+arg+"')")
+					if err != nil {
+						finishedRevs = true
+						existingTables, err = getExistingTables(apr.Args[:i], queryist, sqlCtx)
+						if err != nil {
+							return "", err
+						}
+
+						if _, ok := existingTables[arg]; !ok {
+							return "", fmt.Errorf("error: table %s does not exist", arg)
+						}
+						tableNames = append(tableNames, arg)
+					} else {
+						if _, ok := seenRevs[arg]; ok {
+							finishedRevs = true
+							existingTables, err = getExistingTables(apr.Args[:i], queryist, sqlCtx)
+							if err != nil {
+								return "", err
+							}
+
+							if _, ok := existingTables[arg]; !ok {
+								return "", fmt.Errorf("error: table %s does not exist", arg)
+							}
+							tableNames = append(tableNames, arg)
+						} else {
+							seenRevs[arg] = true
+						}
+						writeToBuffer("?")
+						params = append(params, arg)
+					}
+				}
+			}
+
+		}
+		if len(tableNames) > 0 {
+			params = append(params, strings.Join(tableNames, ","))
+			writeToBuffer("'--tables'")
+			writeToBuffer("?")
+		}
 	}
 
-	h, err := commit.HashOf()
+	if minParents, hasMinParents := apr.GetValue(cli.MinParentsFlag); hasMinParents {
+		writeToBuffer("?")
+		params = append(params, "--min-parents="+minParents)
+	}
 
+	if hasMerges := apr.Contains(cli.MergesFlag); hasMerges {
+		writeToBuffer("'--merges'")
+	}
+
+	if excludedCommits, hasExcludedCommits := apr.GetValueList(cli.NotFlag); hasExcludedCommits {
+		writeToBuffer("'--not'")
+		for _, commit := range excludedCommits {
+			writeToBuffer("?")
+			params = append(params, commit)
+		}
+	}
+
+	// included to check for invalid --decorate options
+	if decorate, hasDecorate := apr.GetValue(cli.DecorateFlag); hasDecorate {
+		writeToBuffer("?")
+		params = append(params, "--decorate="+decorate)
+	}
+
+	buffer.WriteString(")")
+
+	if numLines, hasNumLines := apr.GetValue(cli.NumberFlag); hasNumLines {
+		num, err := strconv.Atoi(numLines)
+		if err != nil || num < 0 {
+			return "", fmt.Errorf("fatal: invalid --number argument: %s", numLines)
+		}
+		buffer.WriteString(" limit " + numLines)
+	}
+
+	interpolatedQuery, err := dbr.InterpolateForDialect(buffer.String(), params, dialect.MySQL)
 	if err != nil {
-		cli.PrintErrln(color.HiRedString("Fatal error: failed to get commit hash"))
-		return 1
+		return "", err
 	}
 
-	matchFunc := func(commit *doltdb.Commit) (bool, error) {
-		numParents, err := commit.NumParents()
+	return interpolatedQuery, nil
+}
 
+// getExistingTables returns a map of table names that exist in the commit history of the given revisions
+func getExistingTables(revisions []string, queryist cli.Queryist, sqlCtx *sql.Context) (map[string]bool, error) {
+	tableNames := make(map[string]bool)
+
+	if len(revisions) == 0 {
+		revisions = []string{"HEAD"}
+	}
+
+	for _, rev := range revisions {
+		rows, err := GetRowsForSql(queryist, sqlCtx, "show tables as of '"+rev+"'")
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-
-		return numParents >= opts.minParents, nil
-	}
-	commits, err := commitwalk.GetTopNTopoOrderedCommitsMatching(ctx, dEnv.DoltDB, h, opts.numLines, matchFunc)
-
-	if err != nil {
-		cli.PrintErrln("Error retrieving commit.")
-		return 1
+		for _, r := range rows {
+			tableNames[r[0].(string)] = true
+		}
 	}
 
-	var commitsInfo []logNode
+	return tableNames, nil
+}
+
+// logCommits takes a list of sql rows that have only 1 column, commit hash, and retrieves the commit info for each hash to be printed to std out
+func logCommits(apr *argparser.ArgParseResults, commitHashes []sql.Row, queryist cli.Queryist, sqlCtx *sql.Context) error {
+	var commitsInfo []CommitInfo
+	for _, hash := range commitHashes {
+		cmHash := hash[0].(string)
+		commit, err := getCommitInfo(queryist, sqlCtx, cmHash)
+		if err != nil {
+			return err
+		}
+		commitsInfo = append(commitsInfo, *commit)
+	}
+
+	return logToStdOut(apr, commitsInfo, sqlCtx, queryist)
+}
+
+func logCompact(pager *outputpager.Pager, apr *argparser.ArgParseResults, commits []CommitInfo, sqlCtx *sql.Context, queryist cli.Queryist) error {
+	color.NoColor = false
 	for _, comm := range commits {
-		meta, mErr := comm.GetCommitMeta(ctx)
-		if mErr != nil {
-			cli.PrintErrln("error: failed to get commit metadata")
-			return 1
+		if len(comm.parentHashes) < apr.GetIntOrDefault(cli.MinParentsFlag, 0) {
+			return nil
 		}
 
-		pHashes, pErr := comm.ParentHashes(ctx)
-		if pErr != nil {
-			cli.PrintErrln("error: failed to get parent hashes")
-			return 1
-		}
-
-		cmHash, cErr := comm.HashOf()
-		if cErr != nil {
-			cli.PrintErrln("error: failed to get commit hash")
-			return 1
-		}
-
-		commitsInfo = append(commitsInfo, logNode{
-			commitMeta:   meta,
-			commitHash:   cmHash,
-			parentHashes: pHashes,
-			branchNames:  cHashToRefs[cmHash],
-			isHead:       cmHash == h})
-	}
-
-	logToStdOut(opts, commitsInfo)
-
-	return 0
-}
-
-func tableExists(ctx context.Context, commit *doltdb.Commit, tableName string) (bool, error) {
-	rv, err := commit.GetRootValue(ctx)
-	if err != nil {
-		return false, err
-	}
-
-	_, ok, err := rv.GetTable(ctx, tableName)
-	if err != nil {
-		return false, err
-	}
-
-	return ok, nil
-}
-
-func logTableCommits(ctx context.Context, dEnv *env.DoltEnv, opts logOpts, cs *doltdb.CommitSpec, tableName string) error {
-	commit, err := dEnv.DoltDB.Resolve(ctx, cs, dEnv.RepoStateReader().CWBHeadRef())
-	if err != nil {
-		return err
-	}
-
-	// Check that the table exists in the head commit
-	exists, err := tableExists(ctx, commit, tableName)
-	if err != nil {
-		return err
-	}
-
-	if !exists {
-		return fmt.Errorf("error: table %s does not exist", tableName)
-	}
-
-	h, err := commit.HashOf()
-	if err != nil {
-		return err
-	}
-
-	itr, err := commitwalk.GetTopologicalOrderIterator(ctx, dEnv.DoltDB, h)
-	if err != nil && err != io.EOF {
-		return err
-	}
-
-	var prevCommit *doltdb.Commit = nil
-	var prevHash hash.Hash
-	var commitsInfo []logNode
-
-	numLines := opts.numLines
-	for {
-		// If we reached the limit then break
-		if numLines == 0 {
-			break
-		}
-
-		h, c, err := itr.Next(ctx)
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return err
-		}
-
-		if prevCommit == nil {
-			prevCommit = c
-			prevHash = h
-			continue
-		}
-
-		parentRV, err := c.GetRootValue(ctx)
-		if err != nil {
-			return err
-		}
-
-		childRV, err := prevCommit.GetRootValue(ctx)
-		if err != nil {
-			return err
-		}
-
-		ok, err := didTableChangeBetweenRootValues(ctx, childRV, parentRV, tableName)
-		if err != nil {
-			return err
-		}
-
-		if ok {
-			meta, err := prevCommit.GetCommitMeta(ctx)
-			if err != nil {
-				return err
-			}
-
-			ph, err := prevCommit.ParentHashes(ctx)
-			if err != nil {
-				return err
-			}
-
-			commitsInfo = append(commitsInfo, logNode{
-				commitMeta:   meta,
-				commitHash:   prevHash,
-				parentHashes: ph})
-
-			numLines--
-		}
-
-		prevCommit = c
-		prevHash = h
-	}
-
-	logToStdOut(opts, commitsInfo)
-
-	return nil
-}
-
-func logRefs(pager *outputpager.Pager, comm logNode) {
-	// Do nothing if no associate branches
-	if len(comm.branchNames) == 0 {
-		return
-	}
-
-	pager.Writer.Write([]byte("\033[33m(\033[0m"))
-	if comm.isHead {
-		pager.Writer.Write([]byte("\033[36;1mHEAD -> \033[0m"))
-	}
-	pager.Writer.Write([]byte(strings.Join(comm.branchNames, "\033[33m, \033[0m"))) // Separate with Dim Yellow comma
-	pager.Writer.Write([]byte("\033[33m) \033[0m"))
-}
-
-func logCompact(pager *outputpager.Pager, opts logOpts, commits []logNode) {
-	for _, comm := range commits {
-		if len(comm.parentHashes) < opts.minParents {
-			return
-		}
-
-		chStr := comm.commitHash.String()
-		if opts.showParents {
+		chStr := comm.commitHash
+		if apr.Contains(cli.ParentsFlag) {
 			for _, h := range comm.parentHashes {
-				chStr += " " + h.String()
+				chStr += " " + h
 			}
 		}
 
 		// TODO: use short hash instead
 		// Write commit hash
-		pager.Writer.Write([]byte(fmt.Sprintf("\033[33m%s \033[0m", chStr)))
+		pager.Writer.Write([]byte(color.YellowString("%s ", chStr)))
 
-		if opts.decoration != "no" {
-			logRefs(pager, comm)
+		if decoration := apr.GetValueOrDefault(cli.DecorateFlag, "auto"); decoration != "no" {
+			printRefs(pager, &comm, decoration)
 		}
 
 		formattedDesc := strings.Replace(comm.commitMeta.Description, "\n", " ", -1) + "\n"
-		pager.Writer.Write([]byte(fmt.Sprintf(formattedDesc)))
+		pager.Writer.Write([]byte(formattedDesc))
+
+		if apr.Contains(cli.StatFlag) {
+			if comm.parentHashes != nil && len(comm.parentHashes) == 1 { // don't print stats for merge commits
+				diffStats := make(map[string]*merge.MergeStats)
+				diffStats, _, err := calculateMergeStats(queryist, sqlCtx, diffStats, comm.parentHashes[0], comm.commitHash)
+				if err != nil {
+					return err
+				}
+				printDiffStats(diffStats, pager)
+			}
+		}
 	}
+
+	return nil
 }
 
-func logDefault(pager *outputpager.Pager, opts logOpts, commits []logNode) {
+func logDefault(pager *outputpager.Pager, apr *argparser.ArgParseResults, commits []CommitInfo, sqlCtx *sql.Context, queryist cli.Queryist) error {
 	for _, comm := range commits {
-		if len(comm.parentHashes) < opts.minParents {
-			return
-		}
-
-		chStr := comm.commitHash.String()
-		if opts.showParents {
-			for _, h := range comm.parentHashes {
-				chStr += " " + h.String()
+		PrintCommitInfo(pager, apr.GetIntOrDefault(cli.MinParentsFlag, 0), apr.Contains(cli.ParentsFlag), apr.GetValueOrDefault(cli.DecorateFlag, "auto"), &comm)
+		if apr.Contains(cli.StatFlag) {
+			if comm.parentHashes != nil && len(comm.parentHashes) == 1 { // don't print stats for merge commits
+				diffStats := make(map[string]*merge.MergeStats)
+				diffStats, _, err := calculateMergeStats(queryist, sqlCtx, diffStats, comm.parentHashes[0], comm.commitHash)
+				if err != nil {
+					return err
+				}
+				printDiffStats(diffStats, pager)
+				pager.Writer.Write([]byte("\n"))
 			}
 		}
-
-		// Write commit hash
-		pager.Writer.Write([]byte(fmt.Sprintf("\033[33mcommit %s \033[0m", chStr))) // Use Dim Yellow (33m)
-
-		// Show decoration
-		if opts.decoration != "no" {
-			logRefs(pager, comm)
-		}
-
-		if len(comm.parentHashes) > 1 {
-			pager.Writer.Write([]byte(fmt.Sprintf("\nMerge:")))
-			for _, h := range comm.parentHashes {
-				pager.Writer.Write([]byte(fmt.Sprintf(" " + h.String())))
-			}
-		}
-
-		pager.Writer.Write([]byte(fmt.Sprintf("\nAuthor: %s <%s>", comm.commitMeta.Name, comm.commitMeta.Email)))
-
-		timeStr := comm.commitMeta.FormatTS()
-		pager.Writer.Write([]byte(fmt.Sprintf("\nDate:  %s", timeStr)))
-
-		formattedDesc := "\n\n\t" + strings.Replace(comm.commitMeta.Description, "\n", "\n\t", -1) + "\n\n"
-		pager.Writer.Write([]byte(fmt.Sprintf(formattedDesc)))
 	}
+
+	return nil
 }
 
-func logToStdOut(opts logOpts, commits []logNode) {
+func logToStdOut(apr *argparser.ArgParseResults, commits []CommitInfo, sqlCtx *sql.Context, queryist cli.Queryist) (err error) {
 	if cli.ExecuteWithStdioRestored == nil {
-		return
+		return nil
 	}
 	cli.ExecuteWithStdioRestored(func() {
 		pager := outputpager.Start()
 		defer pager.Stop()
-		if opts.oneLine {
-			logCompact(pager, opts, commits)
+		if apr.Contains(cli.GraphFlag) {
+			logGraph(pager, apr, commits)
+		} else if apr.Contains(cli.OneLineFlag) {
+			err = logCompact(pager, apr, commits, sqlCtx, queryist)
 		} else {
-			logDefault(pager, opts, commits)
+			err = logDefault(pager, apr, commits, sqlCtx, queryist)
 		}
 	})
+
+	return
 }
 
-func didTableChangeBetweenRootValues(ctx context.Context, child, parent *doltdb.RootValue, tableName string) (bool, error) {
-	childHash, ok, err := child.GetTableHash(ctx, tableName)
+// printDiffStats prints the diff stats for a commit to a pager
+func printDiffStats(diffStats map[string]*merge.MergeStats, pager *outputpager.Pager) {
+	maxNameLen := 0
+	maxModCount := 0
+	rowsAdded := 0
+	rowsDeleted := 0
+	rowsChanged := 0
+	var tbls []string
+	for tblName, stats := range diffStats {
+		if stats.Operation == merge.TableModified {
+			tbls = append(tbls, tblName)
+			nameLen := len(tblName)
+			modCount := stats.Adds + stats.Modifications + stats.Deletes
 
-	if !ok {
-		return false, nil
+			if nameLen > maxNameLen {
+				maxNameLen = nameLen
+			}
+
+			if modCount > maxModCount {
+				maxModCount = modCount
+			}
+
+			rowsAdded += stats.Adds
+			rowsChanged += stats.Modifications
+			rowsDeleted += stats.Deletes
+		}
 	}
-	if err != nil {
-		return false, err
+
+	if len(tbls) > 0 {
+		sort.Strings(tbls)
+		modCountStrLen := len(strconv.FormatInt(int64(maxModCount), 10))
+		format := fmt.Sprintf(" %%-%ds | %%-%ds %%s\n", maxNameLen, modCountStrLen)
+
+		for _, tbl := range tbls {
+			stats := diffStats[tbl]
+			if stats.Operation == merge.TableModified {
+				modCount := stats.Adds + stats.Modifications + stats.Deletes
+				modCountStr := strconv.FormatInt(int64(modCount), 10)
+				visualizedChanges := visualizeChangesForLog(stats, maxModCount)
+
+				pager.Writer.Write([]byte(fmt.Sprintf(format, tbl, modCountStr, visualizedChanges)))
+			}
+		}
+
+		details := fmt.Sprintf(" %d tables changed, %d rows added(+), %d rows modified(*), %d rows deleted(-)\n", len(tbls), rowsAdded, rowsChanged, rowsDeleted)
+		pager.Writer.Write([]byte(details))
 	}
 
-	parentHash, ok, err := parent.GetTableHash(ctx, tableName)
+	for tblName, stats := range diffStats {
+		if stats.Operation == merge.TableAdded {
+			pager.Writer.Write([]byte(" " + tblName + " added\n"))
+		}
+	}
+	for tblName, stats := range diffStats {
+		if stats.Operation == merge.TableRemoved {
+			pager.Writer.Write([]byte(" " + tblName + " deleted\n"))
+		}
+	}
+}
 
-	// If the table didn't exist in the parent then we know there was a change
-	if !ok {
-		return true, nil
+// visualizeChangesForLog generates the string with the appropriate symbols to represent the changes in a commit with
+// the corresponding color suitable for writing to a pager
+func visualizeChangesForLog(stats *merge.MergeStats, maxMods int) string {
+	color.NoColor = false
+	const maxVisLen = 30 //can be a bit longer due to min len and rounding
+
+	resultStr := ""
+	if stats.Adds > 0 {
+		addLen := int(maxVisLen * (float64(stats.Adds) / float64(maxMods)))
+		if addLen > stats.Adds {
+			addLen = stats.Adds
+		}
+		addStr := fillStringWithChar('+', addLen)
+		resultStr += color.HiGreenString("%s", addStr)
+
 	}
 
-	if err != nil {
-		return false, err
+	if stats.Modifications > 0 {
+		modLen := int(maxVisLen * (float64(stats.Modifications) / float64(maxMods)))
+		if modLen > stats.Modifications {
+			modLen = stats.Modifications
+		}
+		modStr := fillStringWithChar('*', modLen)
+		resultStr += color.HiYellowString("%s", modStr)
 	}
 
-	return childHash != parentHash, nil
+	if stats.Deletes > 0 {
+		delLen := int(maxVisLen * (float64(stats.Deletes) / float64(maxMods)))
+		if delLen > stats.Deletes {
+			delLen = stats.Deletes
+		}
+		delStr := fillStringWithChar('-', delLen)
+		resultStr += color.HiRedString("%s", delStr)
+	}
+
+	return resultStr
 }
 
 func handleErrAndExit(err error) int {
 	if err != nil {
-		cli.PrintErrln(err)
+		cli.PrintErrln(strings.ReplaceAll(err.Error(), "Invalid argument to dolt_log: ", ""))
 		return 1
 	}
 

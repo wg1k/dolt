@@ -16,7 +16,6 @@ package schcmds
 
 import (
 	"context"
-	"io"
 
 	"github.com/fatih/color"
 
@@ -56,14 +55,13 @@ func (cmd ShowCmd) Description() string {
 	return "Shows the schema of one or more tables."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd ShowCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd ShowCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, tblSchemaDocs, ap))
+	return cli.NewCommandDocumentation(tblSchemaDocs, ap)
 }
 
 func (cmd ShowCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithVariableArgs(cmd.Name())
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"table", "table(s) whose schema is being displayed."})
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"commit", "commit at which point the schema will be displayed."})
 	return ap
@@ -75,9 +73,9 @@ func (cmd ShowCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd ShowCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd ShowCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, tblSchemaDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, tblSchemaDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	verr := printSchemas(ctx, apr, dEnv)
@@ -89,7 +87,7 @@ func printSchemas(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env
 	cmStr := "working"
 	args := apr.Args
 
-	var root *doltdb.RootValue
+	var root doltdb.RootValue
 	var verr errhand.VerboseError
 	var cm *doltdb.Commit
 
@@ -122,7 +120,7 @@ func printSchemas(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env
 		// show usage and error out if there aren't any
 		if len(tables) == 0 {
 			var err error
-			tables, err = root.GetTableNames(ctx)
+			tables, err = root.GetTableNames(ctx, doltdb.DefaultSchemaName)
 
 			if err != nil {
 				return errhand.BuildDError("unable to get table names.").AddCause(err).Build()
@@ -135,12 +133,19 @@ func printSchemas(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env
 			}
 		}
 
-		opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
+		tmpDir, err := dEnv.TempTableFilesDir()
+		if err != nil {
+			return errhand.BuildDError("error: ").AddCause(err).Build()
+		}
+		opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: tmpDir}
 		sqlCtx, engine, _ := dsqle.PrepareCreateTableStmt(ctx, dsqle.NewUserSpaceDatabase(root, opts))
 
 		var notFound []string
 		for _, tblName := range tables {
-			ok, err := root.HasTable(ctx, tblName)
+			if doltdb.IsFullTextTable(tblName) {
+				continue
+			}
+			ok, err := root.HasTable(ctx, doltdb.TableName{Name: tblName})
 			if err != nil {
 				return errhand.BuildDError("unable to get table '%s'", tblName).AddCause(err).Build()
 			}

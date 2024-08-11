@@ -16,12 +16,13 @@ package tree
 
 import (
 	"context"
-	"sort"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/store/prolly/message"
 	"github.com/dolthub/dolt/go/store/val"
 )
 
@@ -32,6 +33,42 @@ func TestNodeCursor(t *testing.T) {
 		testNewCursorAtItem(t, 1000)
 		testNewCursorAtItem(t, 10_000)
 	})
+
+	t.Run("get ordinal at item", func(t *testing.T) {
+		counts := []int{10, 100, 1000, 10_000}
+		for _, c := range counts {
+			t.Run(fmt.Sprintf("%d", c), func(t *testing.T) {
+				testGetOrdinalOfCursor(t, c)
+			})
+		}
+	})
+
+	t.Run("retreat past beginning", func(t *testing.T) {
+		ctx := context.Background()
+		root, _, ns := randomTree(t, 10_000)
+		assert.NotNil(t, root)
+		before, err := newCursorAtStart(ctx, ns, root)
+		assert.NoError(t, err)
+		err = before.retreat(ctx)
+		assert.NoError(t, err)
+		assert.False(t, before.Valid())
+
+		start, err := newCursorAtStart(ctx, ns, root)
+		assert.NoError(t, err)
+		assert.True(t, start.compare(before) > 0, "start is after before")
+		assert.True(t, before.compare(start) < 0, "before is before start")
+
+		// Backwards iteration...
+		end, err := newCursorAtEnd(ctx, ns, root)
+		assert.NoError(t, err)
+		i := 0
+		for end.compare(before) > 0 {
+			i++
+			err = end.retreat(ctx)
+			assert.NoError(t, err)
+		}
+		assert.Equal(t, 10_000/2, i)
+	})
 }
 
 func testNewCursorAtItem(t *testing.T, count int) {
@@ -41,24 +78,74 @@ func testNewCursorAtItem(t *testing.T, count int) {
 	ctx := context.Background()
 	for i := range items {
 		key, value := items[i][0], items[i][1]
-		cur, err := NewCursorAtItem(ctx, ns, root, key, searchTestTree)
+		cur, err := newCursorAtKey(ctx, ns, root, val.Tuple(key), keyDesc)
 		require.NoError(t, err)
 		assert.Equal(t, key, cur.CurrentKey())
-		assert.Equal(t, value, cur.CurrentValue())
+		assert.Equal(t, value, cur.currentValue())
 	}
 
 	validateTreeItems(t, ns, root, items)
 }
 
-func randomTree(t *testing.T, count int) (Node, [][2]NodeItem, NodeStore) {
+func testGetOrdinalOfCursor(t *testing.T, count int) {
+	tuples, desc := AscendingUintTuples(count)
+
 	ctx := context.Background()
 	ns := NewTestNodeStore()
-	chkr, err := newEmptyTreeChunker(ctx, ns, defaultSplitterFactory)
+	serializer := message.NewProllyMapSerializer(desc, ns.Pool())
+	chkr, err := newEmptyChunker(ctx, ns, serializer)
 	require.NoError(t, err)
 
-	items := randomTupleItemPairs(count / 2)
+	for _, item := range tuples {
+		err = chkr.AddPair(ctx, Item(item[0]), Item(item[1]))
+		assert.NoError(t, err)
+	}
+	nd, err := chkr.Done(ctx)
+	assert.NoError(t, err)
+
+	for i := 0; i < len(tuples); i++ {
+		curr, err := newCursorAtKey(ctx, ns, nd, tuples[i][0], desc)
+		require.NoError(t, err)
+
+		ord, err := getOrdinalOfCursor(curr)
+		require.NoError(t, err)
+
+		assert.Equal(t, uint64(i), ord)
+	}
+
+	b := val.NewTupleBuilder(desc)
+	b.PutUint32(0, uint32(len(tuples)))
+	aboveItem := b.Build(sharedPool)
+
+	curr, err := newCursorAtKey(ctx, ns, nd, aboveItem, desc)
+	require.NoError(t, err)
+
+	ord, err := getOrdinalOfCursor(curr)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(len(tuples)), ord)
+
+	// A cursor past the end should return an ordinal count equal to number of
+	// nodes.
+	curr, err = newCursorPastEnd(ctx, ns, nd)
+	require.NoError(t, err)
+
+	ord, err = getOrdinalOfCursor(curr)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(len(tuples)), ord)
+}
+
+func randomTree(t *testing.T, count int) (Node, [][2]Item, NodeStore) {
+	ctx := context.Background()
+	ns := NewTestNodeStore()
+	serializer := message.NewProllyMapSerializer(valDesc, ns.Pool())
+	chkr, err := newEmptyChunker(ctx, ns, serializer)
+	require.NoError(t, err)
+
+	items := randomTupleItemPairs(count/2, ns)
 	for _, item := range items {
-		err = chkr.AddPair(ctx, NodeItem(item[0]), NodeItem(item[1]))
+		err = chkr.AddPair(ctx, Item(item[0]), Item(item[1]))
 		assert.NoError(t, err)
 	}
 	nd, err := chkr.Done(ctx)
@@ -76,23 +163,16 @@ var valDesc = val.NewTupleDescriptor(
 	val.Type{Enc: val.Int64Enc, Nullable: true},
 )
 
-func searchTestTree(item NodeItem, nd Node) int {
-	return sort.Search(int(nd.count), func(i int) bool {
-		l, r := val.Tuple(item), val.Tuple(nd.GetKey(i))
-		return keyDesc.Compare(l, r) <= 0
-	})
-}
-
-func randomTupleItemPairs(count int) (items [][2]NodeItem) {
-	tups := RandomTuplePairs(count, keyDesc, valDesc)
-	items = make([][2]NodeItem, count)
+func randomTupleItemPairs(count int, ns NodeStore) (items [][2]Item) {
+	tups := RandomTuplePairs(count, keyDesc, valDesc, ns)
+	items = make([][2]Item, count)
 	if len(tups) != len(items) {
 		panic("mismatch")
 	}
 
 	for i := range items {
-		items[i][0] = NodeItem(tups[i][0])
-		items[i][1] = NodeItem(tups[i][1])
+		items[i][0] = Item(tups[i][0])
+		items[i][1] = Item(tups[i][1])
 	}
 	return
 }

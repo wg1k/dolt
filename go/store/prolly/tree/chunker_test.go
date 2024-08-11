@@ -32,34 +32,43 @@ func roundTripTreeItems(t *testing.T) {
 	root, items, ns := randomTree(t, 1000)
 	assert.NotNil(t, root)
 	assert.True(t, root.count > 0)
-	assert.True(t, root.Level() > 0)
+	level := root.Level()
+	assert.True(t, level > 0)
 	//assert.Equal(t, uint64(1000), root.cumulativeCount())
 	assert.Equal(t, countTree(t, ns, root), 1000)
-	assert.Equal(t, root.TreeCount()*2, 1000)
+	tc, err := root.TreeCount()
+	require.NoError(t, err)
+	assert.Equal(t, tc*2, 1000)
 	validateTreeItems(t, ns, root, items)
 
 	root, items, ns = randomTree(t, 10_000)
 	assert.NotNil(t, root)
 	assert.True(t, root.count > 0)
-	assert.True(t, root.Level() > 0)
+	level = root.Level()
+	assert.True(t, level > 0)
 	//assert.Equal(t, uint64(10_000), root.cumulativeCount())
 	assert.Equal(t, countTree(t, ns, root), 10_000)
-	assert.Equal(t, root.TreeCount()*2, 10_000)
+	tc, err = root.TreeCount()
+	require.NoError(t, err)
+	assert.Equal(t, tc*2, 10_000)
 	validateTreeItems(t, ns, root, items)
 
 	root, items, ns = randomTree(t, 100_000)
 	assert.NotNil(t, root)
 	assert.True(t, root.count > 0)
-	assert.True(t, root.Level() > 0)
+	level = root.Level()
+	assert.True(t, level > 0)
 	//assert.Equal(t, uint64(100_000), root.cumulativeCount())
 	assert.Equal(t, countTree(t, ns, root), 100_000)
-	assert.Equal(t, root.TreeCount()*2, 100_000)
+	tc, err = root.TreeCount()
+	require.NoError(t, err)
+	assert.Equal(t, tc*2, 100_000)
 	validateTreeItems(t, ns, root, items)
 }
 
 func countTree(t *testing.T, ns NodeStore, nd Node) (count int) {
 	ctx := context.Background()
-	err := iterTree(ctx, ns, nd, func(_ NodeItem) (err error) {
+	err := iterTree(ctx, ns, nd, func(_ Item) (err error) {
 		count++
 		return
 	})
@@ -67,13 +76,11 @@ func countTree(t *testing.T, ns NodeStore, nd Node) (count int) {
 	return
 }
 
-func validateTreeItems(t *testing.T, ns NodeStore, nd Node, expected [][2]NodeItem) {
+func validateTreeItems(t *testing.T, ns NodeStore, nd Node, expected [][2]Item) {
 	i := 0
 	ctx := context.Background()
-	err := iterTree(ctx, ns, nd, func(actual NodeItem) (err error) {
-		if !assert.Equal(t, expected[i/2][i%2], actual) {
-			panic("here")
-		}
+	err := iterTree(ctx, ns, nd, func(actual Item) (err error) {
+		assert.Equal(t, expected[i/2][i%2], actual)
 		i++
 		return
 	})
@@ -81,29 +88,28 @@ func validateTreeItems(t *testing.T, ns NodeStore, nd Node, expected [][2]NodeIt
 	return
 }
 
-func iterTree(ctx context.Context, ns NodeStore, nd Node, cb func(item NodeItem) error) error {
+func iterTree(ctx context.Context, ns NodeStore, nd Node, cb func(item Item) error) error {
 	if nd.empty() {
 		return nil
 	}
 
-	cur, err := NewCursorAtStart(ctx, ns, nd)
+	cur, err := newCursorAtStart(ctx, ns, nd)
 	if err != nil {
 		return err
 	}
 
-	ok := true
-	for ok {
+	for !cur.outOfBounds() {
 		err = cb(cur.CurrentKey())
 		if err != nil {
 			return err
 		}
 
-		err = cb(cur.CurrentValue())
+		err = cb(cur.currentValue())
 		if err != nil {
 			return err
 		}
 
-		ok, err = cur.Advance(ctx)
+		err = cur.advance(ctx)
 		if err != nil {
 			return err
 		}

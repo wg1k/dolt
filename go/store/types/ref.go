@@ -133,6 +133,12 @@ func skipRef(dec *typedBinaryNomsReader) ([]uint32, error) {
 }
 
 func maxChunkHeight(nbf *NomsBinFormat, v Value) (max uint64, err error) {
+	if _, ok := v.(SerialMessage); ok {
+		// Refs in SerialMessage do not have height. This should be taller than
+		// any true Ref height we expect to see in a RootValue.
+		return SerialMessageRefHeight, nil
+	}
+
 	err = v.walkRefs(nbf, func(r Ref) error {
 		if height := r.Height(); height > max {
 			max = height
@@ -189,10 +195,6 @@ func (r Ref) Value(ctx context.Context) (Value, error) {
 	return r, nil
 }
 
-func (r Ref) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
 func (r Ref) typeOf() (*Type, error) {
 	t, err := r.TargetType()
 
@@ -235,20 +237,23 @@ func WalkAddrsForChunkStore(cs chunks.ChunkStore) (func(chunks.Chunk, func(h has
 	if err != nil {
 		return nil, fmt.Errorf("could not find binary format corresponding to %s. try upgrading dolt.", cs.Version())
 	}
-	return WalkAddrsForNBF(nbf), nil
+	return WalkAddrsForNBF(nbf, nil), nil
 }
 
-func WalkAddrsForNBF(nbf *NomsBinFormat) func(chunks.Chunk, func(h hash.Hash, isleaf bool) error) error {
+func WalkAddrsForNBF(nbf *NomsBinFormat, skipAddrs hash.HashSet) func(chunks.Chunk, func(h hash.Hash, isleaf bool) error) error {
 	return func(c chunks.Chunk, cb func(h hash.Hash, isleaf bool) error) error {
 		return walkRefs(c.Data(), nbf, func(r Ref) error {
+			if skipAddrs != nil && skipAddrs.Has(r.TargetHash()) {
+				return nil
+			}
+
 			return cb(r.TargetHash(), r.Height() == 1)
 		})
 	}
 }
 
-func WalkAddrs(v Value, nbf *NomsBinFormat, cb func(h hash.Hash, isleaf bool)) error {
+func WalkAddrs(v Value, nbf *NomsBinFormat, cb func(h hash.Hash, isleaf bool) error) error {
 	return v.walkRefs(nbf, func(r Ref) error {
-		cb(r.TargetHash(), r.Height() == 1)
-		return nil
+		return cb(r.TargetHash(), r.Height() == 1)
 	})
 }

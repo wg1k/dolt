@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/store/prolly/message"
 	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/val"
 )
@@ -60,7 +61,7 @@ func TestMutableMapReads(t *testing.T) {
 				testIterPrefixRange(t, mutableIndex, idxTuples)
 			})
 
-			mutableMap2, tuples2, deletes := deleteFromMutableMap(mutableMap.(MutableMap), tuples)
+			mutableMap2, tuples2, deletes := deleteFromMutableMap(mutableMap.(*MutableMap), tuples)
 			t.Run("get item from map with deletes", func(t *testing.T) {
 				testMutableMapGetAndHas(t, mutableMap2, tuples2, deletes)
 			})
@@ -74,7 +75,7 @@ func TestMutableMapReads(t *testing.T) {
 				t.Skip("todo(andy)")
 			})
 
-			mutableIndex2, idxTuples2, _ := deleteFromMutableMap(mutableIndex.(MutableMap), idxTuples)
+			mutableIndex2, idxTuples2, _ := deleteFromMutableMap(mutableIndex.(*MutableMap), idxTuples)
 			t.Run("iter prefix range", func(t *testing.T) {
 				testIterPrefixRange(t, mutableIndex, idxTuples2)
 			})
@@ -103,7 +104,15 @@ func TestMutableMapReads(t *testing.T) {
 	}
 }
 
-func makeMutableMap(t *testing.T, count int) (orderedMap, [][2]val.Tuple) {
+func TestMutableMapFormat(t *testing.T) {
+	ctx := context.Background()
+	mutableMap, _ := makeMutableMap(t, 100)
+	s, err := debugFormat(ctx, mutableMap.(*MutableMap))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, s)
+}
+
+func makeMutableMap(t *testing.T, count int) (testMap, [][2]val.Tuple) {
 	ctx := context.Background()
 	ns := tree.NewTestNodeStore()
 
@@ -116,7 +125,7 @@ func makeMutableMap(t *testing.T, count int) (orderedMap, [][2]val.Tuple) {
 		val.Type{Enc: val.Uint32Enc, Nullable: true},
 	)
 
-	tuples := tree.RandomTuplePairs(count, kd, vd)
+	tuples := tree.RandomTuplePairs(count, kd, vd, ns)
 	// 2/3 of tuples in Map
 	// 1/3 of tuples in memoryMap
 	clone := tree.CloneRandomTuples(tuples)
@@ -128,24 +137,17 @@ func makeMutableMap(t *testing.T, count int) (orderedMap, [][2]val.Tuple) {
 	tree.SortTuplePairs(mapTuples, kd)
 	tree.SortTuplePairs(memTuples, kd)
 
-	chunker, err := tree.NewEmptyChunker(ctx, ns)
+	serializer := message.NewProllyMapSerializer(vd, ns.Pool())
+	chunker, err := tree.NewEmptyChunker(ctx, ns, serializer)
 	require.NoError(t, err)
 	for _, pair := range mapTuples {
-		err = chunker.AddPair(ctx, tree.NodeItem(pair[0]), tree.NodeItem(pair[1]))
+		err = chunker.AddPair(ctx, tree.Item(pair[0]), tree.Item(pair[1]))
 		require.NoError(t, err)
 	}
 	root, err := chunker.Done(ctx)
 	require.NoError(t, err)
 
-	mut := MutableMap{
-		prolly: Map{
-			root:    root,
-			keyDesc: kd,
-			valDesc: vd,
-			ns:      ns,
-		},
-		overlay: newMemoryMap(kd),
-	}
+	mut := newMutableMap(NewMap(root, ns, kd, vd))
 
 	for _, pair := range memTuples {
 		err = mut.Put(ctx, pair[0], pair[1])
@@ -155,12 +157,12 @@ func makeMutableMap(t *testing.T, count int) (orderedMap, [][2]val.Tuple) {
 	return mut, tuples
 }
 
-func makeMutableSecondaryIndex(t *testing.T, count int) (orderedMap, [][2]val.Tuple) {
+func makeMutableSecondaryIndex(t *testing.T, count int) (testMap, [][2]val.Tuple) {
 	m, tuples := makeProllySecondaryIndex(t, count)
 	return newMutableMap(m.(Map)), tuples
 }
 
-func deleteFromMutableMap(mut MutableMap, tt [][2]val.Tuple) (MutableMap, [][2]val.Tuple, [][2]val.Tuple) {
+func deleteFromMutableMap(mut *MutableMap, tt [][2]val.Tuple) (*MutableMap, [][2]val.Tuple, [][2]val.Tuple) {
 	count := len(tt)
 	testRand.Shuffle(count, func(i, j int) {
 		tt[i], tt[j] = tt[j], tt[i]
@@ -184,7 +186,7 @@ func deleteFromMutableMap(mut MutableMap, tt [][2]val.Tuple) (MutableMap, [][2]v
 	return mut, remaining, deletes
 }
 
-func testMutableMapGetAndHas(t *testing.T, mut MutableMap, tuples, deletes [][2]val.Tuple) {
+func testMutableMapGetAndHas(t *testing.T, mut *MutableMap, tuples, deletes [][2]val.Tuple) {
 	ctx := context.Background()
 	for _, kv := range tuples {
 		ok, err := mut.Has(ctx, kv[0])

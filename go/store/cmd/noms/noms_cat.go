@@ -161,7 +161,7 @@ func runCat(ctx context.Context, args []string) int {
 		//Want a clean db every loop
 		sp, _ := spec.ForDatabase("mem")
 		vrw := sp.GetVRW(ctx)
-		waf := types.WalkAddrsForNBF(vrw.Format())
+		waf := types.WalkAddrsForNBF(vrw.Format(), nil)
 
 		fmt.Printf("        chunk[%d].raw.len:     %d\n", cidx, len(currCD.compressed))
 
@@ -341,6 +341,20 @@ func hexStr(bytes []byte) string {
 }
 
 const bytesPerRow = 16
+
+func max(i, j int) int {
+	if i > j {
+		return i
+	}
+	return j
+}
+
+func min(i, j int) int {
+	if i < j {
+		return i
+	}
+	return j
+}
 
 func hexView(bytes []byte, indent string) string {
 	str := ""

@@ -41,7 +41,7 @@ func (v Timestamp) Equals(other Value) bool {
 	return time.Time(v).Equal(time.Time(v2))
 }
 
-func (v Timestamp) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v Timestamp) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if v2, ok := other.(Timestamp); ok {
 		return time.Time(v).Before(time.Time(v2)), nil
 	}
@@ -54,10 +54,6 @@ func (v Timestamp) Hash(nbf *NomsBinFormat) (hash.Hash, error) {
 
 func (v Timestamp) isPrimitive() bool {
 	return true
-}
-
-func (v Timestamp) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
 }
 
 func (v Timestamp) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {

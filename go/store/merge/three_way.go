@@ -95,13 +95,16 @@ func NewThreeWay(resolve ResolveFunc) Policy {
 // - If the values are primitives or Blob: conflict
 // - If the values are maps:
 //   - if the same key was inserted or updated in both candidates:
-//     - first run this same algorithm on those two values to attempt to merge them
-//     - if the two merged values are still different: conflict
+//   - first run this same algorithm on those two values to attempt to merge them
+//   - if the two merged values are still different: conflict
 //   - if a key was inserted in one candidate and removed in the other: conflict
+//
 // - If the values are structs:
 //   - Same as map, except using field names instead of map keys
+//
 // - If the values are sets:
 //   - Apply the changes from both candidates to the parent to get the result. No conflicts are possible.
+//
 // - If the values are list:
 //   - Apply list-merge (see below)
 //
@@ -324,7 +327,7 @@ func (m *merger) threeWaySetMerge(ctx context.Context, a, b, parent types.Set, p
 		defer updateProgress(m.progress)
 		switch change.ChangeType {
 		case types.DiffChangeAdded, types.DiffChangeModified:
-			se, err := target.getValue().(types.Set).Edit().Insert(newVal)
+			se, err := target.getValue().(types.Set).Edit().Insert(ctx, newVal)
 
 			if err != nil {
 				return nil, err
@@ -338,7 +341,7 @@ func (m *merger) threeWaySetMerge(ctx context.Context, a, b, parent types.Set, p
 
 			return setCandidate{s}, nil
 		case types.DiffChangeRemoved:
-			se, err := target.getValue().(types.Set).Edit().Remove(newVal)
+			se, err := target.getValue().(types.Set).Edit().Remove(ctx, newVal)
 
 			if err != nil {
 				return nil, err

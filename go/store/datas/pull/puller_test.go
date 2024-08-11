@@ -31,9 +31,45 @@ import (
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 	"github.com/dolthub/dolt/go/store/util/clienttest"
 )
+
+func TestNbsPuller(t *testing.T) {
+	testPuller(t, func(ctx context.Context) (types.ValueReadWriter, datas.Database) {
+		dir := filepath.Join(os.TempDir(), uuid.New().String())
+		err := os.MkdirAll(dir, os.ModePerm)
+		require.NoError(t, err)
+
+		nbf := types.Format_Default.VersionString()
+		q := nbs.NewUnlimitedMemQuotaProvider()
+		st, err := nbs.NewLocalStore(ctx, nbf, dir, clienttest.DefaultMemTableSize, q)
+		require.NoError(t, err)
+
+		ns := tree.NewNodeStore(st)
+		vs := types.NewValueStore(st)
+		return vs, datas.NewTypesDatabase(vs, ns)
+	})
+}
+
+func TestChunkJournalPuller(t *testing.T) {
+	testPuller(t, func(ctx context.Context) (types.ValueReadWriter, datas.Database) {
+		dir := filepath.Join(os.TempDir(), uuid.New().String())
+		err := os.MkdirAll(dir, os.ModePerm)
+		require.NoError(t, err)
+
+		nbf := types.Format_Default.VersionString()
+		q := nbs.NewUnlimitedMemQuotaProvider()
+
+		st, err := nbs.NewLocalJournalingStore(ctx, nbf, dir, q)
+		require.NoError(t, err)
+
+		ns := tree.NewNodeStore(st)
+		vs := types.NewValueStore(st)
+		return vs, datas.NewTypesDatabase(vs, ns)
+	})
+}
 
 func addTableValues(ctx context.Context, vrw types.ValueReadWriter, m types.Map, tableName string, alternatingKeyVals ...types.Value) (types.Map, error) {
 	val, ok, err := m.MaybeGet(ctx, types.String(tableName))
@@ -123,25 +159,13 @@ func deleteTableValues(ctx context.Context, vrw types.ValueReadWriter, m types.M
 	return me.Map(ctx)
 }
 
-func tempDirDB(ctx context.Context) (types.ValueReadWriter, datas.Database, error) {
-	dir := filepath.Join(os.TempDir(), uuid.New().String())
-	err := os.MkdirAll(dir, os.ModePerm)
+type datasFactory func(context.Context) (types.ValueReadWriter, datas.Database)
 
-	if err != nil {
-		return nil, nil, err
-	}
+func testPuller(t *testing.T, makeDB datasFactory) {
+	ctx := context.Background()
+	vs, db := makeDB(ctx)
+	defer db.Close()
 
-	st, err := nbs.NewLocalStore(ctx, types.Format_Default.VersionString(), dir, clienttest.DefaultMemTableSize, nbs.NewUnlimitedMemQuotaProvider())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	vs := types.NewValueStore(st)
-
-	return vs, datas.NewTypesDatabase(vs), nil
-}
-
-func TestPuller(t *testing.T) {
 	deltas := []struct {
 		name       string
 		sets       map[string][]types.Value
@@ -158,12 +182,12 @@ func TestPuller(t *testing.T) {
 			"employees",
 			map[string][]types.Value{
 				"employees": {
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Hendriks"), types.String("Brian"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Software Engineer"), types.Int(39))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Sehn"), types.String("Timothy"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("CEO"), types.Int(39))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Son"), types.String("Aaron"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Software Engineer"), types.Int(36))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Hendriks"), types.String("Brian"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Software Engineer"), types.Int(39))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Sehn"), types.String("Timothy"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("CEO"), types.Int(39))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Son"), types.String("Aaron"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Software Engineer"), types.Int(36))),
 				},
 			},
 			map[string][]types.Value{},
@@ -198,12 +222,12 @@ func TestPuller(t *testing.T) {
 			"more employees",
 			map[string][]types.Value{
 				"employees": {
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Jesuele"), types.String("Matt"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Software Engineer"), types.NullValue)),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Wilkins"), types.String("Daylon"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Software Engineer"), types.NullValue)),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Katie"), types.String("McCulloch"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Software Engineer"), types.NullValue)),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Jesuele"), types.String("Matt"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Software Engineer"), types.NullValue)),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Wilkins"), types.String("Daylon"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Software Engineer"), types.NullValue)),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Katie"), types.String("McCulloch"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Software Engineer"), types.NullValue)),
 				},
 			},
 			map[string][]types.Value{},
@@ -220,18 +244,15 @@ func TestPuller(t *testing.T) {
 			map[string][]types.Value{},
 			map[string][]types.Value{
 				"employees": {
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Hendriks"), types.String("Brian"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Sehn"), types.String("Timothy"))),
-					mustTuple(types.NewTuple(types.Format_Default, types.String("Son"), types.String("Aaron"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Hendriks"), types.String("Brian"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Sehn"), types.String("Timothy"))),
+					mustTuple(types.NewTuple(vs.Format(), types.String("Son"), types.String("Aaron"))),
 				},
 			},
 			[]string{},
 		},
 	}
 
-	ctx := context.Background()
-	vs, db, err := tempDirDB(ctx)
-	require.NoError(t, err)
 	ds, err := db.GetDataset(ctx, "ds")
 	require.NoError(t, err)
 	rootMap, err := types.NewMap(ctx, vs)
@@ -304,15 +325,15 @@ func TestPuller(t *testing.T) {
 				}
 			}()
 
-			sinkvs, sinkdb, err := tempDirDB(ctx)
-			require.NoError(t, err)
+			sinkvs, sinkdb := makeDB(ctx)
+			defer sinkdb.Close()
 
 			tmpDir := filepath.Join(os.TempDir(), uuid.New().String())
 			err = os.MkdirAll(tmpDir, os.ModePerm)
 			require.NoError(t, err)
 			waf, err := types.WalkAddrsForChunkStore(datas.ChunkStoreFromDatabase(db))
 			require.NoError(t, err)
-			plr, err := NewPuller(ctx, tmpDir, 128, datas.ChunkStoreFromDatabase(db), datas.ChunkStoreFromDatabase(sinkdb), waf, rootAddr, statsCh)
+			plr, err := NewPuller(ctx, tmpDir, 128, datas.ChunkStoreFromDatabase(db), datas.ChunkStoreFromDatabase(sinkdb), waf, []hash.Hash{rootAddr}, statsCh)
 			require.NoError(t, err)
 
 			err = plr.Pull(ctx)
@@ -322,7 +343,7 @@ func TestPuller(t *testing.T) {
 
 			sinkDS, err := sinkdb.GetDataset(ctx, "ds")
 			require.NoError(t, err)
-			sinkDS, err = sinkdb.FastForward(ctx, sinkDS, rootAddr)
+			sinkDS, err = sinkdb.FastForward(ctx, sinkDS, rootAddr, "")
 			require.NoError(t, err)
 
 			require.NoError(t, err)
@@ -332,7 +353,6 @@ func TestPuller(t *testing.T) {
 			eq, err := pullerAddrEquality(ctx, rootAddr, sinkRootAddr, vs, sinkvs)
 			require.NoError(t, err)
 			assert.True(t, eq)
-
 		})
 	}
 }

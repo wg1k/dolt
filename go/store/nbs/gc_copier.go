@@ -17,9 +17,9 @@ package nbs
 import (
 	"context"
 	"fmt"
-	"os"
-	"path"
 	"strings"
+
+	"github.com/dolthub/dolt/go/store/hash"
 )
 
 type gcErrAccum map[string]error
@@ -59,40 +59,70 @@ func (gcc *gcCopier) addChunk(ctx context.Context, c CompressedChunk) error {
 	return gcc.writer.AddCmpChunk(c)
 }
 
-func (gcc *gcCopier) copyTablesToDir(ctx context.Context, destDir string) ([]tableSpec, error) {
-	filename, err := gcc.writer.Finish()
+func (gcc *gcCopier) copyTablesToDir(ctx context.Context, tfp tableFilePersister) (ts []tableSpec, err error) {
+	var filename string
+	filename, err = gcc.writer.Finish()
 	if err != nil {
 		return nil, err
 	}
 
-	filepath := path.Join(destDir, filename)
-
-	if gcc.writer.Size() == 0 {
+	if gcc.writer.ChunkCount() == 0 {
 		return []tableSpec{}, nil
 	}
 
-	addr, err := parseAddr(filename)
+	defer func() {
+		_ = gcc.writer.Remove()
+	}()
+
+	addr, ok := hash.MaybeParse(filename)
+	if !ok {
+		return nil, fmt.Errorf("invalid filename: %s", filename)
+	}
+
+	exists, err := tfp.Exists(ctx, addr, uint32(gcc.writer.ChunkCount()), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	if info, err := os.Stat(filepath); err == nil {
-		// file already exists
-		if gcc.writer.ContentLength() != uint64(info.Size()) {
-			return nil, fmt.Errorf("'%s' already exists with different contents.", filepath)
+	if exists {
+		return []tableSpec{
+			{
+				name:       addr,
+				chunkCount: uint32(gcc.writer.ChunkCount()),
+			},
+		}, nil
+	}
+
+	// Attempt to rename the file to the destination if we are working with a fsTablePersister...
+	if mover, ok := tfp.(movingTableFilePersister); ok {
+		err = mover.TryMoveCmpChunkTableWriter(ctx, filename, gcc.writer)
+		if err == nil {
+			return []tableSpec{
+				{
+					name:       addr,
+					chunkCount: uint32(gcc.writer.ChunkCount()),
+				},
+			}, nil
 		}
-	} else {
-		// file does not exist or error determining if it existed.  Try to create it.
-		err = gcc.writer.FlushToFile(filepath)
-		if err != nil {
-			return nil, err
-		}
+	}
+
+	// Otherwise, write the file through CopyTableFile.
+	r, err := gcc.writer.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	sz := gcc.writer.ContentLength()
+
+	err = tfp.CopyTableFile(ctx, r, filename, sz, uint32(gcc.writer.ChunkCount()))
+	if err != nil {
+		return nil, err
 	}
 
 	return []tableSpec{
 		{
 			name:       addr,
-			chunkCount: gcc.writer.ChunkCount(),
+			chunkCount: uint32(gcc.writer.ChunkCount()),
 		},
 	}, nil
 }

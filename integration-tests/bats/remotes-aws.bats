@@ -11,9 +11,6 @@ teardown() {
 }
 
 skip_if_no_aws_tests() {
-    if [ "$DOLT_DEFAULT_BIN_FORMAT" = "__DOLT_DEV__" ]; then
-      skip "skipping aws tests; DOLT_DEFAULT_BIN_FORMAT is __DOLT_DEV__"
-    fi
     if [ -z "$DOLT_BATS_AWS_TABLE" -o -z "$DOLT_BATS_AWS_BUCKET" -o -z "$DOLT_BATS_AWS_EXISTING_REPO" ]; then
       skip "skipping aws tests; set DOLT_BATS_AWS_TABLE, DOLT_BATS_AWS_BUCKET and DOLT_BATS_AWS_EXISTING_REPO to run"
     fi
@@ -23,26 +20,30 @@ skip_if_no_aws_tests() {
     dolt remote add origin 'aws://[dynamo_db_table:s3_bucket]/repo_name'
 }
 
+# bats test_tags=no_lambda
 @test "remotes-aws: can fetch existing aws remote" {
     skip_if_no_aws_tests
     dolt remote add origin 'aws://['"$DOLT_BATS_AWS_TABLE"':'"$DOLT_BATS_AWS_BUCKET"']/'"$DOLT_BATS_AWS_EXISTING_REPO"
     dolt fetch origin
 }
 
-@test "remotes-aws: fetch with non-existant dynamo table fails" {
+# bats test_tags=no_lambda
+@test "remotes-aws: fetch with non-existent dynamo table fails" {
     skip_if_no_aws_tests
     dolt remote add origin 'aws://['"this_dynamodb_table_does_not_exist_b612c34f055f4b458"':'"$DOLT_BATS_AWS_BUCKET"']/'"$DOLT_BATS_AWS_EXISTING_REPO"
     run dolt fetch origin
     [ "$status" -eq 1 ]
 }
 
-@test "remotes-aws: fetch with non-existant s3 bucket fails" {
+# bats test_tags=no_lambda
+@test "remotes-aws: fetch with non-existent s3 bucket fails" {
     skip_if_no_aws_tests
     dolt remote add origin 'aws://['"$DOLT_BATS_AWS_TABLE"':'"this_s3_bucket_does_not_exist_5883eaaa20a4797bb"']/'"$DOLT_BATS_AWS_EXISTING_REPO"
     run dolt fetch origin
     [ "$status" -eq 1 ]
 }
 
+# bats test_tags=no_lambda
 @test "remotes-aws: can clone an existing aws remote" {
     skip_if_no_aws_tests
     rm -rf .dolt
@@ -51,6 +52,16 @@ skip_if_no_aws_tests() {
     dolt sql -q 'show tables'
 }
 
+# bats test_tags=no_lambda
+@test "remotes-aws: can clone an existing aws remote without AWS_SDK_LOAD_CONFIG=1 set." {
+    skip_if_no_aws_tests
+    rm -rf .dolt
+    env -u AWS_SDK_LOAD_CONFIG dolt clone 'aws://['"$DOLT_BATS_AWS_TABLE"':'"$DOLT_BATS_AWS_BUCKET"']/'"$DOLT_BATS_AWS_EXISTING_REPO"
+    cd "$DOLT_BATS_AWS_EXISTING_REPO"
+    dolt sql -q 'show tables'
+}
+
+# bats test_tags=no_lambda
 # Matches behavior of other remote types
 @test "remotes-aws: clone empty aws remote fails" {
     skip_if_no_aws_tests
@@ -62,6 +73,7 @@ skip_if_no_aws_tests() {
     [[ "$output" =~ "remote at that url contains no Dolt data" ]] || false
 }
 
+# bats test_tags=no_lambda
 @test "remotes-aws: can push to new remote" {
     skip_if_no_aws_tests
     random_repo=`openssl rand -hex 32`
@@ -77,6 +89,7 @@ skip_if_no_aws_tests() {
     dolt push origin :another-branch
 }
 
+# bats test_tags=no_lambda
 @test "remotes-aws: can push to new remote which is a subdirectory" {
     skip_if_no_aws_tests
     random_repo=`openssl rand -hex 32`

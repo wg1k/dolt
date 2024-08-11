@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 
 	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/hash"
@@ -27,12 +27,12 @@ import (
 )
 
 const (
-	TagMetaField      = "meta"
-	TagCommitRefField = "ref"
-	TagName           = "Tag"
+	tagMetaField      = "meta"
+	tagCommitRefField = "ref"
+	tagName           = "Tag"
 )
 
-var tagTemplate = types.MakeStructTemplate(TagName, []string{TagMetaField, TagCommitRefField})
+var tagTemplate = types.MakeStructTemplate(tagName, []string{tagMetaField, tagCommitRefField})
 
 // ref is a Ref<Commit>, but 'Commit' is not defined in this snippet.
 // Tag refs are validated to point at Commits during write.
@@ -52,7 +52,7 @@ type TagOptions struct {
 // persists it, and returns its addr. Also returns a types.Ref to the tag, if
 // the format for |db| is noms.
 func newTag(ctx context.Context, db *database, commitAddr hash.Hash, meta *TagMeta) (hash.Hash, types.Ref, error) {
-	if db.Format() != types.Format_DOLT_DEV {
+	if !db.Format().UsesFlatbuffers() {
 		commitSt, err := db.ReadValue(ctx, commitAddr)
 		if err != nil {
 			return hash.Hash{}, types.Ref{}, err
@@ -111,7 +111,7 @@ func newTag(ctx context.Context, db *database, commitAddr hash.Hash, meta *TagMe
 	}
 }
 
-func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) []byte {
+func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) serial.Message {
 	builder := flatbuffers.NewBuilder(1024)
 	addroff := builder.CreateByteVector(commitAddr[:])
 	var nameOff, emailOff, descOff flatbuffers.UOffsetT
@@ -129,11 +129,10 @@ func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) []byte {
 		serial.TagAddTimestampMillis(builder, meta.Timestamp)
 		serial.TagAddUserTimestampMillis(builder, meta.UserTimestamp)
 	}
-	builder.FinishWithFileIdentifier(serial.TagEnd(builder), []byte(serial.TagFileID))
-	return builder.FinishedBytes()
+	return serial.FinishMessage(builder, serial.TagEnd(builder), []byte(serial.TagFileID))
 }
 
-func IsTag(v types.Value) (bool, error) {
+func IsTag(ctx context.Context, v types.Value) (bool, error) {
 	if s, ok := v.(types.Struct); ok {
 		return types.IsValueSubtypeOf(s.Format(), v, valueTagType)
 	} else if sm, ok := v.(types.SerialMessage); ok {
@@ -144,13 +143,13 @@ func IsTag(v types.Value) (bool, error) {
 }
 
 func makeTagStructType(metaType, refType *types.Type) (*types.Type, error) {
-	return types.MakeStructType(TagName,
+	return types.MakeStructType(tagName,
 		types.StructField{
-			Name: TagMetaField,
+			Name: tagMetaField,
 			Type: metaType,
 		},
 		types.StructField{
-			Name: TagCommitRefField,
+			Name: tagCommitRefField,
 			Type: refType,
 		},
 	)

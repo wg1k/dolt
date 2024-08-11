@@ -95,6 +95,15 @@ func TestMapDiff(t *testing.T) {
 					testUpdateDiffs(t, prollyMap.(Map), tuples, s/2)
 				}
 			})
+
+			// one-sided diffs
+			var empty Map
+			t.Run("empty from map", func(t *testing.T) {
+				testOneSidedDiff(t, s, empty, prollyMap.(Map), tree.AddedDiff)
+			})
+			t.Run("empty to map", func(t *testing.T) {
+				testOneSidedDiff(t, s, prollyMap.(Map), empty, tree.RemovedDiff)
+			})
 		})
 	}
 }
@@ -103,7 +112,7 @@ func testMapDiffErrorHandling(t *testing.T, m Map) {
 	ctx := context.Background()
 
 	expErr := errors.New("error case")
-	err := DiffMaps(ctx, m, m, func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, m, m, false, func(ctx context.Context, diff tree.Diff) error {
 		return expErr
 	})
 	require.Error(t, expErr, err)
@@ -112,7 +121,7 @@ func testMapDiffErrorHandling(t *testing.T, m Map) {
 func testEqualMapDiff(t *testing.T, m Map) {
 	ctx := context.Background()
 	var counter int
-	err := DiffMaps(ctx, m, m, func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, m, m, false, func(ctx context.Context, diff tree.Diff) error {
 		counter++
 		return nil
 	})
@@ -126,7 +135,7 @@ func testMapDiffAgainstEmpty(t *testing.T, scale int) {
 	empty, _ := makeProllyMap(t, 0)
 
 	cnt := 0
-	err := DiffMaps(ctx, m.(Map), empty.(Map), func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, m.(Map), empty.(Map), false, func(ctx context.Context, diff tree.Diff) error {
 		assert.Equal(t, tuples[cnt][0], val.Tuple(diff.Key))
 		assert.Equal(t, tuples[cnt][1], val.Tuple(diff.From))
 		assert.Nil(t, val.Tuple(diff.To))
@@ -137,7 +146,7 @@ func testMapDiffAgainstEmpty(t *testing.T, scale int) {
 	assert.Equal(t, scale, cnt)
 
 	cnt = 0
-	err = DiffMaps(ctx, empty.(Map), m.(Map), func(ctx context.Context, diff tree.Diff) error {
+	err = DiffMaps(ctx, empty.(Map), m.(Map), false, func(ctx context.Context, diff tree.Diff) error {
 		assert.Equal(t, tuples[cnt][0], val.Tuple(diff.Key))
 		assert.Equal(t, tuples[cnt][1], val.Tuple(diff.To))
 		assert.Nil(t, val.Tuple(diff.From))
@@ -161,7 +170,7 @@ func testDeleteDiffs(t *testing.T, from Map, tups [][2]val.Tuple, numDeletes int
 	to := makeMapWithDeletes(t, from, deletes...)
 
 	var cnt int
-	err := DiffMaps(ctx, from, to, func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, from, to, false, func(ctx context.Context, diff tree.Diff) error {
 		assert.Equal(t, tree.RemovedDiff, diff.Type)
 		assert.Equal(t, deletes[cnt][0], val.Tuple(diff.Key))
 		cnt++
@@ -176,7 +185,7 @@ func testInsertDiffs(t *testing.T, from Map, tups [][2]val.Tuple, numInserts int
 	to, inserts := makeMapWithInserts(t, from, numInserts)
 
 	var cnt int
-	err := DiffMaps(ctx, from, to, func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, from, to, false, func(ctx context.Context, diff tree.Diff) error {
 		if !assert.Equal(t, tree.AddedDiff, diff.Type) {
 			fmt.Println("")
 		}
@@ -206,7 +215,7 @@ func testUpdateDiffs(t *testing.T, from Map, tups [][2]val.Tuple, numUpdates int
 	to := makeMapWithUpdates(t, from, updates...)
 
 	var cnt int
-	err := DiffMaps(ctx, from, to, func(ctx context.Context, diff tree.Diff) error {
+	err := DiffMaps(ctx, from, to, false, func(ctx context.Context, diff tree.Diff) error {
 		assert.Equal(t, tree.ModifiedDiff, diff.Type)
 		assert.Equal(t, updates[cnt][0], val.Tuple(diff.Key))
 		assert.Equal(t, updates[cnt][1], val.Tuple(diff.From))
@@ -216,6 +225,17 @@ func testUpdateDiffs(t *testing.T, from Map, tups [][2]val.Tuple, numUpdates int
 	})
 	require.Error(t, io.EOF, err)
 	assert.Equal(t, numUpdates, cnt)
+}
+
+func testOneSidedDiff(t *testing.T, sz int, from, to Map, typ tree.DiffType) {
+	var seen int
+	err := DiffMaps(context.Background(), from, to, false, func(ctx context.Context, diff tree.Diff) error {
+		assert.Equal(t, diff.Type, typ)
+		seen++
+		return nil
+	})
+	assert.Error(t, err, io.EOF)
+	assert.Equal(t, sz, seen)
 }
 
 func makeMapWithDeletes(t *testing.T, m Map, deletes ...[2]val.Tuple) Map {
@@ -245,9 +265,10 @@ func makeMapWithInserts(t *testing.T, m Map, numInserts int) (Map, [][2]val.Tupl
 }
 
 // generates tuple pairs not currently in |m|
-func generateInserts(t *testing.T, m Map, kd, vd val.TupleDesc, numInserts int) [][2]val.Tuple {
+func generateInserts(t *testing.T, m testMap, kd, vd val.TupleDesc, numInserts int) [][2]val.Tuple {
 	ctx := context.Background()
-	tups := tree.RandomTuplePairs(numInserts*2, kd, vd)
+	ns := tree.NewTestNodeStore()
+	tups := tree.RandomTuplePairs(numInserts*2, kd, vd, ns)
 	inserts, extra := tups[:numInserts], tups[numInserts:]
 
 	j := 0
@@ -293,10 +314,12 @@ func makeUpdatesToTuples(kd, vd val.TupleDesc, tuples ...[2]val.Tuple) (updates 
 	updates = make([][3]val.Tuple, len(tuples))
 
 	valBuilder := val.NewTupleBuilder(vd)
+	ns := tree.NewTestNodeStore()
+
 	for i := range updates {
 		updates[i][0] = tuples[i][0]
 		updates[i][1] = tuples[i][1]
-		updates[i][2] = tree.RandomTuple(valBuilder)
+		updates[i][2] = tree.RandomTuple(valBuilder, ns)
 	}
 
 	sort.Slice(updates, func(i, j int) bool {

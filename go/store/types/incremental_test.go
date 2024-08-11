@@ -58,6 +58,7 @@ func TestIncrementalLoadList(t *testing.T) {
 	ts := &chunks.TestStorage{}
 	cs := ts.NewView()
 	vs := NewValueStore(cs)
+	vs.skipWriteCaching = true
 
 	expected, err := NewList(context.Background(), vs, getTestVals(vs)...)
 	require.NoError(t, err)
@@ -74,7 +75,7 @@ func TestIncrementalLoadList(t *testing.T) {
 	actual := actualVar.(List)
 
 	expectedCount := cs.Reads()
-	assert.Equal(1, expectedCount)
+	assert.Equal(2, expectedCount)
 	// There will be one read per chunk.
 	chunkReads := make([]int, expected.Len())
 	for i := uint64(0); i < expected.Len(); i++ {

@@ -16,14 +16,14 @@ package tree
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
-	"github.com/dolthub/dolt/go/store/types"
+	"github.com/dolthub/dolt/go/store/prolly/message"
 
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/pool"
+	"github.com/dolthub/dolt/go/store/types"
 )
 
 const (
@@ -35,6 +35,9 @@ type NodeStore interface {
 	// Read reads a prolly tree Node from the store.
 	Read(ctx context.Context, ref hash.Hash) (Node, error)
 
+	// ReadMany reads many prolly tree Nodes from the store.
+	ReadMany(ctx context.Context, refs hash.HashSlice) ([]Node, error)
+
 	// Write writes a prolly tree Node to the store.
 	Write(ctx context.Context, nd Node) (hash.Hash, error)
 
@@ -43,12 +46,16 @@ type NodeStore interface {
 
 	// Format returns the types.NomsBinFormat of this NodeStore.
 	Format() *types.NomsBinFormat
+
+	BlobBuilder() *BlobBuilder
+	PutBlobBuilder(*BlobBuilder)
 }
 
 type nodeStore struct {
 	store chunks.ChunkStore
-	cache *chunkCache
+	cache nodeCache
 	bp    pool.BuffPool
+	bbp   *sync.Pool
 }
 
 var _ NodeStore = nodeStore{}
@@ -57,42 +64,108 @@ var sharedCache = newChunkCache(cacheSize)
 
 var sharedPool = pool.NewBuffPool()
 
+var blobBuilderPool = sync.Pool{
+	New: func() any {
+		return mustNewBlobBuilder(DefaultFixedChunkLength)
+	},
+}
+
 // NewNodeStore makes a new NodeStore.
 func NewNodeStore(cs chunks.ChunkStore) NodeStore {
 	return nodeStore{
 		store: cs,
 		cache: sharedCache,
 		bp:    sharedPool,
+		bbp:   &blobBuilderPool,
 	}
 }
 
 // Read implements NodeStore.
 func (ns nodeStore) Read(ctx context.Context, ref hash.Hash) (Node, error) {
-	c, ok := ns.cache.get(ref)
+	n, ok := ns.cache.get(ref)
 	if ok {
-		return MapNodeFromBytes(c.Data()), nil
+		return n, nil
 	}
 
 	c, err := ns.store.Get(ctx, ref)
 	if err != nil {
 		return Node{}, err
 	}
-	assertTrue(c.Size() > 0)
+	assertTrue(c.Size() > 0, "empty chunk returned from ChunkStore")
 
-	ns.cache.insert(c)
+	n, err = NodeFromBytes(c.Data())
+	if err != nil {
+		return Node{}, err
+	}
+	ns.cache.insert(ref, n)
 
-	return MapNodeFromBytes(c.Data()), err
+	return n, nil
+}
+
+// ReadMany implements NodeStore.
+func (ns nodeStore) ReadMany(ctx context.Context, addrs hash.HashSlice) ([]Node, error) {
+	found := make(map[hash.Hash]Node)
+	gets := hash.HashSet{}
+
+	for _, r := range addrs {
+		n, ok := ns.cache.get(r)
+		if ok {
+			found[r] = n
+		} else {
+			gets.Insert(r)
+		}
+	}
+
+	var nerr error
+	mu := new(sync.Mutex)
+	err := ns.store.GetMany(ctx, gets, func(ctx context.Context, chunk *chunks.Chunk) {
+		n, err := NodeFromBytes(chunk.Data())
+		if err != nil {
+			nerr = err
+		}
+		mu.Lock()
+		found[chunk.Hash()] = n
+		mu.Unlock()
+	})
+	if err == nil {
+		err = nerr
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var ok bool
+	nodes := make([]Node, len(addrs))
+	for i, addr := range addrs {
+		nodes[i], ok = found[addr]
+		if ok {
+			ns.cache.insert(addr, nodes[i])
+		}
+	}
+	return nodes, nil
 }
 
 // Write implements NodeStore.
 func (ns nodeStore) Write(ctx context.Context, nd Node) (hash.Hash, error) {
 	c := chunks.NewChunk(nd.bytes())
-	assertTrue(c.Size() > 0)
+	assertTrue(c.Size() > 0, "cannot write empty chunk to ChunkStore")
 
-	if err := ns.store.Put(ctx, c); err != nil {
+	getAddrs := func(ch chunks.Chunk) chunks.GetAddrsCb {
+		return func(ctx context.Context, addrs hash.HashSet, exists chunks.PendingRefExists) (err error) {
+			err = message.WalkAddresses(ctx, ch.Data(), func(ctx context.Context, a hash.Hash) error {
+				if !exists(a) {
+					addrs.Insert(a)
+				}
+				return nil
+			})
+			return
+		}
+	}
+
+	if err := ns.store.Put(ctx, c, getAddrs); err != nil {
 		return hash.Hash{}, err
 	}
-	ns.cache.insert(c)
+	ns.cache.insert(c.Hash(), nd)
 	return c.Hash(), nil
 }
 
@@ -101,179 +174,23 @@ func (ns nodeStore) Pool() pool.BuffPool {
 	return ns.bp
 }
 
+// BlobBuilder implements NodeStore.
+func (ns nodeStore) BlobBuilder() *BlobBuilder {
+	bb := ns.bbp.Get().(*BlobBuilder)
+	bb.SetNodeStore(ns)
+	return bb
+}
+
+// PutBlobBuilder implements NodeStore.
+func (ns nodeStore) PutBlobBuilder(bb *BlobBuilder) {
+	bb.Reset()
+	ns.bbp.Put(bb)
+}
+
 func (ns nodeStore) Format() *types.NomsBinFormat {
-	// todo(andy): read from |ns.store|
-	return types.Format_DOLT_1
-}
-
-type centry struct {
-	c    chunks.Chunk
-	i    int
-	prev *centry
-	next *centry
-}
-
-type chunkCache struct {
-	mu     *sync.Mutex
-	chunks map[hash.Hash]*centry
-	head   *centry
-	sz     int
-	maxSz  int
-	rev    int
-}
-
-func newChunkCache(maxSize int) *chunkCache {
-	return &chunkCache{
-		&sync.Mutex{},
-		make(map[hash.Hash]*centry),
-		nil,
-		0,
-		maxSize,
-		0,
+	nbf, err := types.GetFormatForVersionString(ns.store.Version())
+	if err != nil {
+		panic(err)
 	}
-}
-
-func removeFromCList(e *centry) {
-	e.prev.next = e.next
-	e.next.prev = e.prev
-	e.prev = e
-	e.next = e
-}
-
-func (mc *chunkCache) moveToFront(e *centry) {
-	e.i = mc.rev
-	mc.rev++
-	if mc.head == e {
-		return
-	}
-	if mc.head != nil {
-		removeFromCList(e)
-		e.next = mc.head
-		e.prev = mc.head.prev
-		mc.head.prev = e
-		e.prev.next = e
-	}
-	mc.head = e
-}
-
-func (mc *chunkCache) get(h hash.Hash) (chunks.Chunk, bool) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	if e, ok := mc.chunks[h]; ok {
-		mc.moveToFront(e)
-		return e.c, true
-	} else {
-		return chunks.EmptyChunk, false
-	}
-}
-
-func (mc *chunkCache) getMany(hs hash.HashSet) ([]chunks.Chunk, hash.HashSet) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	absent := make(map[hash.Hash]struct{})
-	var found []chunks.Chunk
-	for h, _ := range hs {
-		if e, ok := mc.chunks[h]; ok {
-			mc.moveToFront(e)
-			found = append(found, e.c)
-		} else {
-			absent[h] = struct{}{}
-		}
-	}
-	return found, absent
-}
-
-func (mc *chunkCache) insert(c chunks.Chunk) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	mc.addIfAbsent(c)
-}
-
-func (mc *chunkCache) insertMany(cs []chunks.Chunk) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	for _, c := range cs {
-		mc.addIfAbsent(c)
-	}
-}
-
-func (mc *chunkCache) addIfAbsent(c chunks.Chunk) {
-	if e, ok := mc.chunks[c.Hash()]; !ok {
-		e := &centry{c, 0, nil, nil}
-		e.next = e
-		e.prev = e
-		mc.moveToFront(e)
-		mc.chunks[c.Hash()] = e
-		mc.sz += c.Size()
-		mc.shrinkToMaxSz()
-	} else {
-		mc.moveToFront(e)
-	}
-}
-
-func (mc *chunkCache) Len() int {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	return len(mc.chunks)
-}
-
-func (mc *chunkCache) Size() int {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	return mc.sz
-}
-
-func (mc *chunkCache) shrinkToMaxSz() {
-	for mc.sz > mc.maxSz {
-		if mc.head != nil {
-			t := mc.head.prev
-			removeFromCList(t)
-			if t == mc.head {
-				mc.head = nil
-			}
-			delete(mc.chunks, t.c.Hash())
-			mc.sz -= t.c.Size()
-		} else {
-			panic("cache is empty but cache Size is > than max Size")
-		}
-	}
-}
-
-func (mc *chunkCache) sanityCheck() {
-	if mc.head != nil {
-		p := mc.head.next
-		i := 1
-		sz := mc.head.c.Size()
-		lasti := mc.head.i
-		for p != mc.head {
-			i++
-			sz += p.c.Size()
-			if p.i >= lasti {
-				panic("encountered lru list entry with higher rev later in the list.")
-			}
-			p = p.next
-		}
-		if i != len(mc.chunks) {
-			panic(fmt.Sprintf("cache lru list has different Size than cache.chunks. %d vs %d", i, len(mc.chunks)))
-		}
-		if sz != mc.sz {
-			panic("entries reachable from lru list have different Size than cache.sz.")
-		}
-		j := 1
-		p = mc.head.prev
-		for p != mc.head {
-			j++
-			p = p.prev
-		}
-		if j != i {
-			panic("length of list backwards is not equal to length of list forward")
-		}
-	} else {
-		if len(mc.chunks) != 0 {
-			panic("lru list is empty but mc.chunks is not")
-		}
-		if mc.sz != 0 {
-			panic("lru list is empty but mc.sz is not 0")
-		}
-	}
+	return nbf
 }

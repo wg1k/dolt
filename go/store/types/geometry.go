@@ -18,15 +18,13 @@ import (
 	"context"
 	"errors"
 
-	"github.com/dolthub/dolt/go/store/geometry"
-
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
-// Geometry represents any of the types Point, Linestring, or Polygon.
-// TODO: Generics maybe?
+// Geometry represents any of the types Point, LineString, or Polygon.
+// TODO: maybe this should just be an interface?
 type Geometry struct {
-	Inner Value // Can be types.Point, types.Linestring, or types.Polygon
+	Inner Value
 }
 
 // Value interface
@@ -44,8 +42,8 @@ func (v Geometry) Equals(other Value) bool {
 	return v.Inner.Equals(other)
 }
 
-func (v Geometry) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
-	return v.Inner.Less(nbf, other)
+func (v Geometry) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+	return v.Inner.Less(ctx, nbf, other)
 }
 
 func (v Geometry) Hash(nbf *NomsBinFormat) (hash.Hash, error) {
@@ -54,10 +52,6 @@ func (v Geometry) Hash(nbf *NomsBinFormat) (hash.Hash, error) {
 
 func (v Geometry) isPrimitive() bool {
 	return true
-}
-
-func (v Geometry) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return cb(v)
 }
 
 func (v Geometry) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
@@ -85,30 +79,16 @@ func (v Geometry) writeTo(w nomsWriter, nbf *NomsBinFormat) error {
 
 	switch inner := v.Inner.(type) {
 	case Point:
-		// Allocate buffer for point 4 + 1 + 4 + 16
-		buf := make([]byte, geometry.EWKBHeaderSize+geometry.PointSize)
-		// Write header and data to buffer
-		WriteEWKBHeader(inner, buf)
-		WriteEWKBPointData(inner, buf[geometry.EWKBHeaderSize:])
+		buf := SerializePoint(inner)
 		w.writeString(string(buf))
-	case Linestring:
-		// Allocate buffer for linestring
-		buf := make([]byte, geometry.EWKBHeaderSize+LengthSize+geometry.PointSize*len(inner.Points))
-		// Write header and data to buffer
-		WriteEWKBHeader(inner, buf)
-		WriteEWKBLineData(inner, buf[geometry.EWKBHeaderSize:])
+	case LineString:
+		buf := SerializeLineString(inner)
 		w.writeString(string(buf))
 	case Polygon:
-		// Calculate space for polygon buffer
-		size := 0
-		for _, l := range inner.Lines {
-			size += LengthSize + geometry.PointSize*len(l.Points)
-		}
-		// Allocate buffer for poly
-		buf := make([]byte, geometry.EWKBHeaderSize+LengthSize+size)
-		// Write header and data to buffer
-		WriteEWKBHeader(inner, buf)
-		WriteEWKBPolyData(inner, buf[geometry.EWKBHeaderSize:])
+		buf := SerializePolygon(inner)
+		w.writeString(string(buf))
+	case MultiPoint:
+		buf := SerializeMultiPoint(inner)
 		w.writeString(string(buf))
 	default:
 		return errors.New("wrong Inner type")
@@ -118,15 +98,21 @@ func (v Geometry) writeTo(w nomsWriter, nbf *NomsBinFormat) error {
 
 func readGeometry(nbf *NomsBinFormat, b *valueDecoder) (Geometry, error) {
 	buf := []byte(b.ReadString())
-	srid, _, geomType := geometry.ParseEWKBHeader(buf) // Assume it's always little endian
+	srid, _, geomType, err := DeserializeEWKBHeader(buf) // Assume it's always little endian
+	if err != nil {
+		return Geometry{}, err
+	}
+	buf = buf[EWKBHeaderSize:]
 	var inner Value
 	switch geomType {
-	case geometry.PointType:
-		inner = ParseEWKBPoint(buf[geometry.EWKBHeaderSize:], srid)
-	case geometry.LinestringType:
-		inner = ParseEWKBLine(buf[geometry.EWKBHeaderSize:], srid)
-	case geometry.PolygonType:
-		inner = ParseEWKBPoly(buf[geometry.EWKBHeaderSize:], srid)
+	case WKBPointID:
+		inner = DeserializeTypesPoint(buf, false, srid)
+	case WKBLineID:
+		inner = DeserializeTypesLine(buf, false, srid)
+	case WKBPolyID:
+		inner = DeserializeTypesPoly(buf, false, srid)
+	case WKBMultiPointID:
+		inner = DeserializeTypesMPoint(buf, false, srid)
 	default:
 		return Geometry{}, errors.New("not a geometry")
 	}
@@ -135,15 +121,21 @@ func readGeometry(nbf *NomsBinFormat, b *valueDecoder) (Geometry, error) {
 
 func (v Geometry) readFrom(nbf *NomsBinFormat, b *binaryNomsReader) (Value, error) {
 	buf := []byte(b.ReadString())
-	srid, _, geomType := geometry.ParseEWKBHeader(buf) // Assume it's always little endian
+	srid, _, geomType, err := DeserializeEWKBHeader(buf) // Assume it's always little endian
+	if err != nil {
+		return Geometry{}, err
+	}
+	buf = buf[EWKBHeaderSize:]
 	var inner Value
 	switch geomType {
-	case geometry.PointType:
-		inner = ParseEWKBPoint(buf[geometry.EWKBHeaderSize:], srid)
-	case geometry.LinestringType:
-		inner = ParseEWKBLine(buf[geometry.EWKBHeaderSize:], srid)
-	case geometry.PolygonType:
-		inner = ParseEWKBPoly(buf[geometry.EWKBHeaderSize:], srid)
+	case WKBPointID:
+		inner = DeserializeTypesPoint(buf, false, srid)
+	case WKBLineID:
+		inner = DeserializeTypesLine(buf, false, srid)
+	case WKBPolyID:
+		inner = DeserializeTypesPoly(buf, false, srid)
+	case WKBMultiPointID:
+		inner = DeserializeTypesMPoint(buf, false, srid)
 	default:
 		return Geometry{}, errors.New("not a geometry")
 	}
@@ -156,4 +148,12 @@ func (v Geometry) skip(nbf *NomsBinFormat, b *binaryNomsReader) {
 
 func (v Geometry) HumanReadableString() string {
 	return v.Inner.HumanReadableString()
+}
+
+func EncodeGeometryWKB(v Geometry) ([]byte, error) {
+	wr := &binaryNomsWriter{make([]byte, 128), 0}
+	if err := v.writeTo(wr, nil); err != nil {
+		return nil, err
+	}
+	return wr.data()[1:], nil // trim NomsKind
 }

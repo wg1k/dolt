@@ -17,7 +17,7 @@ queries = list("create table test (pk int, value int, primary key(pk))",
                "select * from test")
 
 responses = list(NULL,
-                 data.frame(Field = c("pk", "value"), Type = c("int", "int"), Null = c("NO", "YES"), Key = c("PRI", ""), Default = c("", ""), Extra = c("", ""), stringsAsFactors = FALSE),
+                 data.frame(Field = c("pk", "value"), Type = c("int", "int"), Null = c("NO", "YES"), Key = c("PRI", ""), Default = c(NA, NA), Extra = c("", ""), stringsAsFactors = FALSE),
                  NULL,
                  data.frame(pk = c(0), value = c(0), stringsAsFactors = FALSE))
 
@@ -49,20 +49,20 @@ if (rowsAff != 1) {
 }
 
 got <- dbGetQuery(conn, "select * from test where pk = 1")
-want = data.frame(pk = c(0, 1), value = c(0, 1))
+want = data.frame(pk = c(1), value = c(1))
 if (!isTRUE(all.equal(want, got))) {
     print("unexpected prepared statement result")
     print(got)
     quit(1)
 }
 
-dolt_queries = list("SELECT DOLT_ADD('-A')",
-                    "select dolt_commit('-m', 'my commit')",
-                    "select dolt_checkout('-b', 'mybranch')",
+dolt_queries = list("call DOLT_ADD('-A')",
+                    "call dolt_commit('-m', 'my commit')",
+                    "call dolt_checkout('-b', 'mybranch')",
                     "insert into test (pk, `value`) values (2,2)",
-                     "select dolt_commit('-a', '-m', 'my commit2')",
-                     "select dolt_checkout('main')",
-                     "select dolt_merge('mybranch')")
+                     "call dolt_commit('-a', '-m', 'my commit2')",
+                     "call dolt_checkout('main')",
+                     "call dolt_merge('mybranch')")
 
 for(i in 1:length(dolt_queries)) {
     q = dolt_queries[[i]]
@@ -76,3 +76,14 @@ if (!ret) {
     print("Number of commits is incorrect")
     quit(1)
 }
+
+# Add a failing query and ensure that the connection does not quit.
+# cc. https://github.com/dolthub/dolt/issues/3418
+try(dbExecute(conn, "insert into test values (0, 1)"), silent = TRUE)
+one <- dbGetQuery(conn, "select 1 as pk")
+ret <- one == data.frame(pk=1)
+if (!ret) {
+    print("Number of commits is incorrect")
+    quit(1)
+}
+

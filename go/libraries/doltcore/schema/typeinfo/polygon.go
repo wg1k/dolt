@@ -17,42 +17,35 @@ package typeinfo
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
-	"github.com/dolthub/dolt/go/store/geometry"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 // This is a dolt implementation of the MySQL type Point, thus most of the functionality
 // within is directly reliant on the go-mysql-server implementation.
 type polygonType struct {
-	sqlPolygonType sql.PolygonType
+	sqlPolygonType gmstypes.PolygonType
 }
 
 var _ TypeInfo = (*polygonType)(nil)
 
-var PolygonType = &polygonType{sql.PolygonType{}}
-
-// ConvertTypesPolygonToSQLPolygon basically makes a deep copy of sql.Linestring
-func ConvertTypesPolygonToSQLPolygon(p types.Polygon) sql.Polygon {
-	lines := make([]sql.Linestring, len(p.Lines))
-	for i, l := range p.Lines {
-		lines[i] = ConvertTypesLinestringToSQLLinestring(l)
-	}
-	return sql.Polygon{SRID: p.SRID, Lines: lines}
-}
+var PolygonType = &polygonType{gmstypes.PolygonType{}}
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *polygonType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
-	// Expect a types.Polygon, return a sql.Polygon
-	if val, ok := v.(types.Polygon); ok {
-		return ConvertTypesPolygonToSQLPolygon(val), nil
-	}
 	// Check for null
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
 	}
+	// Expect a types.Polygon, return a sql.Polygon
+	if val, ok := v.(types.Polygon); ok {
+		return types.ConvertTypesPolygonToSQLPolygon(val), nil
+	}
+
 	return nil, fmt.Errorf(`"%v" cannot convert NomsKind "%v" to a value`, ti.String(), v.Kind())
 }
 
@@ -73,14 +66,6 @@ func (ti *polygonType) ReadFrom(nbf *types.NomsBinFormat, reader types.CodecRead
 	return nil, fmt.Errorf(`"%v" cannot convert NomsKind "%v" to a value`, ti.String(), k)
 }
 
-func ConvertSQLPolygonToTypesPolygon(p sql.Polygon) types.Polygon {
-	lines := make([]types.Linestring, len(p.Lines))
-	for i, l := range p.Lines {
-		lines[i] = ConvertSQLLinestringToTypesLinestring(l)
-	}
-	return types.Polygon{SRID: p.SRID, Lines: lines}
-}
-
 // ConvertValueToNomsValue implements TypeInfo interface.
 func (ti *polygonType) ConvertValueToNomsValue(ctx context.Context, vrw types.ValueReadWriter, v interface{}) (types.Value, error) {
 	// Check for null
@@ -89,12 +74,12 @@ func (ti *polygonType) ConvertValueToNomsValue(ctx context.Context, vrw types.Va
 	}
 
 	// Convert to sql.PolygonType
-	poly, err := ti.sqlPolygonType.Convert(v)
+	poly, _, err := ti.sqlPolygonType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
 
-	return ConvertSQLPolygonToTypesPolygon(poly.(sql.Polygon)), nil
+	return types.ConvertSQLPolygonToTypesPolygon(poly.(gmstypes.Polygon)), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -102,21 +87,17 @@ func (ti *polygonType) Equals(other TypeInfo) bool {
 	if other == nil {
 		return false
 	}
-	_, ok := other.(*polygonType)
-	return ok
+	if o, ok := other.(*polygonType); ok {
+		// if either ti or other has defined SRID, then check SRID value; otherwise,
+		return (!ti.sqlPolygonType.DefinedSRID && !o.sqlPolygonType.DefinedSRID) || ti.sqlPolygonType.SRID == o.sqlPolygonType.SRID
+	}
+	return false
 }
 
 // FormatValue implements TypeInfo interface.
 func (ti *polygonType) FormatValue(v types.Value) (*string, error) {
 	if val, ok := v.(types.Polygon); ok {
-		size := geometry.EWKBHeaderSize + types.LengthSize
-		for _, l := range val.Lines {
-			size += types.LengthSize + geometry.PointSize*len(l.Points)
-		}
-		buf := make([]byte, size)
-		types.WriteEWKBHeader(val, buf[:geometry.EWKBHeaderSize])
-		types.WriteEWKBPolyData(val, buf[geometry.EWKBHeaderSize:])
-		resStr := string(buf)
+		resStr := string(types.SerializePolygon(val))
 		return &resStr, nil
 	}
 	if _, ok := v.(types.Null); ok || v == nil {
@@ -133,7 +114,8 @@ func (ti *polygonType) GetTypeIdentifier() Identifier {
 
 // GetTypeParams implements TypeInfo interface.
 func (ti *polygonType) GetTypeParams() map[string]string {
-	return map[string]string{}
+	return map[string]string{"SRID": strconv.FormatUint(uint64(ti.sqlPolygonType.SRID), 10),
+		"DefinedSRID": strconv.FormatBool(ti.sqlPolygonType.DefinedSRID)}
 }
 
 // IsValid implements TypeInfo interface.
@@ -154,7 +136,7 @@ func (ti *polygonType) NomsKind() types.NomsKind {
 
 // Promote implements TypeInfo interface.
 func (ti *polygonType) Promote() TypeInfo {
-	return &polygonType{ti.sqlPolygonType.Promote().(sql.PolygonType)}
+	return &polygonType{ti.sqlPolygonType.Promote().(gmstypes.PolygonType)}
 }
 
 // String implements TypeInfo interface.
@@ -186,6 +168,8 @@ func polygonTypeConverter(ctx context.Context, src *polygonType, destTi TypeInfo
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
@@ -196,10 +180,16 @@ func polygonTypeConverter(ctx context.Context, src *polygonType, destTi TypeInfo
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *polygonType:
-		return identityTypeConverter, false, nil
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *setType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *timeType:
@@ -217,4 +207,26 @@ func polygonTypeConverter(ctx context.Context, src *polygonType, destTi TypeInfo
 	default:
 		return nil, false, UnhandledTypeConversion.New(src.String(), destTi.String())
 	}
+}
+
+func CreatePolygonTypeFromParams(params map[string]string) (TypeInfo, error) {
+	var (
+		err     error
+		sridVal uint64
+		def     bool
+	)
+	if s, ok := params["SRID"]; ok {
+		sridVal, err = strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if d, ok := params["DefinedSRID"]; ok {
+		def, err = strconv.ParseBool(d)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &polygonType{sqlPolygonType: gmstypes.PolygonType{SRID: uint32(sridVal), DefinedSRID: def}}, nil
 }

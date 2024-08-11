@@ -21,6 +21,10 @@
 
 package types
 
+import (
+	"github.com/dolthub/dolt/go/gen/fb/serial"
+)
+
 // NomsKind allows a TypeDesc to indicate what kind of type is described.
 type NomsKind uint8
 
@@ -58,12 +62,18 @@ const (
 	JSONKind
 	GeometryKind
 	PointKind
-	LinestringKind
+	LineStringKind
 	PolygonKind
 
 	SerialMessageKind
-	TupleRowStorageKind
 
+	MultiPointKind
+	MultiLineStringKind
+	MultiPolygonKind
+	GeometryCollectionKind
+	ExtendedKind
+
+	GhostKind            = 254
 	UnknownKind NomsKind = 255
 )
 
@@ -85,17 +95,21 @@ func init() {
 	KindToType[IntKind] = Int(0)
 	KindToType[UintKind] = Uint(0)
 	KindToType[NullKind] = NullValue
-	KindToType[TupleKind] = EmptyTuple(Format_Default)
+	KindToType[TupleKind] = Tuple{}
 	KindToType[InlineBlobKind] = InlineBlob{}
 	KindToType[TimestampKind] = Timestamp{}
 	KindToType[DecimalKind] = Decimal{}
 	KindToType[JSONKind] = JSON{}
 	KindToType[GeometryKind] = Geometry{}
 	KindToType[PointKind] = Point{}
-	KindToType[LinestringKind] = Linestring{}
+	KindToType[LineStringKind] = LineString{}
 	KindToType[PolygonKind] = Polygon{}
 	KindToType[SerialMessageKind] = SerialMessage{}
-	KindToType[TupleRowStorageKind] = TupleRowStorage{}
+	KindToType[MultiPointKind] = MultiPoint{}
+	KindToType[MultiLineStringKind] = MultiLineString{}
+	KindToType[MultiPolygonKind] = MultiPolygon{}
+	KindToType[GeometryCollectionKind] = GeomColl{}
+	KindToType[ExtendedKind] = Extended{}
 
 	SupportedKinds[BlobKind] = true
 	SupportedKinds[BoolKind] = true
@@ -121,44 +135,56 @@ func init() {
 	SupportedKinds[JSONKind] = true
 	SupportedKinds[GeometryKind] = true
 	SupportedKinds[PointKind] = true
-	SupportedKinds[LinestringKind] = true
+	SupportedKinds[LineStringKind] = true
 	SupportedKinds[PolygonKind] = true
 	SupportedKinds[SerialMessageKind] = true
-	SupportedKinds[TupleRowStorageKind] = true
+	SupportedKinds[MultiPointKind] = true
+	SupportedKinds[MultiLineStringKind] = true
+	SupportedKinds[MultiPolygonKind] = true
+	SupportedKinds[GeometryCollectionKind] = true
+	SupportedKinds[ExtendedKind] = true
+
+	if serial.MessageTypesKind != int(SerialMessageKind) {
+		panic("internal error: serial.MessageTypesKind != SerialMessageKind")
+	}
 }
 
 var KindToTypeSlice []Value
 
 var KindToString = map[NomsKind]string{
-	UnknownKind:         "unknown",
-	BlobKind:            "Blob",
-	BoolKind:            "Bool",
-	CycleKind:           "Cycle",
-	ListKind:            "List",
-	MapKind:             "Map",
-	FloatKind:           "Float",
-	RefKind:             "Ref",
-	SetKind:             "Set",
-	StructKind:          "Struct",
-	StringKind:          "String",
-	TypeKind:            "Type",
-	UnionKind:           "Union",
-	ValueKind:           "Value",
-	UUIDKind:            "UUID",
-	IntKind:             "Int",
-	UintKind:            "Uint",
-	NullKind:            "Null",
-	TupleKind:           "Tuple",
-	InlineBlobKind:      "InlineBlob",
-	TimestampKind:       "Timestamp",
-	DecimalKind:         "Decimal",
-	JSONKind:            "JSON",
-	GeometryKind:        "Geometry",
-	PointKind:           "Point",
-	LinestringKind:      "Linestring",
-	PolygonKind:         "Polygon",
-	SerialMessageKind:   "SerialMessage",
-	TupleRowStorageKind: "TupleRowStorage",
+	UnknownKind:            "unknown",
+	BlobKind:               "Blob",
+	BoolKind:               "Bool",
+	CycleKind:              "Cycle",
+	ListKind:               "List",
+	MapKind:                "Map",
+	FloatKind:              "Float",
+	RefKind:                "Ref",
+	SetKind:                "Set",
+	StructKind:             "Struct",
+	StringKind:             "String",
+	TypeKind:               "Type",
+	UnionKind:              "Union",
+	ValueKind:              "Value",
+	UUIDKind:               "UUID",
+	IntKind:                "Int",
+	UintKind:               "Uint",
+	NullKind:               "Null",
+	TupleKind:              "Tuple",
+	InlineBlobKind:         "InlineBlob",
+	TimestampKind:          "Timestamp",
+	DecimalKind:            "Decimal",
+	JSONKind:               "JSON",
+	GeometryKind:           "Geometry",
+	PointKind:              "Point",
+	LineStringKind:         "LineString",
+	PolygonKind:            "Polygon",
+	SerialMessageKind:      "SerialMessage",
+	MultiPointKind:         "MultiPoint",
+	MultiLineStringKind:    "MultiLineString",
+	MultiPolygonKind:       "MultiPolygon",
+	GeometryCollectionKind: "GeometryCollection",
+	ExtendedKind:           "ExtendedType",
 }
 
 // String returns the name of the kind.
@@ -175,6 +201,22 @@ func IsPrimitiveKind(k NomsKind) bool {
 // isKindOrderedByValue determines if a value is ordered by its value instead of its hash.
 func isKindOrderedByValue(k NomsKind) bool {
 	return k <= StringKind || k >= UUIDKind
+}
+
+func IsGeometryKind(k NomsKind) bool {
+	switch k {
+	case PointKind,
+		LineStringKind,
+		PolygonKind,
+		MultiPointKind,
+		MultiLineStringKind,
+		MultiPolygonKind,
+		GeometryKind,
+		GeometryCollectionKind:
+		return true
+	default:
+		return false
+	}
 }
 
 func (k NomsKind) writeTo(w nomsWriter, nbf *NomsBinFormat) error {

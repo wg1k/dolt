@@ -16,7 +16,7 @@ package sqlfmt
 
 import (
 	"bytes"
-	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -74,7 +74,7 @@ func RowAsInsertStmt(r row.Row, tableName string, tableSch schema.Schema) (strin
 			b.WriteRune(',')
 		}
 		col, _ := tableSch.GetAllCols().GetByTag(tag)
-		sqlString, err := valueAsSqlString(col.TypeInfo, val)
+		sqlString, err := ValueAsSqlString(col.TypeInfo, val)
 		if err != nil {
 			return true, err
 		}
@@ -92,8 +92,101 @@ func RowAsInsertStmt(r row.Row, tableName string, tableSch schema.Schema) (strin
 	return b.String(), nil
 }
 
+func RowAsDeleteStmt(r row.Row, tableName string, tableSch schema.Schema) (string, error) {
+	var b strings.Builder
+	b.WriteString("DELETE FROM ")
+	b.WriteString(QuoteIdentifier(tableName))
+
+	b.WriteString(" WHERE (")
+	seenOne := false
+	isKeyless := tableSch.GetPKCols().Size() == 0
+	_, err := r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
+		col, _ := tableSch.GetAllCols().GetByTag(tag)
+		if col.IsPartOfPK || isKeyless {
+			if seenOne {
+				b.WriteString(" AND ")
+			}
+			sqlString, err := ValueAsSqlString(col.TypeInfo, val)
+			if err != nil {
+				return true, err
+			}
+			b.WriteString(QuoteIdentifier(col.Name))
+			b.WriteRune('=')
+			b.WriteString(sqlString)
+			seenOne = true
+		}
+		return false, nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	b.WriteString(");")
+	return b.String(), nil
+}
+
+func RowAsUpdateStmt(r row.Row, tableName string, tableSch schema.Schema, colsToUpdate *set.StrSet) (string, error) {
+	var b strings.Builder
+	b.WriteString("UPDATE ")
+	b.WriteString(QuoteIdentifier(tableName))
+	b.WriteString(" ")
+
+	b.WriteString("SET ")
+	seenOne := false
+	_, err := r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
+		col, _ := tableSch.GetAllCols().GetByTag(tag)
+		exists := colsToUpdate.Contains(col.Name)
+		if !col.IsPartOfPK && exists {
+			if seenOne {
+				b.WriteRune(',')
+			}
+			sqlString, err := ValueAsSqlString(col.TypeInfo, val)
+			if err != nil {
+				return true, err
+			}
+			b.WriteString(QuoteIdentifier(col.Name))
+			b.WriteRune('=')
+			b.WriteString(sqlString)
+			seenOne = true
+		}
+		return false, nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	b.WriteString(" WHERE (")
+	seenOne = false
+	_, err = r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
+		col, _ := tableSch.GetAllCols().GetByTag(tag)
+		if col.IsPartOfPK {
+			if seenOne {
+				b.WriteString(" AND ")
+			}
+			sqlString, err := ValueAsSqlString(col.TypeInfo, val)
+			if err != nil {
+				return true, err
+			}
+			b.WriteString(QuoteIdentifier(col.Name))
+			b.WriteRune('=')
+			b.WriteString(sqlString)
+			seenOne = true
+		}
+		return false, nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	b.WriteString(");")
+	return b.String(), nil
+}
+
 // RowAsTupleString converts a row into it's tuple string representation for SQL insert statements.
-func RowAsTupleString(ctx context.Context, r row.Row, tableSch schema.Schema) (string, error) {
+func RowAsTupleString(r row.Row, tableSch schema.Schema) (string, error) {
 	var b strings.Builder
 
 	b.WriteString("(")
@@ -103,7 +196,7 @@ func RowAsTupleString(ctx context.Context, r row.Row, tableSch schema.Schema) (s
 			b.WriteRune(',')
 		}
 		col, _ := tableSch.GetAllCols().GetByTag(tag)
-		sqlString, err := valueAsSqlString(col.TypeInfo, val)
+		sqlString, err := ValueAsSqlString(col.TypeInfo, val)
 		if err != nil {
 			return true, err
 		}
@@ -180,37 +273,40 @@ func SqlRowAsCreateProcStmt(r sql.Row) (string, error) {
 func SqlRowAsCreateFragStmt(r sql.Row) (string, error) {
 	var b strings.Builder
 
-	// Write create
-	b.WriteString("CREATE ")
-
-	// Write type
+	// If type is view, add DROP VIEW IF EXISTS statement before CREATE VIEW STATEMENT
 	typeStr := strings.ToUpper(r[0].(string))
-	b.WriteString(typeStr)
-	b.WriteString(" ") // add a space
-
-	// Write view/trigger name
-	nameStr := r[1].(string)
-	b.WriteString(QuoteIdentifier(nameStr))
-	b.WriteString(" ") // add a space
+	if typeStr == "VIEW" {
+		nameStr := r[1].(string)
+		dropStmt := fmt.Sprintf("DROP VIEW IF EXISTS `%s`", nameStr)
+		b.WriteString(dropStmt)
+		b.WriteString(";\n")
+	}
 
 	// Parse statement to extract definition (and remove any weird whitespace issues)
 	defStmt, err := sqlparser.Parse(r[2].(string))
 	if err != nil {
 		return "", err
 	}
+
 	defStr := sqlparser.String(defStmt)
-	if typeStr == "TRIGGER" { // triggers need the create trigger <trig_name> to be cut off
-		defStr = defStr[len("CREATE TRIGGER ")+len(nameStr)+1:]
-	} else { // views need the prefixed with "AS"
-		defStr = "AS " + defStr
+
+	// TODO: this is temporary fix for create statements
+	if typeStr == "TRIGGER" {
+		nameStr := r[1].(string)
+		defStr = fmt.Sprintf("CREATE TRIGGER `%s` %s", nameStr, defStr[len("CREATE TRIGGER ")+len(nameStr)+1:])
+	} else {
+		defStr = strings.Replace(defStr, "create ", "CREATE ", -1)
+		defStr = strings.Replace(defStr, " view ", " VIEW ", -1)
+		defStr = strings.Replace(defStr, " as ", " AS ", -1)
 	}
+
 	b.WriteString(defStr)
 
 	b.WriteString(";")
 	return b.String(), nil
 }
 
-func SqlRowAsInsertStmt(ctx context.Context, r sql.Row, tableName string, tableSch schema.Schema) (string, error) {
+func SqlRowAsInsertStmt(r sql.Row, tableName string, tableSch schema.Schema) (string, error) {
 	var b strings.Builder
 
 	// Write insert prefix
@@ -221,7 +317,7 @@ func SqlRowAsInsertStmt(ctx context.Context, r sql.Row, tableName string, tableS
 	b.WriteString(prefix)
 
 	// Write single insert
-	str, err := SqlRowAsTupleString(ctx, r, tableSch)
+	str, err := SqlRowAsTupleString(r, tableSch)
 	if err != nil {
 		return "", err
 	}
@@ -232,7 +328,7 @@ func SqlRowAsInsertStmt(ctx context.Context, r sql.Row, tableName string, tableS
 }
 
 // SqlRowAsTupleString converts a sql row into it's tuple string representation for SQL insert statements.
-func SqlRowAsTupleString(ctx context.Context, r sql.Row, tableSch schema.Schema) (string, error) {
+func SqlRowAsTupleString(r sql.Row, tableSch schema.Schema) (string, error) {
 	var b strings.Builder
 	var err error
 
@@ -242,10 +338,10 @@ func SqlRowAsTupleString(ctx context.Context, r sql.Row, tableSch schema.Schema)
 		if seenOne {
 			b.WriteRune(',')
 		}
-		col := tableSch.GetAllCols().GetAtIndex(i)
+		col := tableSch.GetAllCols().GetByIndex(i)
 		str := "NULL"
 		if val != nil {
-			str, err = interfaceValueAsSqlString(ctx, col.TypeInfo, val)
+			str, err = interfaceValueAsSqlString(col.TypeInfo, val)
 			if err != nil {
 				return "", err
 			}
@@ -259,21 +355,39 @@ func SqlRowAsTupleString(ctx context.Context, r sql.Row, tableSch schema.Schema)
 	return b.String(), nil
 }
 
-func RowAsDeleteStmt(r row.Row, tableName string, tableSch schema.Schema) (string, error) {
+// SqlRowAsStrings returns the string representation for each column of |r|
+// which should have schema |sch|.
+func SqlRowAsStrings(r sql.Row, sch sql.Schema) ([]string, error) {
+	out := make([]string, len(r))
+	for i := range out {
+		v := r[i]
+		sqlType := sch[i].Type
+		s, err := sqlutil.SqlColToStr(sqlType, v)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = s
+	}
+	return out, nil
+}
+
+// SqlRowAsDeleteStmt generates a sql statement. Non-zero |limit| adds a limit clause.
+func SqlRowAsDeleteStmt(r sql.Row, tableName string, tableSch schema.Schema, limit uint64) (string, error) {
 	var b strings.Builder
 	b.WriteString("DELETE FROM ")
 	b.WriteString(QuoteIdentifier(tableName))
 
-	b.WriteString(" WHERE (")
+	b.WriteString(" WHERE ")
 	seenOne := false
-	isKeyless := tableSch.GetPKCols().Size() == 0
-	_, err := r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
-		col, _ := tableSch.GetAllCols().GetByTag(tag)
+	i := 0
+	isKeyless := schema.IsKeyless(tableSch)
+
+	err := tableSch.GetAllCols().Iter(func(_ uint64, col schema.Column) (stop bool, err error) {
 		if col.IsPartOfPK || isKeyless {
 			if seenOne {
 				b.WriteString(" AND ")
 			}
-			sqlString, err := valueAsSqlString(col.TypeInfo, val)
+			sqlString, err := interfaceValueAsSqlString(col.TypeInfo, r[i])
 			if err != nil {
 				return true, err
 			}
@@ -282,6 +396,7 @@ func RowAsDeleteStmt(r row.Row, tableName string, tableSch schema.Schema) (strin
 			b.WriteString(sqlString)
 			seenOne = true
 		}
+		i++
 		return false, nil
 	})
 
@@ -289,34 +404,45 @@ func RowAsDeleteStmt(r row.Row, tableName string, tableSch schema.Schema) (strin
 		return "", err
 	}
 
-	b.WriteString(");")
+	if limit != 0 {
+		b.WriteString(" LIMIT ")
+		s, err := interfaceValueAsSqlString(typeinfo.FromKind(types.UintKind), limit)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(s)
+	}
+
+	b.WriteString(";")
 	return b.String(), nil
 }
 
-func RowAsUpdateStmt(r row.Row, tableName string, tableSch schema.Schema, colDiffs *set.StrSet) (string, error) {
+func SqlRowAsUpdateStmt(r sql.Row, tableName string, tableSch schema.Schema, colsToUpdate *set.StrSet) (string, error) {
 	var b strings.Builder
 	b.WriteString("UPDATE ")
 	b.WriteString(QuoteIdentifier(tableName))
 	b.WriteString(" ")
 
 	b.WriteString("SET ")
+
+	i := 0
 	seenOne := false
-	_, err := r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
-		col, _ := tableSch.GetAllCols().GetByTag(tag)
-		exists := colDiffs.Contains(col.Name)
-		if !col.IsPartOfPK && exists {
+	err := tableSch.GetAllCols().Iter(func(_ uint64, col schema.Column) (stop bool, err error) {
+		if colsToUpdate.Contains(col.Name) {
 			if seenOne {
 				b.WriteRune(',')
 			}
-			sqlString, err := valueAsSqlString(col.TypeInfo, val)
+			seenOne = true
+
+			sqlString, err := interfaceValueAsSqlString(col.TypeInfo, r[i])
 			if err != nil {
 				return true, err
 			}
 			b.WriteString(QuoteIdentifier(col.Name))
 			b.WriteRune('=')
 			b.WriteString(sqlString)
-			seenOne = true
 		}
+		i++
 		return false, nil
 	})
 
@@ -324,23 +450,26 @@ func RowAsUpdateStmt(r row.Row, tableName string, tableSch schema.Schema, colDif
 		return "", err
 	}
 
-	b.WriteString(" WHERE (")
+	b.WriteString(" WHERE ")
+
+	i = 0
 	seenOne = false
-	_, err = r.IterSchema(tableSch, func(tag uint64, val types.Value) (stop bool, err error) {
-		col, _ := tableSch.GetAllCols().GetByTag(tag)
+	err = tableSch.GetAllCols().Iter(func(_ uint64, col schema.Column) (stop bool, err error) {
 		if col.IsPartOfPK {
 			if seenOne {
 				b.WriteString(" AND ")
 			}
-			sqlString, err := valueAsSqlString(col.TypeInfo, val)
+			seenOne = true
+
+			sqlString, err := interfaceValueAsSqlString(col.TypeInfo, r[i])
 			if err != nil {
 				return true, err
 			}
 			b.WriteString(QuoteIdentifier(col.Name))
 			b.WriteRune('=')
 			b.WriteString(sqlString)
-			seenOne = true
 		}
+		i++
 		return false, nil
 	})
 
@@ -348,11 +477,11 @@ func RowAsUpdateStmt(r row.Row, tableName string, tableSch schema.Schema, colDif
 		return "", err
 	}
 
-	b.WriteString(");")
+	b.WriteString(";")
 	return b.String(), nil
 }
 
-func valueAsSqlString(ti typeinfo.TypeInfo, value types.Value) (string, error) {
+func ValueAsSqlString(ti typeinfo.TypeInfo, value types.Value) (string, error) {
 	if types.IsNull(value) {
 		return "NULL", nil
 	}
@@ -385,38 +514,52 @@ func valueAsSqlString(ti typeinfo.TypeInfo, value types.Value) (string, error) {
 	}
 }
 
-func interfaceValueAsSqlString(ctx context.Context, ti typeinfo.TypeInfo, value interface{}) (string, error) {
-	str := sqlutil.SqlColToStr(ctx, value)
+func interfaceValueAsSqlString(ti typeinfo.TypeInfo, value interface{}) (string, error) {
+	if value == nil {
+		return "NULL", nil
+	}
+
+	str, err := sqlutil.SqlColToStr(ti.ToSqlType(), value)
+	if err != nil {
+		return "", err
+	}
 
 	switch ti.GetTypeIdentifier() {
 	case typeinfo.BoolTypeIdentifier:
-		// todo: unclear if we want this to output with "TRUE/FALSE" or 1/0
 		if value.(bool) {
-			return "TRUE", nil
+			return "1", nil
 		}
-		return "FALSE", nil
+		return "0", nil
 	case typeinfo.UuidTypeIdentifier, typeinfo.TimeTypeIdentifier, typeinfo.YearTypeIdentifier:
 		return singleQuote + str + singleQuote, nil
 	case typeinfo.DatetimeTypeIdentifier:
-		reparsed, err := typeinfo.StringDefaultType.ConvertToType(ctx, nil, ti, types.String(str))
-		if err != nil {
-			return "", err
+		return singleQuote + str + singleQuote, nil
+	case typeinfo.InlineBlobTypeIdentifier, typeinfo.VarBinaryTypeIdentifier:
+		switch v := value.(type) {
+		case []byte:
+			return hexEncodeBytes(v), nil
+		case string:
+			return hexEncodeBytes([]byte(v)), nil
+		default:
+			return "", fmt.Errorf("unexpected type for binary value: %T (SQL type info: %v)", value, ti)
 		}
-
-		strp, err := ti.FormatValue(reparsed)
-		if err != nil {
-			return "", err
-		}
-
-		return singleQuote + *strp + singleQuote, nil
-	case typeinfo.BlobStringTypeIdentifier, typeinfo.VarBinaryTypeIdentifier, typeinfo.InlineBlobTypeIdentifier, typeinfo.JSONTypeIdentifier, typeinfo.EnumTypeIdentifier, typeinfo.SetTypeIdentifier:
+	case typeinfo.JSONTypeIdentifier, typeinfo.EnumTypeIdentifier, typeinfo.SetTypeIdentifier, typeinfo.BlobStringTypeIdentifier:
 		return quoteAndEscapeString(str), nil
 	case typeinfo.VarStringTypeIdentifier:
 		s, ok := value.(string)
 		if !ok {
 			return "", fmt.Errorf("typeinfo.VarStringTypeIdentifier is not types.String")
 		}
-		return quoteAndEscapeString(string(s)), nil
+		return quoteAndEscapeString(s), nil
+	case typeinfo.GeometryTypeIdentifier,
+		typeinfo.PointTypeIdentifier,
+		typeinfo.LineStringTypeIdentifier,
+		typeinfo.PolygonTypeIdentifier,
+		typeinfo.MultiPointTypeIdentifier,
+		typeinfo.MultiLineStringTypeIdentifier,
+		typeinfo.MultiPolygonTypeIdentifier,
+		typeinfo.GeometryCollectionTypeIdentifier:
+		return singleQuote + str + singleQuote, nil
 	default:
 		return str, nil
 	}
@@ -430,4 +573,8 @@ func quoteAndEscapeString(s string) string {
 	}
 	v.EncodeSQL(buf)
 	return buf.String()
+}
+
+func hexEncodeBytes(bytes []byte) string {
+	return "0x" + hex.EncodeToString(bytes)
 }

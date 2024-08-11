@@ -16,258 +16,133 @@ package tree
 
 import (
 	"context"
-	"encoding/binary"
-	"fmt"
-	"strings"
+	"sync"
 
-	fb "github.com/google/flatbuffers/go"
+	"github.com/dolthub/dolt/go/store/prolly/message"
 
-	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/hash"
-	"github.com/dolthub/dolt/go/store/pool"
-	"github.com/dolthub/dolt/go/store/val"
-)
-
-const (
-	nodeBuilderListSize = 256
 )
 
 type novelNode struct {
 	node      Node
 	addr      hash.Hash
-	lastKey   NodeItem
+	lastKey   Item
 	treeCount uint64
 }
 
-func writeNewNode(ctx context.Context, ns NodeStore, bld *nodeBuilder) (novelNode, error) {
-	node := bld.build(ns.Pool())
+func writeNewNode[S message.Serializer](ctx context.Context, ns NodeStore, bld *nodeBuilder[S]) (novelNode, error) {
+
+	node, err := bld.build()
+	if err != nil {
+		return novelNode{}, err
+	}
 
 	addr, err := ns.Write(ctx, node)
 	if err != nil {
 		return novelNode{}, err
 	}
 
-	var lastKey val.Tuple
-	if len(bld.keys) > 0 {
-		lastKey = val.Tuple(bld.keys[len(bld.keys)-1])
-		lastKey = val.CloneTuple(ns.Pool(), lastKey)
+	var lastKey Item
+	if node.count > 0 {
+		k := getLastKey(node)
+		lastKey = ns.Pool().Get(uint64(len(k)))
+		copy(lastKey, k)
 	}
 
-	treeCount := uint64(node.TreeCount())
+	cnt, err := node.TreeCount()
+	if err != nil {
+		return novelNode{}, err
+	}
 
 	return novelNode{
 		addr:      addr,
 		node:      node,
-		lastKey:   NodeItem(lastKey),
-		treeCount: treeCount,
+		lastKey:   lastKey,
+		treeCount: uint64(cnt),
 	}, nil
 }
 
-type nodeBuilder struct {
-	keys, values []NodeItem
+func newNodeBuilder[S message.Serializer](serializer S, level int) (nb *nodeBuilder[S]) {
+	nb = &nodeBuilder[S]{
+		level:      level,
+		serializer: serializer,
+	}
+	return
+}
+
+type nodeBuilder[S message.Serializer] struct {
+	keys, values [][]byte
 	size, level  int
-
-	subtrees subtreeCounts
+	subtrees     subtreeCounts
+	serializer   S
 }
 
-func (nb *nodeBuilder) hasCapacity(key, value NodeItem) bool {
+func (nb *nodeBuilder[S]) hasCapacity(key, value Item) bool {
 	sum := nb.size + len(key) + len(value)
-	return sum <= int(maxVectorOffset)
+	return sum <= int(message.MaxVectorOffset)
 }
 
-func (nb *nodeBuilder) appendItems(key, value NodeItem, subtree uint64) {
+func (nb *nodeBuilder[S]) addItems(key, value Item, subtree uint64) {
+	if nb.keys == nil {
+		nb.keys = getItemSlices()
+		nb.values = getItemSlices()
+		nb.subtrees = getSubtreeSlice()
+	}
 	nb.keys = append(nb.keys, key)
 	nb.values = append(nb.values, value)
 	nb.size += len(key) + len(value)
 	nb.subtrees = append(nb.subtrees, subtree)
 }
 
-func (nb *nodeBuilder) nodeCount() int {
+func (nb *nodeBuilder[S]) count() int {
 	return len(nb.keys)
 }
 
-func (nb *nodeBuilder) reset() {
-	// buffers are copied, it's safe to re-use the memory.
-	nb.keys = nb.keys[:0]
-	nb.values = nb.values[:0]
+func (nb *nodeBuilder[S]) build() (node Node, err error) {
+	msg := nb.serializer.Serialize(nb.keys, nb.values, nb.subtrees, nb.level)
+	nb.recycleBuffers()
 	nb.size = 0
-	nb.subtrees = nb.subtrees[:0]
+	return NodeFromBytes(msg)
 }
 
-func (nb *nodeBuilder) firstChildRef() hash.Hash {
-	return hash.New(nb.values[0])
+func (nb *nodeBuilder[S]) recycleBuffers() {
+	putItemSlices(nb.keys[:0])
+	putItemSlices(nb.values[:0])
+	putSubtreeSlice(nb.subtrees[:0])
+	nb.keys = nil
+	nb.values = nil
+	nb.subtrees = nil
 }
 
-func (nb *nodeBuilder) build(pool pool.BuffPool) (node Node) {
-	var (
-		keyTups, keyOffs fb.UOffsetT
-		valTups, valOffs fb.UOffsetT
-		refArr, cardArr  fb.UOffsetT
-	)
+// todo(andy): replace with NodeStore.Pool()
+const nodeBuilderListSize = 256
 
-	keySz, valSz, bufSz := measureNodeSize(nb.keys, nb.values, nb.subtrees)
-	b := getMapBuilder(pool, bufSz)
-
-	// serialize keys and offsets
-	keyTups = writeItemBytes(b, nb.keys, keySz)
-	serial.TupleMapStartKeyOffsetsVector(b, len(nb.keys)-1)
-	keyOffs = b.EndVector(writeItemOffsets(b, nb.keys, keySz))
-
-	if nb.level == 0 {
-		// serialize value tuples for leaf nodes
-		valTups = writeItemBytes(b, nb.values, valSz)
-		serial.TupleMapStartValueOffsetsVector(b, len(nb.values)-1)
-		valOffs = b.EndVector(writeItemOffsets(b, nb.values, valSz))
-	} else {
-		// serialize child refs and subtree counts for internal nodes
-		refArr = writeItemBytes(b, nb.values, valSz)
-		cardArr = writeCountArray(b, nb.subtrees)
-	}
-
-	// populate the node's vtable
-	serial.TupleMapStart(b)
-	serial.TupleMapAddKeyTuples(b, keyTups)
-	serial.TupleMapAddKeyOffsets(b, keyOffs)
-	if nb.level == 0 {
-		serial.TupleMapAddValueTuples(b, valTups)
-		serial.TupleMapAddValueOffsets(b, valOffs)
-		serial.TupleMapAddTreeCount(b, uint64(len(nb.keys)))
-	} else {
-		serial.TupleMapAddRefArray(b, refArr)
-		serial.TupleMapAddRefCardinalities(b, cardArr)
-		serial.TupleMapAddTreeCount(b, nb.subtrees.sum())
-	}
-	serial.TupleMapAddKeyFormat(b, serial.TupleFormatV1)
-	serial.TupleMapAddValueFormat(b, serial.TupleFormatV1)
-	serial.TupleMapAddTreeLevel(b, uint8(nb.level))
-	b.Finish(serial.TupleMapEnd(b))
-
-	buf := b.FinishedBytes()
-	return MapNodeFromBytes(buf)
+var itemsPool = sync.Pool{
+	New: func() any {
+		return make([][]byte, 0, nodeBuilderListSize)
+	},
 }
 
-func newSubtreeCounts(count int) subtreeCounts {
-	return make([]uint64, 0, count)
+func getItemSlices() [][]byte {
+	sl := itemsPool.Get().([][]byte)
+	return sl[:0]
 }
 
-type subtreeCounts []uint64
-
-func (sc subtreeCounts) sum() (s uint64) {
-	for _, count := range sc {
-		s += count
-	}
-	return
+func putItemSlices(sl [][]byte) {
+	itemsPool.Put(sl[:0])
 }
 
-func readSubtreeCounts(n int, buf []byte) (sc subtreeCounts) {
-	sc = make([]uint64, 0, n)
-	for len(buf) > 0 {
-		count, n := binary.Uvarint(buf)
-		sc = append(sc, count)
-		buf = buf[n:]
-	}
-	assertTrue(len(sc) == n)
-	return
+var subtreePool = sync.Pool{
+	New: func() any {
+		return make([]uint64, 0, nodeBuilderListSize)
+	},
 }
 
-func writeSubtreeCounts(sc subtreeCounts) []byte {
-	buf := make([]byte, len(sc)*binary.MaxVarintLen64)
-	pos := 0
-	for _, count := range sc {
-		n := binary.PutUvarint(buf[pos:], count)
-		pos += n
-	}
-	return buf[:pos]
+func getSubtreeSlice() []uint64 {
+	sl := subtreePool.Get().([]uint64)
+	return sl[:0]
 }
 
-func newNodeBuilder(level int) *nodeBuilder {
-	return &nodeBuilder{
-		keys:     make([]NodeItem, 0, nodeBuilderListSize),
-		values:   make([]NodeItem, 0, nodeBuilderListSize),
-		subtrees: newSubtreeCounts(nodeBuilderListSize),
-		level:    level,
-	}
-}
-
-func getMapBuilder(pool pool.BuffPool, sz int) (b *fb.Builder) {
-	b = fb.NewBuilder(0)
-	buf := pool.Get(uint64(sz))
-	b.Bytes = buf[:0]
-	return
-}
-
-// measureNodeSize returns the exact Size of the tuple vectors for keys and values,
-// and an estimate of the overall Size of the final flatbuffer.
-func measureNodeSize(keys, values []NodeItem, subtrees []uint64) (keySz, valSz, bufSz int) {
-	for i := range keys {
-		keySz += len(keys[i])
-		valSz += len(values[i])
-	}
-	refCntSz := len(subtrees) * binary.MaxVarintLen64
-
-	// constraints enforced upstream
-	if keySz > int(maxVectorOffset) {
-		panic(fmt.Sprintf("key vector exceeds Size limit ( %d > %d )", keySz, maxVectorOffset))
-	}
-	if valSz > int(maxVectorOffset) {
-		panic(fmt.Sprintf("value vector exceeds Size limit ( %d > %d )", valSz, maxVectorOffset))
-	}
-
-	bufSz += keySz + valSz               // tuples
-	bufSz += refCntSz                    // subtree counts
-	bufSz += len(keys)*2 + len(values)*2 // offsets
-	bufSz += 8 + 1 + 1 + 1               // metadata
-	bufSz += 72                          // vtable (approx)
-
-	return
-}
-
-func writeItemBytes(b *fb.Builder, items []NodeItem, sumSz int) fb.UOffsetT {
-	b.Prep(fb.SizeUOffsetT, sumSz)
-
-	stop := int(b.Head())
-	start := stop - sumSz
-	for _, item := range items {
-		copy(b.Bytes[start:stop], item)
-		start += len(item)
-	}
-
-	start = stop - sumSz
-	return b.CreateByteVector(b.Bytes[start:stop])
-}
-
-func writeItemOffsets(b *fb.Builder, items []NodeItem, sz int) (cnt int) {
-	off := sz
-	for i := len(items) - 1; i > 0; i-- { // omit first offset
-		off -= len(items[i])
-		b.PrependUint16(uint16(off))
-		cnt++
-	}
-	return
-}
-
-func writeCountArray(b *fb.Builder, sc subtreeCounts) fb.UOffsetT {
-	// todo(andy) write without copy
-	arr := writeSubtreeCounts(sc)
-	return b.CreateByteVector(arr)
-}
-
-func formatCompletedNode(addr hash.Hash, bld *nodeBuilder, kd, vd val.TupleDesc) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Novel Node (Level %d) #%s { \n", bld.level, addr.String()))
-	for i := range bld.keys {
-		k, v := bld.keys[i], bld.values[i]
-		sb.WriteString("\t")
-		sb.WriteString(kd.Format(val.Tuple(k)))
-		sb.WriteString(": ")
-		if bld.level == 0 {
-			sb.WriteString(vd.Format(val.Tuple(v)))
-		} else {
-			sb.WriteString("#")
-			sb.WriteString(hash.New(v).String())
-		}
-		sb.WriteString(",\n")
-	}
-	sb.WriteString("} ")
-	return sb.String()
+func putSubtreeSlice(sl []uint64) {
+	subtreePool.Put(sl[:0])
 }

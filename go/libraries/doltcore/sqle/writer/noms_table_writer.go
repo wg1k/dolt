@@ -17,7 +17,8 @@ package writer
 import (
 	"github.com/dolthub/go-mysql-server/sql"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
+
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/globalstate"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
@@ -26,18 +27,11 @@ import (
 	"github.com/dolthub/dolt/go/store/types"
 )
 
-type TableWriter interface {
-	sql.RowReplacer
-	sql.RowUpdater
-	sql.RowInserter
-	sql.RowDeleter
-	sql.ForeignKeyUpdater
-	sql.AutoIncrementSetter
+// AutoIncrementGetter is implemented by editors that support AUTO_INCREMENT to return the next value that will be
+// inserted.
+type AutoIncrementGetter interface {
 	GetNextAutoIncrementValue(ctx *sql.Context, insertVal interface{}) (uint64, error)
 }
-
-// SessionRootSetter sets the root value for the session.
-type SessionRootSetter func(ctx *sql.Context, dbName string, root *doltdb.RootValue) error
 
 // nomsTableWriter is a wrapper for *doltdb.SessionedTableEditor that complies with the SQL interface.
 //
@@ -57,15 +51,21 @@ type nomsTableWriter struct {
 	vrw         types.ValueReadWriter
 	kvToSQLRow  *index.KVToSqlRowConverter
 	tableEditor editor.TableEditor
-	sess        WriteSession
-	batched     bool
+	flusher     dsess.WriteSessionFlusher
 
-	autoInc globalstate.AutoIncrementTracker
+	autoInc                globalstate.AutoIncrementTracker
+	nextAutoIncrementValue map[string]uint64
 
-	setter SessionRootSetter
+	setter         dsess.SessionRootSetter
+	errEncountered error
 }
 
-var _ TableWriter = &nomsTableWriter{}
+func (te *nomsTableWriter) PreciseMatch() bool {
+	return true
+}
+
+var _ dsess.TableWriter = &nomsTableWriter{}
+var _ AutoIncrementGetter = &nomsTableWriter{}
 
 func (te *nomsTableWriter) duplicateKeyErrFunc(keyString, indexName string, k, v types.Tuple, isPk bool) error {
 	oldRow, err := te.kvToSQLRow.ConvertKVTuplesToSqlRow(k, v)
@@ -77,18 +77,26 @@ func (te *nomsTableWriter) duplicateKeyErrFunc(keyString, indexName string, k, v
 }
 
 func (te *nomsTableWriter) Insert(ctx *sql.Context, sqlRow sql.Row) error {
-	if !schema.IsKeyless(te.sch) {
-		k, v, tagToVal, err := sqlutil.DoltKeyValueAndMappingFromSqlRow(ctx, te.vrw, sqlRow, te.sch)
-		if err != nil {
-			return err
-		}
-		return te.tableEditor.InsertKeyVal(ctx, k, v, tagToVal, te.duplicateKeyErrFunc)
+	if schema.IsKeyless(te.sch) {
+		return te.keylessInsert(ctx, sqlRow)
 	}
+	return te.keyedInsert(ctx, sqlRow)
+}
+
+func (te *nomsTableWriter) keylessInsert(ctx *sql.Context, sqlRow sql.Row) error {
 	dRow, err := sqlutil.SqlRowToDoltRow(ctx, te.vrw, sqlRow, te.sch)
 	if err != nil {
 		return err
 	}
 	return te.tableEditor.InsertRow(ctx, dRow, te.duplicateKeyErrFunc)
+}
+
+func (te *nomsTableWriter) keyedInsert(ctx *sql.Context, sqlRow sql.Row) error {
+	k, v, tagToVal, err := sqlutil.DoltKeyValueAndMappingFromSqlRow(ctx, te.vrw, sqlRow, te.sch)
+	if err != nil {
+		return err
+	}
+	return te.tableEditor.InsertKeyVal(ctx, k, v, tagToVal, te.duplicateKeyErrFunc)
 }
 
 func (te *nomsTableWriter) Delete(ctx *sql.Context, sqlRow sql.Row) error {
@@ -125,43 +133,60 @@ func (te *nomsTableWriter) GetNextAutoIncrementValue(ctx *sql.Context, insertVal
 }
 
 func (te *nomsTableWriter) SetAutoIncrementValue(ctx *sql.Context, val uint64) error {
-	seq, err := globalstate.CoerceAutoIncrementValue(val)
+	seq, err := te.autoInc.CoerceAutoIncrementValue(val)
 	if err != nil {
 		return err
 	}
-	te.autoInc.Set(te.tableName, seq)
-	te.tableEditor.MarkDirty()
+
+	te.nextAutoIncrementValue = make(map[string]uint64)
+	te.nextAutoIncrementValue[te.tableName] = seq
 
 	return te.flush(ctx)
 }
 
-func (te *nomsTableWriter) WithIndexLookup(lookup sql.IndexLookup) sql.Table {
-	idx := index.IndexFromIndexLookup(lookup)
-	return nomsFkIndexer{
+func (te *nomsTableWriter) AcquireAutoIncrementLock(ctx *sql.Context) (func(), error) {
+	return te.autoInc.AcquireTableLock(ctx, te.tableName)
+}
+
+func (te *nomsTableWriter) IndexedAccess(i sql.IndexLookup) sql.IndexedTable {
+	idx := index.DoltIndexFromSqlIndex(i.Index)
+	return &nomsFkIndexer{
 		writer:  te,
 		idxName: idx.ID(),
 		idxSch:  idx.IndexSchema(),
-		nrr:     index.ReadRangesFromIndexLookup(lookup)[0],
 	}
+}
+
+func (te *nomsTableWriter) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
+	indexes := ctx.GetIndexRegistry().IndexesByTable(te.dbName, te.tableName)
+	ret := make([]sql.Index, len(indexes))
+	for i := range indexes {
+		ret[i] = indexes[i]
+	}
+	return ret, nil
 }
 
 // Close implements Closer
 func (te *nomsTableWriter) Close(ctx *sql.Context) error {
-	// If we're running in batched mode, don'tbl flush the edits until explicitly told to do so
-	if te.batched {
-		return nil
+	if te.errEncountered == nil {
+		return te.flush(ctx)
 	}
-
-	return te.flush(ctx)
+	return nil
 }
 
 // StatementBegin implements the interface sql.TableEditor.
 func (te *nomsTableWriter) StatementBegin(ctx *sql.Context) {
+	// Table writers are reused in a session, which means we need to reset the error state resulting from previous
+	// errors on every new statement.
+	te.errEncountered = nil
 	te.tableEditor.StatementStarted(ctx)
 }
 
 // DiscardChanges implements the interface sql.TableEditor.
 func (te *nomsTableWriter) DiscardChanges(ctx *sql.Context, errorEncountered error) error {
+	if _, ignored := errorEncountered.(sql.IgnorableError); !ignored {
+		te.errEncountered = errorEncountered
+	}
 	return te.tableEditor.StatementFinished(ctx, true)
 }
 
@@ -171,21 +196,9 @@ func (te *nomsTableWriter) StatementComplete(ctx *sql.Context) error {
 }
 
 func (te *nomsTableWriter) flush(ctx *sql.Context) error {
-	ws, err := te.sess.Flush(ctx)
+	ws, err := te.flusher.Flush(ctx)
 	if err != nil {
 		return err
 	}
 	return te.setter(ctx, te.dbName, ws.WorkingRoot())
-}
-
-func autoIncrementColFromSchema(sch schema.Schema) schema.Column {
-	var autoCol schema.Column
-	_ = sch.GetAllCols().Iter(func(tag uint64, col schema.Column) (stop bool, err error) {
-		if col.AutoIncrement {
-			autoCol = col
-			stop = true
-		}
-		return
-	})
-	return autoCol
 }

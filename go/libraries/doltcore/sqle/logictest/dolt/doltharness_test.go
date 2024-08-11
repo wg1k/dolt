@@ -73,25 +73,25 @@ func TestDoltHarness(t *testing.T) {
 
 	queryTests := []queryTest{
 		{
-			query:      "SELECT a,c,e FROM t1;",
+			query:      "SELECT a,c,e FROM t1 ORDER BY 1, 2, 3;",
 			expErr:     nil,
 			expSchema:  "III",
 			expResults: []string{"104", "102", "NULL", "107", "106", "109"},
 		},
 		{
-			query:      "SELECT b,d FROM t1;",
+			query:      "SELECT b,d FROM t1 ORDER BY 1, 2;",
 			expErr:     nil,
 			expSchema:  "II",
 			expResults: []string{"NULL", "101", "105", "108"},
 		},
 		{
-			query:      "SELECT * FROM t1 WHERE d < 107;",
+			query:      "SELECT * FROM t1 WHERE d < 107 ORDER BY 1, 2, 3, 4;",
 			expErr:     nil,
 			expSchema:  "IIIII",
 			expResults: []string{"104", "NULL", "102", "101", "NULL"},
 		},
 		{
-			query:      "SELECT * FROM t1 WHERE d > 102;",
+			query:      "SELECT * FROM t1 WHERE d > 102 ORDER BY 1, 2, 3, 4;",
 			expErr:     nil,
 			expSchema:  "IIIII",
 			expResults: []string{"107", "105", "106", "108", "109"},
@@ -100,6 +100,7 @@ func TestDoltHarness(t *testing.T) {
 
 	fs := filesys.NewInMemFS([]string{}, nil, tmp)
 	dEnv := createTestEnvWithFS(fs, wd)
+	defer dEnv.DoltDB.Close()
 
 	// We run this several times in a row to make sure that the same dolt env can be used in multiple setup / teardown
 	// cycles
@@ -108,6 +109,7 @@ func TestDoltHarness(t *testing.T) {
 			h := &DoltHarness{}
 			err := innerInit(h, dEnv)
 			assert.Equal(t, nil, err)
+			defer h.Close()
 
 			// setup repo with statements
 			for _, test := range statementTests {

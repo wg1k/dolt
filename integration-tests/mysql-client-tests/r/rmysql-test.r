@@ -17,33 +17,43 @@ queries = list("create table test (pk int, value int, primary key(pk))",
                "select * from test")
 
 responses = list(NULL,
-                 data.frame(Field = c("pk", "value"), Type = c("int", "int"), Null = c("NO", "YES"), Key = c("PRI", ""), Default = c("", ""), Extra = c("", ""), stringsAsFactors = FALSE),
+                 data.frame(
+                    Field = c("pk", "value"),
+                    Type = c("int", "int"),
+                    Null = c("NO", "YES"),
+                    Key = c("PRI", ""),
+                    Default = c(NA_character_, NA_character_),
+                    Extra = c("", ""), stringsAsFactors = FALSE),
                  NULL,
-                 data.frame(pk = c(0), value = c(0), stringsAsFactors = FALSE))
+                 data.frame(pk = c(as.integer(0)), value = c(as.integer(0)), stringsAsFactors = FALSE))
 
 for(i in 1:length(queries)) {
     q = queries[[i]]
     want = responses[[i]]
     if (!is.null(want)) {
         got <- dbGetQuery(conn, q)
-        if (!isTRUE(all.equal(want, got))) {
-            print(q)
-            print(want)
-            print(got)
-            quit(1)
+        if (length(want) == length(got)) {
+            for (j in 1:length(want)) {
+                if (!identical(want[[j]], got[[j]])) {
+                    print(q)
+                    print(c("want:", want[[j]], "type: ", typeof(want[[j]])))
+                    print(c("got:", got[[j]], "type: ", typeof(got[[j]])))
+                    quit("no", 1)
+                }
+            }
         }
     } else {
         dbExecute(conn, q)
     }
 }
 
-dolt_queries = list("SELECT DOLT_ADD('-A')",
-                    "select dolt_commit('-m', 'my commit')",
-                    "select dolt_checkout('-b', 'mybranch')",
+dolt_queries = list("call DOLT_ADD('-A')",
+                    "call dolt_commit('-m', 'my commit')",
+                    "call dolt_checkout('-b', 'mybranch')",
                     "insert into test (pk, `value`) values (1,1)",
-                     "select dolt_commit('-a', '-m', 'my commit2')",
-                     "select dolt_checkout('main')",
-                     "select dolt_merge('mybranch')")
+                     "call dolt_commit('-a', '-m', 'my commit2')",
+                     "call dolt_checkout('main')",
+                     "call dolt_merge('mybranch')")
 
 for(i in 1:length(dolt_queries)) {
     q = dolt_queries[[i]]

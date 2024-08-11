@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go/common"
 	"github.com/xitongsys/parquet-go/reader"
@@ -28,6 +29,8 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -42,6 +45,8 @@ type ParquetReader struct {
 	fileData       map[string][]interface{}
 	columnName     []string
 }
+
+var _ table.SqlTableReader = (*ParquetReader)(nil)
 
 // OpenParquetReader opens a reader at a given path within local filesystem.
 func OpenParquetReader(vrw types.ValueReadWriter, path string, sch schema.Schema) (*ParquetReader, error) {
@@ -70,7 +75,7 @@ func NewParquetReader(vrw types.ValueReadWriter, fr source.ParquetFile, sche sch
 	for _, col := range columns {
 		colData, _, _, cErr := pr.ReadColumnByPath(common.ReformPathStr(fmt.Sprintf("parquet_go_root.%s", col.Name)), num)
 		if cErr != nil {
-			return nil, err
+			return nil, fmt.Errorf("cannot read column: %s", cErr.Error())
 		}
 		data[col.Name] = colData
 		colName = append(colName, col.Name)
@@ -102,11 +107,11 @@ func (pr *ParquetReader) ReadSqlRow(ctx context.Context) (sql.Row, error) {
 	allCols.Iter(func(tag uint64, col schema.Column) (stop bool, err error) {
 		val := pr.fileData[col.Name][pr.rowReadCounter]
 		if val != nil {
-			sqlType := col.TypeInfo.ToSqlType()
-			if _, ok := sqlType.(sql.DatetimeType); ok {
-				val = time.Unix(val.(int64), 0)
-			} else if _, ok := sqlType.(sql.TimeType); ok {
-				val = sql.Time.Unmarshal(val.(int64))
+			switch col.TypeInfo.GetTypeIdentifier() {
+			case typeinfo.DatetimeTypeIdentifier:
+				val = time.UnixMicro(val.(int64))
+			case typeinfo.TimeTypeIdentifier:
+				val = gmstypes.Timespan(time.Duration(val.(int64)).Microseconds())
 			}
 		}
 

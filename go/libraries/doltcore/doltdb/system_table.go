@@ -20,9 +20,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dolthub/dolt/go/libraries/utils/funcitr"
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/utils/funcitr"
 	"github.com/dolthub/dolt/go/libraries/utils/set"
+	"github.com/dolthub/dolt/go/store/types"
 )
 
 const (
@@ -32,21 +35,57 @@ const (
 
 var ErrSystemTableCannotBeModified = errors.New("system tables cannot be dropped or altered")
 
+var OldDocsSchema = schema.MustSchemaFromCols(schema.NewColCollection(
+	schema.NewColumn(DocPkColumnName, schema.DocNameTag, types.StringKind, true, schema.NotNullConstraint{}),
+	schema.NewColumn(DocTextColumnName, schema.DocTextTag, types.StringKind, false),
+))
+
+var DocsSchema schema.Schema
+
+func init() {
+	docTextCol, err := schema.NewColumnWithTypeInfo(DocTextColumnName, schema.DocTextTag, typeinfo.LongTextType, false, "", false, "")
+	if err != nil {
+		panic(err)
+	}
+	doltDocsColumns := schema.NewColCollection(
+		schema.NewColumn(DocPkColumnName, schema.DocNameTag, types.StringKind, true, schema.NotNullConstraint{}),
+		docTextCol,
+	)
+	DocsSchema = schema.MustSchemaFromCols(doltDocsColumns)
+}
+
 // HasDoltPrefix returns a boolean whether or not the provided string is prefixed with the DoltNamespace. Users should
 // not be able to create tables in this reserved namespace.
 func HasDoltPrefix(s string) bool {
 	return strings.HasPrefix(strings.ToLower(s), DoltNamespace)
 }
 
+// IsFullTextTable returns a boolean stating whether the given table is one of the pseudo-index tables used by Full-Text
+// indexes.
+// TODO: Schema name
+func IsFullTextTable(name string) bool {
+	return HasDoltPrefix(name) && (strings.HasSuffix(name, "_fts_config") ||
+		strings.HasSuffix(name, "_fts_position") ||
+		strings.HasSuffix(name, "_fts_doc_count") ||
+		strings.HasSuffix(name, "_fts_global_count") ||
+		strings.HasSuffix(name, "_fts_row_count"))
+}
+
 // IsReadOnlySystemTable returns whether the table name given is a system table that should not be included in command line
 // output (e.g. dolt status) by default.
 func IsReadOnlySystemTable(name string) bool {
-	return HasDoltPrefix(name) && !set.NewStrSet(writeableSystemTables).Contains(name)
+	return HasDoltPrefix(name) && !set.NewStrSet(writeableSystemTables).Contains(name) && !IsFullTextTable(name)
+}
+
+// IsNonAlterableSystemTable returns whether the table name given is a system table that cannot be dropped or altered
+// by the user.
+func IsNonAlterableSystemTable(name string) bool {
+	return (IsReadOnlySystemTable(name) && !IsFullTextTable(name)) || strings.ToLower(name) == SchemasTableName
 }
 
 // GetNonSystemTableNames gets non-system table names
-func GetNonSystemTableNames(ctx context.Context, root *RootValue) ([]string, error) {
-	tn, err := root.GetTableNames(ctx)
+func GetNonSystemTableNames(ctx context.Context, root RootValue) ([]string, error) {
+	tn, err := root.GetTableNames(ctx, DefaultSchemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +97,7 @@ func GetNonSystemTableNames(ctx context.Context, root *RootValue) ([]string, err
 }
 
 // GetSystemTableNames gets system table names
-func GetSystemTableNames(ctx context.Context, root *RootValue) ([]string, error) {
+func GetSystemTableNames(ctx context.Context, root RootValue) ([]string, error) {
 	p, err := GetPersistedSystemTables(ctx, root)
 	if err != nil {
 		return nil, err
@@ -76,8 +115,8 @@ func GetSystemTableNames(ctx context.Context, root *RootValue) ([]string, error)
 }
 
 // GetPersistedSystemTables returns table names of all persisted system tables.
-func GetPersistedSystemTables(ctx context.Context, root *RootValue) ([]string, error) {
-	tn, err := root.GetTableNames(ctx)
+func GetPersistedSystemTables(ctx context.Context, root RootValue) ([]string, error) {
+	tn, err := root.GetTableNames(ctx, DefaultSchemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -86,10 +125,10 @@ func GetPersistedSystemTables(ctx context.Context, root *RootValue) ([]string, e
 }
 
 // GetGeneratedSystemTables returns table names of all generated system tables.
-func GetGeneratedSystemTables(ctx context.Context, root *RootValue) ([]string, error) {
+func GetGeneratedSystemTables(ctx context.Context, root RootValue) ([]string, error) {
 	s := set.NewStrSet(generatedSystemTables)
 
-	tn, err := root.GetTableNames(ctx)
+	tn, err := root.GetTableNames(ctx, DefaultSchemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +141,7 @@ func GetGeneratedSystemTables(ctx context.Context, root *RootValue) ([]string, e
 }
 
 // GetAllTableNames returns table names for all persisted and generated tables.
-func GetAllTableNames(ctx context.Context, root *RootValue) ([]string, error) {
+func GetAllTableNames(ctx context.Context, root RootValue) ([]string, error) {
 	n, err := GetNonSystemTableNames(ctx, root)
 	if err != nil {
 		return nil, err
@@ -118,9 +157,12 @@ func GetAllTableNames(ctx context.Context, root *RootValue) ([]string, error) {
 // for the purposes of the dolt command line. These tables cannot be created or altered explicitly, but can be updated
 // like normal SQL tables.
 var writeableSystemTables = []string{
+	DocTableName,
 	DoltQueryCatalogTableName,
 	SchemasTableName,
 	ProceduresTableName,
+	IgnoreTableName,
+	RebaseTableName,
 }
 
 var persistedSystemTables = []string{
@@ -128,10 +170,12 @@ var persistedSystemTables = []string{
 	DoltQueryCatalogTableName,
 	SchemasTableName,
 	ProceduresTableName,
+	IgnoreTableName,
 }
 
 var generatedSystemTables = []string{
 	BranchesTableName,
+	RemoteBranchesTableName,
 	LogTableName,
 	TableOfTablesInConflictName,
 	TableOfTablesWithViolationsName,
@@ -152,6 +196,13 @@ var generatedSystemTablePrefixes = []string{
 	DoltConfTablePrefix,
 	DoltConstViolTablePrefix,
 }
+
+const (
+	// LicenseDoc is the key for accessing the license within the docs table
+	LicenseDoc = "LICENSE.md"
+	// ReadmeDoc is the key for accessing the readme within the docs table
+	ReadmeDoc = "README.md"
+)
 
 const (
 	// DocTableName is the name of the dolt table containing documents such as the license and readme
@@ -185,19 +236,19 @@ const (
 const (
 	// SchemasTableName is the name of the dolt schema fragment table
 	SchemasTableName = "dolt_schemas"
-	// SchemasTablesIdCol is an incrementing integer that represents the insertion index.
-	SchemasTablesIdCol = "id"
-	// Currently: `view` or `trigger`.
+	// SchemasTablesTypeCol is the name of the column that stores the type of a schema fragment  in the dolt_schemas table
 	SchemasTablesTypeCol = "type"
-	// The name of the database entity.
+	// SchemasTablesNameCol The name of the column that stores the name of a schema fragment in the dolt_schemas table
 	SchemasTablesNameCol = "name"
-	// The schema fragment associated with the database entity.
-	// For example, the SELECT statement for a CREATE VIEW.
+	// SchemasTablesFragmentCol The name of the column that stores the SQL fragment of a schema element in the
+	// dolt_schemas table
 	SchemasTablesFragmentCol = "fragment"
-	// The extra information for schema; currently contains creation time for triggers and views
+	// SchemasTablesExtraCol The name of the column that stores extra information about a schema element in the
+	// dolt_schemas table
 	SchemasTablesExtraCol = "extra"
-	// The name of the index that is on the table.
-	SchemasTablesIndexName = "fragment_name"
+	// SchemasTablesSqlModeCol is the name of the column that stores the SQL_MODE string used when this fragment
+	// was originally defined. Mode settings, such as ANSI_QUOTES, are needed to correctly parse the fragment.
+	SchemasTablesSqlModeCol = "sql_mode"
 )
 
 const (
@@ -222,14 +273,23 @@ const (
 	// DiffTableName is the name of the table with a map of commits to tables changed
 	DiffTableName = "dolt_diff"
 
+	// ColumnDiffTableName is the name of the table with a map of commits to tables and columns changed
+	ColumnDiffTableName = "dolt_column_diff"
+
 	// TableOfTablesInConflictName is the conflicts system table name
 	TableOfTablesInConflictName = "dolt_conflicts"
 
 	// TableOfTablesWithViolationsName is the constraint violations system table name
 	TableOfTablesWithViolationsName = "dolt_constraint_violations"
 
+	// SchemaConflictsTableName is the schema conflicts system table name
+	SchemaConflictsTableName = "dolt_schema_conflicts"
+
 	// BranchesTableName is the branches system table name
 	BranchesTableName = "dolt_branches"
+
+	// RemoteBranchesTableName is the all-branches system table name
+	RemoteBranchesTableName = "dolt_remote_branches"
 
 	// RemotesTableName is the remotes system table name
 	RemotesTableName = "dolt_remotes"
@@ -242,6 +302,20 @@ const (
 
 	// StatusTableName is the status system table name.
 	StatusTableName = "dolt_status"
+
+	// MergeStatusTableName is the merge status system table name.
+	MergeStatusTableName = "dolt_merge_status"
+
+	// TagsTableName is the tags table name
+	TagsTableName = "dolt_tags"
+
+	IgnoreTableName = "dolt_ignore"
+
+	// RebaseTableName is the rebase system table name.
+	RebaseTableName = "dolt_rebase"
+
+	// StatisticsTableName is the statistics system table name
+	StatisticsTableName = "dolt_statistics"
 )
 
 const (
@@ -255,4 +329,7 @@ const (
 	ProceduresTableCreatedAtCol = "created_at"
 	// ProceduresTableModifiedAtCol is the time that the stored procedure was last modified, in UTC.
 	ProceduresTableModifiedAtCol = "modified_at"
+	// ProceduresTableSqlModeCol is the name of the column that stores the SQL_MODE string used when this fragment
+	// was originally defined. Mode settings, such as ANSI_QUOTES, are needed to correctly parse the fragment.
+	ProceduresTableSqlModeCol = "sql_mode"
 )

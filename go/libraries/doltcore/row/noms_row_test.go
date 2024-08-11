@@ -66,7 +66,7 @@ var sch, _ = schema.SchemaFromPKAndNonPKCols(testKeyColColl, testNonKeyColColl)
 var index schema.Index
 
 func init() {
-	index, _ = sch.Indexes().AddIndexByColTags(indexName, []uint64{ageColTag}, schema.IndexProperties{IsUnique: false, Comment: ""})
+	index, _ = sch.Indexes().AddIndexByColTags(indexName, []uint64{ageColTag}, nil, schema.IndexProperties{IsUnique: false, Comment: ""})
 }
 
 func newTestRow() (Row, error) {
@@ -405,6 +405,52 @@ func TestReduceToIndex(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, AreEqual(expectedIndex, indexRow, index.Schema()))
 	}
+}
+
+func TestFromNomsGeom(t *testing.T) {
+	// Declare values
+	pkColName := "pk"
+	geomColName := "g"
+	pkTag := uint64(0)
+	geomTag := uint64(1)
+	pkVal := types.Uint(0)
+	pointVal := types.Point{SRID: 0, X: 1, Y: 2}
+
+	// Create schema
+	testGeomKeyCols := []schema.Column{
+		{Name: pkColName, Tag: pkTag, Kind: types.UintKind, IsPartOfPK: true, TypeInfo: typeinfo.Uint64Type, Constraints: []schema.ColConstraint{schema.NotNullConstraint{}}},
+	}
+	testGeomCols := []schema.Column{
+		{Name: geomColName, Tag: geomTag, Kind: types.GeometryKind, IsPartOfPK: false, TypeInfo: typeinfo.GeometryType, Constraints: nil},
+	}
+	testGeomKeyColColl := schema.NewColCollection(testGeomKeyCols...)
+	testGeomNonKeyColColl := schema.NewColCollection(testGeomCols...)
+	schGeom, _ := schema.SchemaFromPKAndNonPKCols(testGeomKeyColColl, testGeomNonKeyColColl)
+
+	// New() will faithfully return null values in the row, but such columns won't ever be set when loaded from Noms.
+	// So we use a row here with no null values set to avoid this inconsistency.
+	expectedRow, err := New(types.Format_Default, schGeom, TaggedValues{
+		pkTag:   pkVal,
+		geomTag: pointVal,
+	})
+	require.NoError(t, err)
+
+	t.Run("all values specified geometry", func(t *testing.T) {
+		keys, err := types.NewTuple(types.Format_Default,
+			types.Uint(0), pkVal,
+		)
+		require.NoError(t, err)
+
+		vals, err := types.NewTuple(types.Format_Default,
+			types.Uint(1), pointVal,
+		)
+
+		require.NoError(t, err)
+		r, err := FromNoms(schGeom, keys, vals)
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedRow, r)
+	})
 }
 
 func reduceToIndex(idx schema.Index, r Row) (Row, error) {

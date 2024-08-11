@@ -15,10 +15,9 @@
 package doltdb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
-
-	goerrors "gopkg.in/src-d/go-errors.v1"
 )
 
 var ErrInvBranchName = errors.New("not a valid user branch name")
@@ -31,10 +30,8 @@ var ErrInvalidBranchOrHash = errors.New("string is not a valid branch or hash")
 var ErrInvalidHash = errors.New("string is not a valid hash")
 
 var ErrFoundHashNotACommit = errors.New("the value retrieved for this hash is not a commit")
-
 var ErrHashNotFound = errors.New("could not find a value for this hash")
 var ErrBranchNotFound = errors.New("branch not found")
-var ErrBranchNotFoundInfo = goerrors.NewKind("branch not found: %v")
 var ErrTagNotFound = errors.New("tag not found")
 var ErrWorkingSetNotFound = errors.New("working set not found")
 var ErrWorkspaceNotFound = errors.New("workspace not found")
@@ -45,13 +42,15 @@ var ErrAlreadyOnWorkspace = errors.New("Already on workspace")
 
 var ErrNomsIO = errors.New("error reading from or writing to noms")
 
-var ErrUpToDate = errors.New("up to date")
-var ErrIsAhead = errors.New("current fast forward from a to b. a is ahead of b already")
+// ErrUpToDate is returned when a merge is up-to-date. Not actually an error, and we do use this message in non-error contexts.
+var ErrUpToDate = errors.New("Everything up-to-date")
+var ErrIsAhead = errors.New("cannot fast forward from a to b. a is ahead of b already")
 var ErrIsBehind = errors.New("cannot reverse from b to a. b is a is behind a already")
 
-var ErrUnresolvedConflicts = errors.New("merge has unresolved conflicts. please use the dolt_conflicts table to resolve")
-var ErrUnresolvedConstraintViolations = errors.New("merge has unresolved constraint violations. please use the dolt_constraint_violations table to resolve")
+var ErrUnresolvedConflictsOrViolations = errors.New("merge has unresolved conflicts or constraint violations")
 var ErrMergeActive = errors.New("merging is not possible because you have not committed an active merge")
+
+var ErrOperationNotSupportedInDetachedHead = errors.New("this operation is not supported while in a detached head state")
 
 type ErrClientOutOfDate struct {
 	RepoVer   FeatureVersion
@@ -73,21 +72,15 @@ func IsInvalidFormatErr(err error) bool {
 }
 
 func IsNotFoundErr(err error) bool {
-	switch err {
-	case ErrHashNotFound, ErrBranchNotFound, ErrTableNotFound:
-		return true
-	default:
-		return false
-	}
+	return errors.Is(err, ErrHashNotFound) ||
+		errors.Is(err, ErrBranchNotFound) ||
+		errors.Is(err, ErrTableNotFound)
 }
 
 func IsNotACommit(err error) bool {
-	switch err {
-	case ErrHashNotFound, ErrBranchNotFound, ErrFoundHashNotACommit:
-		return true
-	default:
-		return false
-	}
+	return errors.Is(err, ErrHashNotFound) ||
+		errors.Is(err, ErrBranchNotFound) ||
+		errors.Is(err, ErrFoundHashNotACommit)
 }
 
 type RootType int
@@ -179,4 +172,38 @@ func GetUnreachableRootCause(err error) error {
 	}
 
 	return rvu.Cause
+}
+
+// DoltIgnoreConflictError is an error that is returned when the user attempts to stage a table that matches conflicting dolt_ignore patterns
+type DoltIgnoreConflictError struct {
+	Table         TableName
+	TruePatterns  []string
+	FalsePatterns []string
+}
+
+func (dc DoltIgnoreConflictError) Error() string {
+	var buffer bytes.Buffer
+	buffer.WriteString("the table ")
+	buffer.WriteString(dc.Table.Name)
+	buffer.WriteString(" matches conflicting patterns in dolt_ignore:")
+
+	for _, pattern := range dc.TruePatterns {
+		buffer.WriteString("\nignored:     ")
+		buffer.WriteString(pattern)
+	}
+
+	for _, pattern := range dc.FalsePatterns {
+		buffer.WriteString("\nnot ignored: ")
+		buffer.WriteString(pattern)
+	}
+
+	return buffer.String()
+}
+
+func AsDoltIgnoreInConflict(err error) *DoltIgnoreConflictError {
+	di, ok := err.(DoltIgnoreConflictError)
+	if ok {
+		return &di
+	}
+	return nil
 }

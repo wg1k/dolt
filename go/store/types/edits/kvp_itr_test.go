@@ -25,8 +25,8 @@ import (
 )
 
 // IsInOrder iterates over every value and validates that they are returned in key order.  This is intended for testing.
-func IsInOrder(itr types.EditProvider) (bool, int, error) {
-	prev, err := itr.Next()
+func IsInOrder(ctx context.Context, vr types.ValueReader, itr types.EditProvider) (bool, int, error) {
+	prev, err := itr.Next(ctx)
 
 	if err == io.EOF {
 		return true, 0, nil
@@ -37,7 +37,7 @@ func IsInOrder(itr types.EditProvider) (bool, int, error) {
 	count := 1
 
 	for {
-		curr, err := itr.Next()
+		curr, err := itr.Next(ctx)
 
 		if err == io.EOF {
 			return true, count, nil
@@ -45,7 +45,7 @@ func IsInOrder(itr types.EditProvider) (bool, int, error) {
 			return false, 0, err
 		}
 
-		isLess, err := curr.Key.Less(types.Format_7_18, prev.Key)
+		isLess, err := curr.Key.Less(ctx, vr.Format(), prev.Key)
 
 		if err != nil {
 			return false, 0, err
@@ -62,6 +62,8 @@ func IsInOrder(itr types.EditProvider) (bool, int, error) {
 
 func TestKVPSliceSort(t *testing.T) {
 	ctx := context.Background()
+
+	vrw := types.NewMemoryValueStore()
 
 	tests := []struct {
 		kvps      types.KVPSlice
@@ -84,9 +86,9 @@ func TestKVPSliceSort(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		_, _, err := IsInOrder(NewItr(types.Format_7_18, NewKVPCollection(types.Format_7_18, test.kvps)))
+		_, _, err := IsInOrder(ctx, vrw, NewItr(vrw, NewKVPCollection(vrw, test.kvps)))
 		assert.NoError(t, err)
-		err = types.SortWithErroringLess(types.KVPSort{Values: test.kvps, NBF: types.Format_7_18})
+		err = types.SortWithErroringLess(ctx, vrw.Format(), types.KVPSort{Values: test.kvps})
 		assert.NoError(t, err)
 
 		if len(test.kvps) != len(test.expSorted) {

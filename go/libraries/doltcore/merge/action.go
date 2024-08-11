@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
+	"github.com/dolthub/go-mysql-server/sql"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
@@ -28,294 +28,185 @@ import (
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
-var ErrFailedToDetermineUnstagedDocs = errors.New("failed to determine unstaged docs")
-var ErrFailedToReadDatabase = errors.New("failed to read database")
-var ErrMergeFailedToUpdateDocs = errors.New("failed to update docs to the new working root")
-var ErrMergeFailedToUpdateRepoState = errors.New("unable to execute repo state update")
 var ErrFailedToDetermineMergeability = errors.New("failed to determine mergeability")
 
 type MergeSpec struct {
-	HeadH        hash.Hash
-	MergeH       hash.Hash
-	HeadC        *doltdb.Commit
-	MergeC       *doltdb.Commit
-	TblNames     []string
-	WorkingDiffs map[string]hash.Hash
-	Squash       bool
-	Msg          string
-	Noff         bool
-	Force        bool
-	AllowEmpty   bool
-	Email        string
-	Name         string
-	Date         time.Time
+	HeadH           hash.Hash
+	MergeH          hash.Hash
+	HeadC           *doltdb.Commit
+	MergeC          *doltdb.Commit
+	MergeCSpecStr   string
+	StompedTblNames []string
+	WorkingDiffs    map[string]hash.Hash
+	Squash          bool
+	NoFF            bool
+	NoCommit        bool
+	NoEdit          bool
+	Force           bool
+	Email           string
+	Name            string
+	Date            time.Time
 }
 
-func NewMergeSpec(ctx context.Context, rsr env.RepoStateReader, ddb *doltdb.DoltDB, roots doltdb.Roots, name, email, msg string, commitSpecStr string, squash bool, noff bool, force bool, date time.Time) (*MergeSpec, bool, error) {
-	cs1, err := doltdb.NewCommitSpec("HEAD")
-	if err != nil {
-		return nil, false, err
+type MergeSpecOpt func(*MergeSpec)
+
+func WithNoFF(noFF bool) MergeSpecOpt {
+	return func(ms *MergeSpec) {
+		ms.NoFF = noFF
 	}
-
-	cm1, err := ddb.Resolve(context.TODO(), cs1, rsr.CWBHeadRef())
-	if err != nil {
-		return nil, false, err
-	}
-
-	cs2, err := doltdb.NewCommitSpec(commitSpecStr)
-	if err != nil {
-		return nil, false, err
-	}
-
-	cm2, err := ddb.Resolve(context.TODO(), cs2, rsr.CWBHeadRef())
-	if err != nil {
-		return nil, false, err
-	}
-
-	h1, err := cm1.HashOf()
-	if err != nil {
-		return nil, false, err
-	}
-
-	h2, err := cm2.HashOf()
-	if err != nil {
-		return nil, false, err
-
-	}
-
-	tblNames, workingDiffs, err := MergeWouldStompChanges(ctx, roots, cm2)
-	if err != nil {
-		return nil, false, fmt.Errorf("%w; %s", ErrFailedToDetermineMergeability, err.Error())
-	}
-
-	return &MergeSpec{
-		HeadH:        h1,
-		MergeH:       h2,
-		HeadC:        cm1,
-		MergeC:       cm2,
-		TblNames:     tblNames,
-		WorkingDiffs: workingDiffs,
-		Squash:       squash,
-		Msg:          msg,
-		Noff:         noff,
-		Force:        force,
-		Email:        email,
-		Name:         name,
-		Date:         date,
-	}, true, nil
 }
 
-// TODO forcing a commit with a constrain violation should warn users that subsequest
-//      FF merges will not surface constraint violations on their own; constraint verify --all
-//      is required to reify violations.
-func MergeCommitSpec(ctx context.Context, dEnv *env.DoltEnv, spec *MergeSpec) (map[string]*MergeStats, error) {
-	if ok, err := spec.HeadC.CanFastForwardTo(ctx, spec.MergeC); err != nil && !errors.Is(err, doltdb.ErrUpToDate) {
+func WithNoCommit(noCommit bool) MergeSpecOpt {
+	return func(ms *MergeSpec) {
+		ms.NoCommit = noCommit
+	}
+}
+
+func WithNoEdit(noEdit bool) MergeSpecOpt {
+	return func(ms *MergeSpec) {
+		ms.NoEdit = noEdit
+	}
+}
+
+func WithForce(force bool) MergeSpecOpt {
+	return func(ms *MergeSpec) {
+		ms.Force = force
+	}
+}
+
+func WithSquash(squash bool) MergeSpecOpt {
+	return func(ms *MergeSpec) {
+		ms.Squash = squash
+	}
+}
+
+// NewMergeSpec returns a MergeSpec with the arguments provided.
+func NewMergeSpec(
+	ctx context.Context,
+	rsr env.RepoStateReader,
+	ddb *doltdb.DoltDB,
+	roots doltdb.Roots,
+	name, email, commitSpecStr string,
+	date time.Time,
+	opts ...MergeSpecOpt,
+) (*MergeSpec, error) {
+	headCS, err := doltdb.NewCommitSpec("HEAD")
+	if err != nil {
 		return nil, err
-	} else if ok {
-		if spec.Noff {
-			return ExecNoFFMerge(ctx, dEnv, spec)
-		}
-		return nil, ExecuteFFMerge(ctx, dEnv, spec)
 	}
-	return ExecuteMerge(ctx, dEnv, spec)
+
+	headRef, err := rsr.CWBHeadRef()
+	if err != nil {
+		return nil, err
+	}
+
+	optCmt, err := ddb.Resolve(ctx, headCS, headRef)
+	if err != nil {
+		return nil, err
+	}
+	headCM, ok := optCmt.ToCommit()
+	if !ok {
+		// HEAD should always resolve to a commit, so this should never happen.
+		return nil, doltdb.ErrGhostCommitRuntimeFailure
+	}
+
+	mergeCS, err := doltdb.NewCommitSpec(commitSpecStr)
+	if err != nil {
+		return nil, err
+	}
+
+	optCmt, err = ddb.Resolve(ctx, mergeCS, headRef)
+	if err != nil {
+		return nil, err
+	}
+	mergeCM, ok := optCmt.ToCommit()
+	if !ok {
+		return nil, doltdb.ErrGhostCommitEncountered
+	}
+
+	headH, err := headCM.HashOf()
+	if err != nil {
+		return nil, err
+	}
+
+	mergeH, err := mergeCM.HashOf()
+	if err != nil {
+		return nil, err
+
+	}
+
+	stompedTblNames, workingDiffs, err := MergeWouldStompChanges(ctx, roots, mergeCM)
+	if err != nil {
+		return nil, fmt.Errorf("%w; %s", ErrFailedToDetermineMergeability, err.Error())
+	}
+
+	spec := &MergeSpec{
+		HeadH:           headH,
+		MergeH:          mergeH,
+		HeadC:           headCM,
+		MergeCSpecStr:   commitSpecStr,
+		MergeC:          mergeCM,
+		StompedTblNames: stompedTblNames,
+		WorkingDiffs:    workingDiffs,
+		Email:           email,
+		Name:            name,
+		Date:            date,
+	}
+
+	for _, opt := range opts {
+		opt(spec)
+	}
+
+	return spec, nil
 }
 
-func ExecNoFFMerge(ctx context.Context, dEnv *env.DoltEnv, spec *MergeSpec) (map[string]*MergeStats, error) {
-	mergedRoot, err := spec.MergeC.GetRootValue(ctx)
+// AbortMerge returns a new WorkingSet instance, with the active merge aborted, by clearing and
+// resetting the merge state in |workingSet| and using |roots| to identify the existing tables
+// and reset them, excluding any ignored tables. The caller must then set the new WorkingSet in
+// the session before the aborted merge is finalized. If no merge is in progress, this function
+// returns an error.
+func AbortMerge(ctx *sql.Context, workingSet *doltdb.WorkingSet, roots doltdb.Roots) (*doltdb.WorkingSet, error) {
+	if !workingSet.MergeActive() {
+		return nil, fmt.Errorf("there is no merge to abort")
+	}
 
+	tbls, err := doltdb.UnionTableNames(ctx, roots.Working, roots.Staged, roots.Head)
 	if err != nil {
-		return nil, ErrFailedToReadDatabase
+		return nil, err
 	}
-
-	tblToStats := make(map[string]*MergeStats)
-	err = mergedRootToWorking(ctx, false, dEnv, mergedRoot, spec.WorkingDiffs, spec.MergeC, tblToStats)
-
+	tbls, err = doltdb.ExcludeIgnoredTables(ctx, roots, tbls)
 	if err != nil {
-		return tblToStats, err
+		return nil, err
 	}
 
-	// Reload roots since the above method writes new values to the working set
-	roots, err := dEnv.Roots(ctx)
+	roots, err = actions.MoveTablesFromHeadToWorking(ctx, roots, tbls)
 	if err != nil {
-		return tblToStats, err
+		return nil, err
 	}
 
-	ws, err := dEnv.WorkingSet(ctx)
+	preMergeWorkingRoot := workingSet.MergeState().PreMergeWorkingRoot()
+	preMergeWorkingTables, err := preMergeWorkingRoot.GetTableNames(ctx, doltdb.DefaultSchemaName)
 	if err != nil {
-		return tblToStats, err
+		return nil, err
 	}
-
-	var mergeParentCommits []*doltdb.Commit
-	if ws.MergeActive() {
-		mergeParentCommits = []*doltdb.Commit{ws.MergeState().Commit()}
-	}
-
-	_, err = actions.CommitStaged(ctx, roots, ws.MergeActive(), mergeParentCommits, dEnv.DbData(), actions.CommitStagedProps{
-		Message:    spec.Msg,
-		Date:       spec.Date,
-		AllowEmpty: spec.AllowEmpty,
-		Force:      spec.Force,
-		Name:       spec.Name,
-		Email:      spec.Email,
-	})
-
+	nonIgnoredTables, err := doltdb.ExcludeIgnoredTables(ctx, roots, doltdb.ToTableNames(preMergeWorkingTables, doltdb.DefaultSchemaName))
 	if err != nil {
-		return tblToStats, fmt.Errorf("%w; failed to commit", err)
+		return nil, err
 	}
+	someTablesAreIgnored := len(nonIgnoredTables) != len(preMergeWorkingTables)
 
-	err = dEnv.ClearMerge(ctx)
-	if err != nil {
-		return tblToStats, err
-	}
-
-	return tblToStats, err
-}
-
-func applyChanges(ctx context.Context, root *doltdb.RootValue, workingDiffs map[string]hash.Hash) (*doltdb.RootValue, error) {
-	var err error
-	for tblName, h := range workingDiffs {
-		root, err = root.SetTableHash(ctx, tblName, h)
-
+	if someTablesAreIgnored {
+		newWorking, err := actions.MoveTablesBetweenRoots(ctx, nonIgnoredTables, preMergeWorkingRoot, roots.Working)
 		if err != nil {
-			return nil, fmt.Errorf("failed to update table; %w", err)
+			return nil, err
 		}
+		workingSet = workingSet.WithWorkingRoot(newWorking)
+	} else {
+		workingSet = workingSet.WithWorkingRoot(preMergeWorkingRoot)
 	}
+	// Unstage everything by making Staged match Head
+	workingSet = workingSet.WithStagedRoot(roots.Head)
+	workingSet = workingSet.ClearMerge()
 
-	return root, nil
-}
-
-func ExecuteFFMerge(
-	ctx context.Context,
-	dEnv *env.DoltEnv,
-	spec *MergeSpec,
-) error {
-	stagedRoot, err := spec.MergeC.GetRootValue(ctx)
-	if err != nil {
-		return err
-	}
-
-	workingRoot := stagedRoot
-	if len(spec.WorkingDiffs) > 0 {
-		workingRoot, err = applyChanges(ctx, stagedRoot, spec.WorkingDiffs)
-
-		if err != nil {
-			//return errhand.BuildDError("Failed to re-apply working changes.").AddCause(err).Build()
-			return err
-		}
-	}
-
-	unstagedDocs, err := actions.GetUnstagedDocs(ctx, dEnv)
-	if err != nil {
-		return err
-	}
-
-	if !spec.Squash {
-		err = dEnv.DoltDB.FastForward(ctx, dEnv.RepoStateReader().CWBHeadRef(), spec.MergeC)
-
-		if err != nil {
-			return err
-		}
-	}
-
-	workingSet, err := dEnv.WorkingSet(ctx)
-	if err != nil {
-		return err
-	}
-
-	err = dEnv.UpdateWorkingSet(ctx, workingSet.WithWorkingRoot(workingRoot).WithStagedRoot(stagedRoot))
-	if err != nil {
-		return ErrMergeFailedToUpdateRepoState
-	}
-
-	err = actions.SaveDocsFromWorkingExcludingFSChanges(ctx, dEnv, unstagedDocs)
-	if err != nil {
-		return ErrMergeFailedToUpdateDocs
-	}
-
-	return nil
-}
-
-func ExecuteMerge(ctx context.Context, dEnv *env.DoltEnv, spec *MergeSpec) (map[string]*MergeStats, error) {
-	opts := editor.Options{Deaf: dEnv.BulkDbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
-	mergedRoot, tblToStats, err := MergeCommits(ctx, spec.HeadC, spec.MergeC, opts)
-	if err != nil {
-		switch err {
-		case doltdb.ErrUpToDate:
-			return tblToStats, fmt.Errorf("already up to date; %w", err)
-		case ErrFastForward:
-			panic("fast forward merge")
-		}
-		return tblToStats, err
-	}
-
-	return tblToStats, mergedRootToWorking(ctx, spec.Squash, dEnv, mergedRoot, spec.WorkingDiffs, spec.MergeC, tblToStats)
-}
-
-// TODO: change this to be functional and not write to repo state
-func mergedRootToWorking(
-	ctx context.Context,
-	squash bool,
-	dEnv *env.DoltEnv,
-	mergedRoot *doltdb.RootValue,
-	workingDiffs map[string]hash.Hash,
-	cm2 *doltdb.Commit,
-	tblToStats map[string]*MergeStats,
-) error {
-	var err error
-
-	workingRoot := mergedRoot
-	if len(workingDiffs) > 0 {
-		workingRoot, err = applyChanges(ctx, mergedRoot, workingDiffs)
-
-		if err != nil {
-			return err
-		}
-	}
-
-	if !squash {
-		err = dEnv.StartMerge(ctx, cm2)
-
-		if err != nil {
-			return actions.ErrFailedToSaveRepoState
-		}
-	}
-
-	unstagedDocs, err := actions.GetUnstagedDocs(ctx, dEnv)
-	if err != nil {
-		return ErrFailedToDetermineUnstagedDocs
-	}
-
-	err = dEnv.UpdateWorkingRoot(context.Background(), workingRoot)
-	if err != nil {
-		return err
-	}
-
-	conflicts, constraintViolations := conflictsAndViolations(tblToStats)
-	if len(conflicts) > 0 || len(constraintViolations) > 0 {
-		return err
-	}
-
-	if err = actions.SaveDocsFromWorkingExcludingFSChanges(ctx, dEnv, unstagedDocs); err != nil {
-		return err
-	}
-
-	if err = dEnv.UpdateStagedRoot(context.Background(), mergedRoot); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func conflictsAndViolations(tblToStats map[string]*MergeStats) (conflicts []string, constraintViolations []string) {
-	for tblName, stats := range tblToStats {
-		if stats.Operation == TableModified && (stats.Conflicts > 0 || stats.ConstraintViolations > 0) {
-			if stats.Conflicts > 0 {
-				conflicts = append(conflicts, tblName)
-			}
-			if stats.ConstraintViolations > 0 {
-				constraintViolations = append(constraintViolations, tblName)
-			}
-		}
-	}
-	return
+	return workingSet, nil
 }

@@ -15,17 +15,21 @@
 package tree
 
 import (
-	"encoding/binary"
+	"context"
 	"math"
 	"math/rand"
 	"testing"
 	"unsafe"
 
-	"github.com/dolthub/dolt/go/gen/fb/serial"
-	"github.com/dolthub/dolt/go/store/val"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dolthub/dolt/go/gen/fb/serial"
+	"github.com/dolthub/dolt/go/store/chunks"
+	"github.com/dolthub/dolt/go/store/hash"
+	"github.com/dolthub/dolt/go/store/prolly/message"
+	"github.com/dolthub/dolt/go/store/types"
+	"github.com/dolthub/dolt/go/store/val"
 )
 
 func TestRoundTripInts(t *testing.T) {
@@ -36,87 +40,130 @@ func TestRoundTripInts(t *testing.T) {
 		keys[i] = tups[i][0]
 		values[i] = tups[i][1]
 	}
-	require.True(t, sumTupleSize(keys)+sumTupleSize(values) < maxVectorOffset)
+	require.True(t, sumTupleSize(keys)+sumTupleSize(values) < message.MaxVectorOffset)
 
 	nd := NewTupleLeafNode(keys, values)
 	assert.True(t, nd.IsLeaf())
 	assert.Equal(t, len(keys), int(nd.count))
 	for i := range keys {
 		assert.Equal(t, keys[i], val.Tuple(nd.GetKey(i)))
-		assert.Equal(t, values[i], val.Tuple(nd.getValue(i)))
+		assert.Equal(t, values[i], val.Tuple(nd.GetValue(i)))
 	}
 }
 
 func TestRoundTripNodeItems(t *testing.T) {
 	for trial := 0; trial < 100; trial++ {
 		keys, values := randomNodeItemPairs(t, (rand.Int()%101)+50)
-		require.True(t, sumSize(keys)+sumSize(values) < maxVectorOffset)
+		require.True(t, sumSize(keys)+sumSize(values) < message.MaxVectorOffset)
 
 		nd := newLeafNode(keys, values)
 		assert.True(t, nd.IsLeaf())
 		assert.Equal(t, len(keys), int(nd.count))
 		for i := range keys {
 			assert.Equal(t, keys[i], nd.GetKey(i))
-			assert.Equal(t, values[i], nd.getValue(i))
+			assert.Equal(t, values[i], nd.GetValue(i))
 		}
-	}
-}
-
-func TestGetKeyValueOffsetsVectors(t *testing.T) {
-	for trial := 0; trial < 100; trial++ {
-		keys, values := randomNodeItemPairs(t, (rand.Int()%101)+50)
-		require.True(t, sumSize(keys)+sumSize(values) < maxVectorOffset)
-		nd := newLeafNode(keys, values)
-
-		ko1, vo1 := offsetsFromSlicedBuffers(nd.keys, nd.values)
-		ko2, vo2 := offsetsFromFlatbuffer(nd.buf)
-
-		assert.Equal(t, len(ko1), len(ko2))
-		assert.Equal(t, len(ko1), len(keys)-1)
-		assert.Equal(t, ko1, ko2)
-
-		assert.Equal(t, len(vo1), len(vo2))
-		assert.Equal(t, len(vo1), len(values)-1)
-		assert.Equal(t, vo1, vo2)
-
 	}
 }
 
 func TestNodeSize(t *testing.T) {
 	sz := unsafe.Sizeof(Node{})
-	assert.Equal(t, 136, int(sz))
+	assert.Equal(t, 56, int(sz))
 }
 
-func TestCountArray(t *testing.T) {
-	for k := 0; k < 100; k++ {
-		n := testRand.Intn(45) + 5
-
-		counts := make(subtreeCounts, n)
-		sum := uint64(0)
-		for i := range counts {
-			c := testRand.Uint64() % math.MaxUint32
-			counts[i] = c
-			sum += c
-		}
-		assert.Equal(t, sum, counts.sum())
-
-		// round trip the array
-		buf := writeSubtreeCounts(counts)
-		counts = readSubtreeCounts(n, buf)
-		assert.Equal(t, sum, counts.sum())
+func BenchmarkNodeGet(b *testing.B) {
+	const (
+		count int = 128
+		mask  int = 0x7f
+	)
+	tuples, _ := AscendingUintTuples(count)
+	assert.Len(b, tuples, count)
+	keys := make([]Item, count)
+	vals := make([]Item, count)
+	for i := range tuples {
+		keys[i] = Item(tuples[i][0])
+		vals[i] = Item(tuples[i][1])
 	}
+	nd := newLeafNode(keys, vals)
+
+	var pm serial.ProllyTreeNode
+	err := serial.InitProllyTreeNodeRoot(&pm, nd.msg, serial.MessagePrefixSz)
+	require.NoError(b, err)
+	b.ResetTimer()
+
+	b.Run("ItemAccess Get", func(b *testing.B) {
+		var k Item
+		for i := 0; i < b.N; i++ {
+			k = nd.GetKey(i & mask)
+		}
+		assert.NotNil(b, k)
+	})
+	b.Run("Flatbuffers Get", func(b *testing.B) {
+		var k Item
+		for i := 0; i < b.N; i++ {
+			k = flatbuffersGetKey(i&mask, pm)
+		}
+		assert.NotNil(b, k)
+	})
 }
 
-func randomNodeItemPairs(t *testing.T, count int) (keys, values []NodeItem) {
-	keys = make([]NodeItem, count)
+// Node.Get() without cached offset metadata
+func flatbuffersGetKey(i int, pm serial.ProllyTreeNode) (key []byte) {
+	buf := pm.KeyItemsBytes()
+	start := pm.KeyOffsets(i)
+	stop := pm.KeyOffsets(i + 1)
+	key = buf[start:stop]
+	return
+}
+
+func TestNodeHashValueCompatibility(t *testing.T) {
+	keys, values := randomNodeItemPairs(t, (rand.Int()%101)+50)
+	nd := newLeafNode(keys, values)
+	nbf := types.Format_DOLT
+	th, err := ValueFromNode(nd).Hash(nbf)
+	require.NoError(t, err)
+	assert.Equal(t, nd.HashOf(), th)
+
+	h1 := hash.Parse("kvup5vdur99ush7c18g0kjc6rhdkfdgo")
+	h2 := hash.Parse("7e54ill10nji9oao1ja88buh9itaj7k9")
+	msg := message.NewAddressMapSerializer(sharedPool).Serialize(
+		[][]byte{[]byte("chopin"), []byte("listz")},
+		[][]byte{h1[:], h2[:]},
+		[]uint64{},
+		0)
+	nd, err = NodeFromBytes(msg)
+	require.NoError(t, err)
+	th, err = ValueFromNode(nd).Hash(nbf)
+	require.NoError(t, err)
+	assert.Equal(t, nd.HashOf(), th)
+}
+
+func TestNodeDecodeValueCompatibility(t *testing.T) {
+	keys, values := randomNodeItemPairs(t, (rand.Int()%101)+50)
+	nd := newLeafNode(keys, values)
+
+	ts := &chunks.TestStorage{}
+	cs := ts.NewView()
+	ns := NewNodeStore(cs)
+	vs := types.NewValueStore(cs)
+	h, err := ns.Write(context.Background(), nd)
+	require.NoError(t, err)
+
+	v, err := vs.ReadValue(context.Background(), h)
+	require.NoError(t, err)
+	assert.Equal(t, nd.bytes(), []byte(v.(types.SerialMessage)))
+}
+
+func randomNodeItemPairs(t *testing.T, count int) (keys, values []Item) {
+	keys = make([]Item, count)
 	for i := range keys {
 		sz := (rand.Int() % 41) + 10
-		keys[i] = make(NodeItem, sz)
+		keys[i] = make(Item, sz)
 		_, err := rand.Read(keys[i])
 		assert.NoError(t, err)
 	}
 
-	values = make([]NodeItem, count)
+	values = make([]Item, count)
 	copy(values, keys)
 	rand.Shuffle(len(values), func(i, j int) {
 		values[i], values[j] = values[j], values[i]
@@ -125,7 +172,7 @@ func randomNodeItemPairs(t *testing.T, count int) (keys, values []NodeItem) {
 	return
 }
 
-func sumSize(items []NodeItem) (sz uint64) {
+func sumSize(items []Item) (sz uint64) {
 	for _, item := range items {
 		sz += uint64(len(item))
 	}
@@ -135,35 +182,6 @@ func sumSize(items []NodeItem) (sz uint64) {
 func sumTupleSize(items []val.Tuple) (sz uint64) {
 	for _, item := range items {
 		sz += uint64(len(item))
-	}
-	return
-}
-
-func offsetsFromFlatbuffer(buf serial.TupleMap) (ko, vo []uint16) {
-	ko = make([]uint16, buf.KeyOffsetsLength())
-	for i := range ko {
-		ko[i] = buf.KeyOffsets(i)
-	}
-
-	vo = make([]uint16, buf.ValueOffsetsLength())
-	for i := range vo {
-		vo[i] = buf.ValueOffsets(i)
-	}
-
-	return
-}
-
-func offsetsFromSlicedBuffers(keys, values val.SlicedBuffer) (ko, vo []uint16) {
-	ko = deserializeOffsets(keys.Offs)
-	vo = deserializeOffsets(values.Offs)
-	return
-}
-
-func deserializeOffsets(buf []byte) (offs []uint16) {
-	offs = make([]uint16, len(buf)/2)
-	for i := range offs {
-		start, stop := i*2, (i+1)*2
-		offs[i] = binary.LittleEndian.Uint16(buf[start:stop])
 	}
 	return
 }

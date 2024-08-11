@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/dolthub/dolt/go/store/d"
@@ -133,15 +134,6 @@ func (t JSON) Inner() (Value, error) {
 	return dec.readValue(t.nbf)
 }
 
-// WalkValues implements the Value interface.
-func (t JSON) WalkValues(ctx context.Context, cb ValueCallback) error {
-	val, err := t.Inner()
-	if err != nil {
-		return err
-	}
-	return val.WalkValues(ctx, cb)
-}
-
 // typeOf implements the Value interface.
 func (t JSON) typeOf() (*Type, error) {
 	val, err := t.Inner()
@@ -173,13 +165,13 @@ func (t JSON) isPrimitive() bool {
 }
 
 // Less implements the LesserValuable interface.
-func (t JSON) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (t JSON) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	otherJSONDoc, ok := other.(JSON)
 	if !ok {
 		return JSONKind < other.Kind(), nil
 	}
 
-	cmp, err := t.Compare(otherJSONDoc)
+	cmp, err := t.Compare(ctx, otherJSONDoc)
 	if err != nil {
 		return false, err
 	}
@@ -188,7 +180,7 @@ func (t JSON) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 }
 
 // Compare implements MySQL JSON type compare semantics.
-func (t JSON) Compare(other JSON) (int, error) {
+func (t JSON) Compare(ctx context.Context, other JSON) (int, error) {
 	left, err := t.Inner()
 	if err != nil {
 		return 0, err
@@ -199,7 +191,7 @@ func (t JSON) Compare(other JSON) (int, error) {
 		return 0, err
 	}
 
-	return compareJSON(left, right)
+	return compareJSON(ctx, left, right)
 }
 
 func (t JSON) readFrom(nbf *NomsBinFormat, b *binaryNomsReader) (Value, error) {
@@ -223,7 +215,7 @@ func (t JSON) HumanReadableString() string {
 	return fmt.Sprintf("JSON(%s)", h.String())
 }
 
-func compareJSON(a, b Value) (int, error) {
+func compareJSON(ctx context.Context, a, b Value) (int, error) {
 	aNull := a.Kind() == NullKind
 	bNull := b.Kind() == NullKind
 	if aNull && bNull {
@@ -238,9 +230,9 @@ func compareJSON(a, b Value) (int, error) {
 	case Bool:
 		return compareJSONBool(a, b)
 	case List:
-		return compareJSONArray(a, b)
+		return compareJSONArray(ctx, a, b)
 	case Map:
-		return compareJSONObject(a, b)
+		return compareJSONObject(ctx, a, b)
 	case String:
 		return compareJSONString(a, b)
 	case Float:
@@ -271,7 +263,7 @@ func compareJSONBool(a Bool, b Value) (int, error) {
 	}
 }
 
-func compareJSONArray(a List, b Value) (int, error) {
+func compareJSONArray(ctx context.Context, a List, b Value) (int, error) {
 	switch b := b.(type) {
 	case Bool:
 		// a is lower precedence
@@ -283,7 +275,7 @@ func compareJSONArray(a List, b Value) (int, error) {
 		// where there is a difference. The array with the smaller value in that position is ordered first.
 
 		// TODO(andy): this diverges from GMS
-		aLess, err := a.Less(a.format(), b)
+		aLess, err := a.Less(ctx, a.format(), b)
 		if err != nil {
 			return 0, err
 		}
@@ -291,7 +283,7 @@ func compareJSONArray(a List, b Value) (int, error) {
 			return -1, nil
 		}
 
-		bLess, err := b.Less(b.format(), a)
+		bLess, err := b.Less(ctx, a.format(), a)
 		if err != nil {
 			return 0, err
 		}
@@ -307,7 +299,7 @@ func compareJSONArray(a List, b Value) (int, error) {
 	}
 }
 
-func compareJSONObject(a Map, b Value) (int, error) {
+func compareJSONObject(ctx context.Context, a Map, b Value) (int, error) {
 	switch b := b.(type) {
 	case
 		Bool,
@@ -320,7 +312,7 @@ func compareJSONObject(a Map, b Value) (int, error) {
 		// objects. The order of two objects that are not equal is unspecified but deterministic.
 
 		// TODO(andy): this diverges from GMS
-		aLess, err := a.Less(a.format(), b)
+		aLess, err := a.Less(ctx, a.format(), b)
 		if err != nil {
 			return 0, err
 		}
@@ -328,7 +320,7 @@ func compareJSONObject(a Map, b Value) (int, error) {
 			return -1, nil
 		}
 
-		bLess, err := b.Less(b.format(), a)
+		bLess, err := b.Less(ctx, b.format(), a)
 		if err != nil {
 			return 0, err
 		}
@@ -383,5 +375,52 @@ func compareJSONNumber(a Float, b Value) (int, error) {
 	default:
 		// a is higher precedence
 		return 1, nil
+	}
+}
+
+// UnescapeHTMLCodepoints replaces escaped HTML characters in serialized JSON with their unescaped equivalents.
+// Due to an oversight, the representation of JSON in storage escapes these characters, and we unescape them
+// before displaying them to the user.
+func UnescapeHTMLCodepoints(path []byte) []byte {
+	nextToRead := path
+	nextToWrite := path
+
+	matches := 0
+	index := findNextEscapedUnicodeCodepoint(nextToRead)
+	for index != -1 {
+		newChar := byte(0)
+		if slices.Equal(nextToRead[index+2:index+6], []byte{'0', '0', '3', 'c'}) {
+			newChar = '<'
+		} else if slices.Equal(nextToRead[index+2:index+6], []byte{'0', '0', '3', 'e'}) {
+			newChar = '>'
+		} else if slices.Equal(nextToRead[index+2:index+6], []byte{'0', '0', '2', '6'}) {
+			newChar = '&'
+		}
+		if newChar != 0 {
+			matches += 1
+			copy(nextToWrite, nextToRead[:index])
+			nextToWrite[index] = newChar
+			nextToWrite = nextToWrite[index+1:]
+		}
+		nextToRead = nextToRead[index+6:]
+		index = findNextEscapedUnicodeCodepoint(nextToRead)
+	}
+	copy(nextToWrite, nextToRead)
+	return path[:len(path)-5*matches]
+}
+
+func findNextEscapedUnicodeCodepoint(path []byte) int {
+	index := 0
+	for {
+		if index >= len(path) {
+			return -1
+		}
+		if path[index] == '\\' {
+			if path[index+1] == 'u' {
+				return index
+			}
+			index++
+		}
+		index++
 	}
 }

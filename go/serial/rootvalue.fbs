@@ -13,15 +13,25 @@
 // limitations under the License.
 
 include "prolly.fbs";
+include "collation.fbs";
 
 namespace serial;
 
 table RootValue {
   feature_version:int64;
 
-  tables:RefMap (required);
+  tables:[ubyte]; // Serialized AddressMap.
+
   foreign_key_addr:[ubyte];
-  super_schemas_addr:[ubyte];
+
+  collation:Collation;
+  
+  // schemas records the schemas in this database, which may be empty for a database with a single default schema
+  schemas:[DatabaseSchema];
+}
+
+table DatabaseSchema {
+  name:string;
 }
 
 // KEEP THIS IN SYNC WITH fileidentifiers.go

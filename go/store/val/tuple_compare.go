@@ -14,21 +14,33 @@
 
 package val
 
+import "bytes"
+
 // TupleComparator compares Tuples.
 type TupleComparator interface {
 	// Compare compares pairs of Tuples.
 	Compare(left, right Tuple, desc TupleDesc) int
 
-	// CompareValues compares pairs of values.
-	CompareValues(left, right []byte, typ Type) int
+	// CompareValues compares pairs of values. The index should match the index used to retrieve the type.
+	CompareValues(index int, left, right []byte, typ Type) int
+
+	// Prefix returns a TupleComparator for the first n types.
+	Prefix(n int) TupleComparator
+
+	// Suffix returns a TupleComparator for the last n types.
+	Suffix(n int) TupleComparator
+
+	// Validated returns a new TupleComparator that is valid against the given slice of types. Panics f a valid
+	// TupleComparator cannot be returned.
+	Validated(types []Type) TupleComparator
 }
 
-type defaultCompare struct{}
+type DefaultTupleComparator struct{}
 
-var _ TupleComparator = defaultCompare{}
+var _ TupleComparator = DefaultTupleComparator{}
 
 // Compare implements TupleComparator
-func (d defaultCompare) Compare(left, right Tuple, desc TupleDesc) (cmp int) {
+func (d DefaultTupleComparator) Compare(left, right Tuple, desc TupleDesc) (cmp int) {
 	for i := range desc.fast {
 		start, stop := desc.fast[i][0], desc.fast[i][1]
 		cmp = compare(desc.Types[i], left[start:stop], right[start:stop])
@@ -49,23 +61,34 @@ func (d defaultCompare) Compare(left, right Tuple, desc TupleDesc) (cmp int) {
 }
 
 // CompareValues implements TupleComparator
-func (d defaultCompare) CompareValues(left, right []byte, typ Type) (cmp int) {
+func (d DefaultTupleComparator) CompareValues(_ int, left, right []byte, typ Type) (cmp int) {
 	return compare(typ, left, right)
 }
 
+// Prefix implements TupleComparator
+func (d DefaultTupleComparator) Prefix(n int) TupleComparator {
+	return d
+}
+
+// Suffix implements TupleComparator
+func (d DefaultTupleComparator) Suffix(n int) TupleComparator {
+	return d
+}
+
+// Validated implements TupleComparator
+func (d DefaultTupleComparator) Validated(types []Type) TupleComparator {
+	return d
+}
+
 func compare(typ Type, left, right []byte) int {
-	// order NULLs last
-	if left == nil {
-		if right == nil {
+	// order NULLs first
+	if left == nil || right == nil {
+		if bytes.Equal(left, right) {
 			return 0
+		} else if left == nil {
+			return -1
 		} else {
 			return 1
-		}
-	} else if right == nil {
-		if left == nil {
-			return 0
-		} else {
-			return -1
 		}
 	}
 
@@ -77,7 +100,7 @@ func compare(typ Type, left, right []byte) int {
 	case Int16Enc:
 		return compareInt16(readInt16(left), readInt16(right))
 	case Uint16Enc:
-		return compareUint16(readUint16(left), readUint16(right))
+		return compareUint16(ReadUint16(left), ReadUint16(right))
 	case Int32Enc:
 		return compareInt32(readInt32(left), readInt32(right))
 	case Uint32Enc:
@@ -90,19 +113,40 @@ func compare(typ Type, left, right []byte) int {
 		return compareFloat32(readFloat32(left), readFloat32(right))
 	case Float64Enc:
 		return compareFloat64(readFloat64(left), readFloat64(right))
-	case YearEnc:
-		return compareInt16(readInt16(left), readInt16(right))
-	case DateEnc, DatetimeEnc, TimestampEnc:
-		return compareTimestamp(readTimestamp(left), readTimestamp(right))
-	case TimeEnc:
-		panic("unimplemented")
+	case Bit64Enc:
+		return compareBit64(readBit64(left), readBit64(right))
 	case DecimalEnc:
-		// todo(andy): temporary Decimal implementation
-		fallthrough
+		return compareDecimal(readDecimal(left), readDecimal(right))
+	case YearEnc:
+		return compareYear(readYear(left), readYear(right))
+	case DateEnc:
+		return compareDate(readDate(left), readDate(right))
+	case TimeEnc:
+		return compareTime(readTime(left), readTime(right))
+	case DatetimeEnc:
+		return compareDatetime(readDatetime(left), readDatetime(right))
+	case EnumEnc:
+		return compareEnum(readEnum(left), readEnum(right))
+	case SetEnc:
+		return compareSet(readSet(left), readSet(right))
 	case StringEnc:
 		return compareString(readString(left), readString(right))
 	case ByteStringEnc:
 		return compareByteString(readByteString(left), readByteString(right))
+	case Hash128Enc:
+		return compareHash128(readHash128(left), readHash128(right))
+	case GeomAddrEnc:
+		return compareAddr(readAddr(left), readAddr(right))
+	case BytesAddrEnc:
+		return compareAddr(readAddr(left), readAddr(right))
+	case CommitAddrEnc:
+		return compareAddr(readAddr(left), readAddr(right))
+	case JSONAddrEnc:
+		return compareAddr(readAddr(left), readAddr(right))
+	case StringAddrEnc:
+		return compareAddr(readAddr(left), readAddr(right))
+	case CellEnc:
+		return compareCell(readCell(left), readCell(right))
 	default:
 		panic("unknown encoding")
 	}

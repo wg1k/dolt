@@ -80,7 +80,7 @@ func (ts testSequence) writeTo(nomsWriter, *NomsBinFormat) error {
 }
 
 func (ts testSequence) format() *NomsBinFormat {
-	return Format_7_18
+	return Format_Default
 }
 
 func (ts testSequence) getChildSequence(_ context.Context, idx int) (sequence, error) {
@@ -108,19 +108,15 @@ func (ts testSequence) kvTuples(from, to uint64, dest []Tuple) ([]Tuple, error) 
 	panic("not reached")
 }
 
-func (ts testSequence) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (ts testSequence) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	panic("not reached")
 }
 
-func (ts testSequence) Compare(nbf *NomsBinFormat, other LesserValuable) (int, error) {
+func (ts testSequence) Compare(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (int, error) {
 	panic("not reached")
 }
 
 func (ts testSequence) Hash(*NomsBinFormat) (hash.Hash, error) {
-	panic("not reached")
-}
-
-func (ts testSequence) WalkValues(cb ValueCallback) error {
 	panic("not reached")
 }
 

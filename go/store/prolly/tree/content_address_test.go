@@ -22,32 +22,38 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/store/hash"
+	"github.com/dolthub/dolt/go/store/prolly/message"
 	"github.com/dolthub/dolt/go/store/val"
 )
 
 var goldenHash = hash.Hash{
-	0x0, 0x96, 0xe6, 0x34, 0x5e,
-	0xe3, 0x57, 0x41, 0xce, 0x8e,
-	0x4, 0xc2, 0x35, 0x7c, 0xe3,
-	0xa6, 0xaa, 0xe5, 0x2b, 0x60,
+	0x33, 0xba, 0x6a, 0x18, 0xcb,
+	0xcb, 0xa7, 0x41, 0x4a, 0xdb,
+	0x1e, 0x3d, 0xbf, 0x3f, 0x1e,
+	0xea, 0x7d, 0x47, 0x69, 0x6c,
 }
 
+// todo(andy): need an analogous test in pkg prolly
 func TestContentAddress(t *testing.T) {
 	tups, _ := AscendingUintTuples(12345)
 	m := makeTree(t, tups)
 	require.NotNil(t, m)
 	require.Equal(t, goldenHash, m.HashOf())
-	assert.Equal(t, 12345, m.TreeCount())
+	tc, err := m.TreeCount()
+	require.NoError(t, err)
+	assert.Equal(t, 12345, tc)
 }
 
 func makeTree(t *testing.T, tuples [][2]val.Tuple) Node {
 	ctx := context.Background()
 	ns := NewTestNodeStore()
 
-	chunker, err := newEmptyTreeChunker(ctx, ns, defaultSplitterFactory)
+	// todo(andy): move this test
+	s := message.NewProllyMapSerializer(val.TupleDesc{}, ns.Pool())
+	chunker, err := newEmptyChunker(ctx, ns, s)
 	require.NoError(t, err)
 	for _, pair := range tuples {
-		err := chunker.AddPair(ctx, NodeItem(pair[0]), NodeItem(pair[1]))
+		err := chunker.AddPair(ctx, Item(pair[0]), Item(pair[1]))
 		require.NoError(t, err)
 	}
 	root, err := chunker.Done(ctx)

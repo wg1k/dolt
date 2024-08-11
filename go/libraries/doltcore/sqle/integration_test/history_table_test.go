@@ -17,10 +17,10 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
@@ -33,10 +33,20 @@ import (
 func TestHistoryTable(t *testing.T) {
 	SkipByDefaultInCI(t)
 	dEnv := setupHistoryTests(t)
+	defer dEnv.DoltDB.Close()
 	for _, test := range historyTableTests() {
 		t.Run(test.name, func(t *testing.T) {
 			testHistoryTable(t, test, dEnv)
 		})
+	}
+}
+
+// SkipByDefaultInCI skips the currently executing test as long as the CI env var is set
+// (GitHub Actions sets this automatically) and the DOLT_TEST_RUN_NON_RACE_TESTS env var
+// is not set. This is useful for filtering out tests that cause race detection to fail.
+func SkipByDefaultInCI(t *testing.T) {
+	if os.Getenv("CI") != "" && os.Getenv("DOLT_TEST_RUN_NON_RACE_TESTS") == "" {
+		t.Skip()
 	}
 }
 
@@ -171,7 +181,7 @@ func historyTableTests() []historyTableTest {
 		},
 		{
 			name:  "commit is not null",
-			query: fmt.Sprintf("select pk, c0, commit_hash from dolt_history_test where commit_hash is not null;"),
+			query: "select pk, c0, commit_hash from dolt_history_test where commit_hash is not null;",
 			rows: []sql.Row{
 				{int32(0), int32(10), HEAD},
 				{int32(1), int32(1), HEAD},
@@ -202,8 +212,11 @@ var INIT = ""   // HEAD~4
 func setupHistoryTests(t *testing.T) *env.DoltEnv {
 	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
+	cliCtx, verr := cmd.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, verr)
+
 	for _, c := range setupCommon {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
@@ -212,7 +225,7 @@ func setupHistoryTests(t *testing.T) *env.DoltEnv {
 
 	// get commit hashes from the log table
 	q := "select commit_hash, date from dolt_log order by date desc;"
-	rows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, q)
+	rows, err := sqle.ExecuteSelect(dEnv, root, q)
 	require.NoError(t, err)
 	require.Equal(t, 5, len(rows))
 	HEAD = rows[0][0].(string)
@@ -226,19 +239,19 @@ func setupHistoryTests(t *testing.T) *env.DoltEnv {
 
 func testHistoryTable(t *testing.T, test historyTableTest, dEnv *env.DoltEnv) {
 	ctx := context.Background()
+	cliCtx, verr := cmd.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, verr)
+
 	for _, c := range test.setup {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
 	root, err := dEnv.WorkingRoot(ctx)
 	require.NoError(t, err)
 
-	actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, test.query)
+	actRows, err := sqle.ExecuteSelect(dEnv, root, test.query)
 	require.NoError(t, err)
 
-	require.Equal(t, len(test.rows), len(actRows))
-	for i := range test.rows {
-		assert.Equal(t, test.rows[i], actRows[i])
-	}
+	require.ElementsMatch(t, test.rows, actRows)
 }

@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,30 +17,35 @@
 package serial
 
 import (
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type Table struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsTable(buf []byte, offset flatbuffers.UOffsetT) *Table {
+func InitTableRoot(o *Table, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &Table{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsTable(buf []byte, offset flatbuffers.UOffsetT) *Table {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsTable(buf []byte, offset flatbuffers.UOffsetT) (*Table, error) {
 	x := &Table{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitTableRoot(x, buf, offset)
 }
 
-func (rcv *Table) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsTable(buf []byte, offset flatbuffers.UOffsetT) (*Table, error) {
+	x := &Table{}
+	return x, InitTableRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *Table) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if TableNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *Table) Table() flatbuffers.Table {
@@ -115,17 +120,38 @@ func (rcv *Table) MutatePrimaryIndex(j int, n byte) bool {
 	return false
 }
 
-func (rcv *Table) SecondaryIndexes(obj *RefMap) *RefMap {
+func (rcv *Table) SecondaryIndexes(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(RefMap)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *Table) SecondaryIndexesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *Table) SecondaryIndexesBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
 	return nil
+}
+
+func (rcv *Table) MutateSecondaryIndexes(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
 }
 
 func (rcv *Table) AutoIncrementValue() uint64 {
@@ -140,7 +166,7 @@ func (rcv *Table) MutateAutoIncrementValue(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(10, n)
 }
 
-func (rcv *Table) Conflicts(obj *Conflicts) *Conflicts {
+func (rcv *Table) TryConflicts(obj *Conflicts) (*Conflicts, error) {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -148,9 +174,12 @@ func (rcv *Table) Conflicts(obj *Conflicts) *Conflicts {
 			obj = new(Conflicts)
 		}
 		obj.Init(rcv._tab.Bytes, x)
-		return obj
+		if ConflictsNumFields < obj.Table().NumFields() {
+			return nil, flatbuffers.ErrTableHasUnknownFields
+		}
+		return obj, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func (rcv *Table) Violations(j int) byte {
@@ -187,8 +216,44 @@ func (rcv *Table) MutateViolations(j int, n byte) bool {
 	return false
 }
 
+func (rcv *Table) Artifacts(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *Table) ArtifactsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *Table) ArtifactsBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Table) MutateArtifacts(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+const TableNumFields = 7
+
 func TableStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(TableNumFields)
 }
 func TableAddSchema(builder *flatbuffers.Builder, schema flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(schema), 0)
@@ -205,6 +270,9 @@ func TableStartPrimaryIndexVector(builder *flatbuffers.Builder, numElems int) fl
 func TableAddSecondaryIndexes(builder *flatbuffers.Builder, secondaryIndexes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(secondaryIndexes), 0)
 }
+func TableStartSecondaryIndexesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
 func TableAddAutoIncrementValue(builder *flatbuffers.Builder, autoIncrementValue uint64) {
 	builder.PrependUint64Slot(3, autoIncrementValue, 0)
 }
@@ -217,6 +285,12 @@ func TableAddViolations(builder *flatbuffers.Builder, violations flatbuffers.UOf
 func TableStartViolationsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
+func TableAddArtifacts(builder *flatbuffers.Builder, artifacts flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(artifacts), 0)
+}
+func TableStartArtifactsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
 func TableEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
@@ -225,23 +299,28 @@ type Conflicts struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsConflicts(buf []byte, offset flatbuffers.UOffsetT) *Conflicts {
+func InitConflictsRoot(o *Conflicts, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &Conflicts{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsConflicts(buf []byte, offset flatbuffers.UOffsetT) *Conflicts {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsConflicts(buf []byte, offset flatbuffers.UOffsetT) (*Conflicts, error) {
 	x := &Conflicts{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitConflictsRoot(x, buf, offset)
 }
 
-func (rcv *Conflicts) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsConflicts(buf []byte, offset flatbuffers.UOffsetT) (*Conflicts, error) {
+	x := &Conflicts{}
+	return x, InitConflictsRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *Conflicts) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if ConflictsNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *Conflicts) Table() flatbuffers.Table {
@@ -384,8 +463,10 @@ func (rcv *Conflicts) MutateAncestorSchema(j int, n byte) bool {
 	return false
 }
 
+const ConflictsNumFields = 4
+
 func ConflictsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(ConflictsNumFields)
 }
 func ConflictsAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(data), 0)

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,47 +33,47 @@ import (
 func TestJSONValueMarshallingRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		doc  sql.JSONDocument
+		doc  gmstypes.JSONDocument
 	}{
 		{
 			name: "smoke",
-			doc:  sql.MustJSON(`[]`),
+			doc:  gmstypes.MustJSON(`[]`),
 		},
 		{
 			name: "null",
-			doc:  sql.MustJSON(`null`),
+			doc:  gmstypes.MustJSON(`null`),
 		},
 		{
 			name: "boolean",
-			doc:  sql.MustJSON(`false`),
+			doc:  gmstypes.MustJSON(`false`),
 		},
 		{
 			name: "string",
-			doc:  sql.MustJSON(`"lorem ipsum"`),
+			doc:  gmstypes.MustJSON(`"lorem ipsum"`),
 		},
 		{
 			name: "number",
-			doc:  sql.MustJSON(`2.71`),
+			doc:  gmstypes.MustJSON(`2.71`),
 		},
 		{
 			name: "type homogenous object",
-			doc:  sql.MustJSON(`{"a": 2, "b": 3, "c": 4}`),
+			doc:  gmstypes.MustJSON(`{"a": 2, "b": 3, "c": 4}`),
 		},
 		{
 			name: "type heterogeneous object",
-			doc:  sql.MustJSON(`{"a": 2, "b": "two", "c": false}`),
+			doc:  gmstypes.MustJSON(`{"a": 2, "b": "two", "c": false}`),
 		},
 		{
 			name: "homogenous array",
-			doc:  sql.MustJSON(`[1, 2, 3]`),
+			doc:  gmstypes.MustJSON(`[1, 2, 3]`),
 		},
 		{
 			name: "heterogeneous array",
-			doc:  sql.MustJSON(`[1, "two", false]`),
+			doc:  gmstypes.MustJSON(`[1, "two", false]`),
 		},
 		{
 			name: "nested",
-			doc:  sql.MustJSON(`[{"a":1}, {"b":2}, null, [false, 3.14, [], {"c": [0]}], ""]`),
+			doc:  gmstypes.MustJSON(`[{"a":1}, {"b":2}, null, [false, 3.14, [], {"c": [0]}], ""]`),
 		},
 	}
 
@@ -91,14 +92,14 @@ func TestJSONValueMarshallingRoundTrip(t *testing.T) {
 			assert.Equal(t, test.doc.Val, jsDoc.Val)
 
 			// sql.JSONDocument -> NomsJSON -> string -> sql.JSONDocument
-			str, err := nomsVal.ToString(ctx)
+			str, err := nomsVal.JSONString()
 			assert.NoError(t, err)
 
 			var val interface{}
 			err = js.Unmarshal([]byte(str), &val)
 			assert.NoError(t, err)
 
-			jsDoc = sql.JSONDocument{Val: val}
+			jsDoc = gmstypes.JSONDocument{Val: val}
 			assert.Equal(t, test.doc.Val, jsDoc.Val)
 		})
 	}
@@ -145,7 +146,7 @@ func TestJSONCompare(t *testing.T) {
 		// arrays
 		{`[1,2]`, `[1,2]`, 0},
 		// deterministic array ordering by hash
-		{`[1,2]`, `[1,9]`, 1},
+		{`[1,2]`, `[1,9]`, -1},
 
 		// objects
 		{`{"a": 0}`, `{"a": 0}`, 0},
@@ -153,12 +154,11 @@ func TestJSONCompare(t *testing.T) {
 		{`{"a": 1}`, `{"a": 0}`, 1},
 	}
 
-	ctx := sql.NewEmptyContext()
 	for _, test := range tests {
 		name := fmt.Sprintf("%v_%v__%d", test.left, test.right, test.cmp)
 		t.Run(name, func(t *testing.T) {
 			left, right := MustNomsJSON(test.left), MustNomsJSON(test.right)
-			cmp, err := left.Compare(ctx, right)
+			cmp, err := gmstypes.CompareJSON(left, right)
 			require.NoError(t, err)
 			assert.Equal(t, test.cmp, cmp)
 		})
@@ -184,17 +184,20 @@ func TestJSONStructuralSharing(t *testing.T) {
 		val := MustNomsJSONWithVRW(vrw, sb.String())
 
 		json_refs := make(hash.HashSet)
-		err := types.WalkAddrs(types.JSON(val), vrw.Format(), func(h hash.Hash, _ bool) {
+		err := types.WalkAddrs(types.JSON(val), vrw.Format(), func(h hash.Hash, _ bool) error {
 			json_refs.Insert(h)
+			return nil
 		})
 		require.NoError(t, err)
 
 		tup, err := types.NewTuple(types.Format_Default, types.Int(12), types.JSON(val))
 		require.NoError(t, err)
 		tuple_refs := make(hash.HashSet)
-		types.WalkAddrs(tup, vrw.Format(), func(h hash.Hash, _ bool) {
+		err = types.WalkAddrs(tup, vrw.Format(), func(h hash.Hash, _ bool) error {
 			tuple_refs.Insert(h)
+			return nil
 		})
+		assert.NoError(t, err)
 
 		assert.Greater(t, len(json_refs), 0)
 		assert.Equal(t, len(json_refs), len(tuple_refs))

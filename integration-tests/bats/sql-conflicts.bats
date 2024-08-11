@@ -17,7 +17,7 @@ CREATE TABLE two_pk (
   c2 BIGINT,
   PRIMARY KEY (pk1,pk2)
 );
-CREATE TABLE empty (
+CREATE TABLE empty_table (
   pk BIGINT NOT NULL,
   PRIMARY KEY (pk)
 );
@@ -31,7 +31,7 @@ teardown() {
 }
 
 @test "sql-conflicts: read from empty table" {
-    dolt sql -q "SELECT * FROM dolt_conflicts_empty"
+    dolt sql -q "SELECT * FROM dolt_conflicts_empty_table"
 }
 
 @test "sql-conflicts: add conflict" {
@@ -46,7 +46,9 @@ teardown() {
   dolt add .
   dolt commit -m "changed feature_branch"
   dolt checkout main
-  dolt merge feature_branch
+  run dolt merge feature_branch -m "merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "CONFLICT (content)" ]] || false
 
   EXPECTED=$( echo -e "table,num_conflicts\none_pk,1\ntwo_pk,1")
   run dolt sql -r csv -q "SELECT * FROM dolt_conflicts ORDER BY \`table\`"
@@ -65,13 +67,13 @@ teardown() {
 
   run dolt conflicts cat one_pk
   [ "$status" -eq 0 ]
-  [[ ! "$output" =~ "base" ]]
+  [[ ! "$output" =~ "base" ]] || false
   [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+theirs[[:space:]] ]] || false
 
   run dolt conflicts cat two_pk
   [ "$status" -eq 0 ]
-  [[ ! "$output" =~ "base" ]]
+  [[ ! "$output" =~ "base" ]] || false
   [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+theirs[[:space:]] ]] || false
 
@@ -92,7 +94,6 @@ SQL
   [ "$status" -eq 0 ]
 }
 
-
 @test "sql-conflicts: modify conflict" {
   dolt SQL -q "INSERT INTO one_pk (pk1,c1,c2) VALUES (0,0,0)"
   dolt SQL -q "INSERT INTO two_pk (pk1,pk2,c1,c2) VALUES (0,0,0,0)"
@@ -109,7 +110,9 @@ SQL
   dolt add .
   dolt commit -m "changed feature_branch"
   dolt checkout main
-  dolt merge feature_branch
+  run dolt merge feature_branch -m "merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "CONFLICT (content)" ]] || false
 
   EXPECTED=$( echo -e "table,num_conflicts\none_pk,1\ntwo_pk,1")
   run dolt sql -r csv -q "SELECT * FROM dolt_conflicts ORDER BY \`table\`"
@@ -128,13 +131,13 @@ SQL
 
   run dolt conflicts cat one_pk
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "base" ]]
+  [[ "$output" =~ "base" ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+theirs[[:space:]] ]] || false
 
   run dolt conflicts cat two_pk
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "base" ]]
+  [[ "$output" =~ "base" ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+theirs[[:space:]] ]] || false
 
@@ -167,7 +170,9 @@ SQL
   dolt add .
   dolt commit -m "changed feature_branch"
   dolt checkout main
-  dolt merge feature_branch
+  run dolt merge feature_branch -m "merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "CONFLICT (content)" ]] || false
 
   EXPECTED=$( echo -e "table,num_conflicts\none_pk,1\ntwo_pk,1")
   run dolt sql -r csv -q "SELECT * FROM dolt_conflicts ORDER BY \`table\`"
@@ -186,13 +191,13 @@ SQL
 
   run dolt conflicts cat one_pk
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "base" ]]
+  [[ "$output" =~ "base" ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \-[[:space:]]*\|[[:space:]]+theirs[[:space:]] ]] || false
 
   run dolt conflicts cat two_pk
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "base" ]]
+  [[ "$output" =~ "base" ]] || false
   [[ "$output" =~ \*[[:space:]]*\|[[:space:]]+ours[[:space:]] ]] || false
   [[ "$output" =~ \-[[:space:]]*\|[[:space:]]+theirs[[:space:]] ]] || false
 
@@ -230,7 +235,9 @@ SQL
   dolt add .
   dolt commit -m "changed feature_branch"
   dolt checkout main
-  dolt merge feature_branch
+  run dolt merge feature_branch -m "merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "CONFLICT (content)" ]] || false
 
   EXPECTED=$( echo -e "table,num_conflicts\none_pk,5")
   run dolt sql -r csv -q "SELECT * FROM dolt_conflicts"

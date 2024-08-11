@@ -10,7 +10,8 @@ CREATE TABLE foo (
   PRIMARY KEY (a)
 );
 INSERT INTO foo VALUES (0,0), (1,1);
-SELECT DOLT_COMMIT('-am', 'Initialize table');
+CALL DOLT_ADD('.');
+call dolt_commit('-am', 'Initialize table');
 SQL
 }
 
@@ -48,7 +49,7 @@ SQL
 
 @test "doltpy: hashof returns expected header names" {
     run dolt sql -r csv -q "select HASHOF('HEAD') as hash"
-    [[ $output =~ "hash" ]]
+    [[ $output =~ "hash" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
 }
 

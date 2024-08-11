@@ -15,18 +15,16 @@
 package durable
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"strings"
 
-	flatbuffers "github.com/google/flatbuffers/go"
-
-	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/prolly"
+	"github.com/dolthub/dolt/go/store/prolly/shim"
 	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 	"github.com/dolthub/dolt/go/store/val"
@@ -38,10 +36,10 @@ type Index interface {
 	HashOf() (hash.Hash, error)
 
 	// Count returns the cardinality of the index.
-	Count() uint64
+	Count() (uint64, error)
 
 	// Empty returns true if the index is empty.
-	Empty() bool
+	Empty() (bool, error)
 
 	// Format returns the types.NomsBinFormat for this index.
 	Format() *types.NomsBinFormat
@@ -49,6 +47,12 @@ type Index interface {
 	// AddColumnToRows adds the column given to the rows data and returns the resulting rows.
 	// The |newCol| is present in |newSchema|.
 	AddColumnToRows(ctx context.Context, newCol string, newSchema schema.Schema) (Index, error)
+
+	// Returns the serialized bytes of the (top of the) index.
+	// Non-public. Used for flatbuffers Table persistence.
+	bytes() ([]byte, error)
+
+	DebugString(ctx context.Context, ns tree.NodeStore, schema schema.Schema) string
 }
 
 // IndexSet stores a collection secondary Indexes.
@@ -57,7 +61,10 @@ type IndexSet interface {
 	HashOf() (hash.Hash, error)
 
 	// GetIndex gets an index from the set.
-	GetIndex(ctx context.Context, sch schema.Schema, name string) (Index, error)
+	GetIndex(ctx context.Context, tableSch schema.Schema, idxSch schema.Schema, name string) (Index, error)
+
+	// HasIndex returns true if an index with the specified name exists in the set.
+	HasIndex(ctx context.Context, name string) (bool, error)
 
 	// PutIndex puts an index into the set.
 	PutIndex(ctx context.Context, name string, idx Index) (IndexSet, error)
@@ -76,55 +83,57 @@ type IndexSet interface {
 // RefFromIndex persists the Index and returns a types.Ref to it.
 func RefFromIndex(ctx context.Context, vrw types.ValueReadWriter, idx Index) (types.Ref, error) {
 	switch idx.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		return refFromNomsValue(ctx, vrw, idx.(nomsIndex).index)
 
-	case types.Format_DOLT_1:
-		b := prolly.ValueFromMap(idx.(prollyIndex).index)
+	case types.Format_DOLT:
+		b := shim.ValueFromMap(idx.(prollyIndex).index)
 		return refFromNomsValue(ctx, vrw, b)
 
 	default:
-		return types.Ref{}, errNbfUnkown
+		return types.Ref{}, errNbfUnknown
 	}
 }
 
 // indexFromRef reads the types.Ref from storage and returns the Index it points to.
-func indexFromRef(ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema, r types.Ref) (Index, error) {
-	return indexFromAddr(ctx, vrw, sch, r.TargetHash())
+func indexFromRef(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, sch schema.Schema, r types.Ref) (Index, error) {
+	return indexFromAddr(ctx, vrw, ns, sch, r.TargetHash())
 }
 
-func indexFromAddr(ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema, addr hash.Hash) (Index, error) {
+func indexFromAddr(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, sch schema.Schema, addr hash.Hash) (Index, error) {
 	v, err := vrw.ReadValue(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
-		return IndexFromNomsMap(v.(types.Map), vrw), nil
+	case types.Format_LD_1:
+		return IndexFromNomsMap(v.(types.Map), vrw, ns), nil
 
-	case types.Format_DOLT_1:
-		pm := prolly.MapFromValue(v, sch, vrw)
+	case types.Format_DOLT:
+		pm, err := shim.MapFromValue(v, sch, ns)
+		if err != nil {
+			return nil, err
+		}
 		return IndexFromProllyMap(pm), nil
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
 // NewEmptyIndex returns an index with no rows.
-func NewEmptyIndex(ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema) (Index, error) {
+func NewEmptyIndex(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, sch schema.Schema) (Index, error) {
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		m, err := types.NewMap(ctx, vrw)
 		if err != nil {
 			return nil, err
 		}
-		return IndexFromNomsMap(m, vrw), nil
+		return IndexFromNomsMap(m, vrw, ns), nil
 
-	case types.Format_DOLT_1:
-		kd, vd := prolly.MapDescriptorsFromScheam(sch)
-		ns := tree.NewNodeStore(prolly.ChunkStoreFromVRW(vrw))
+	case types.Format_DOLT:
+		kd, vd := sch.GetMapDescriptors()
 		m, err := prolly.NewMapFromTuples(ctx, ns, kd, vd)
 		if err != nil {
 			return nil, err
@@ -132,16 +141,35 @@ func NewEmptyIndex(ctx context.Context, vrw types.ValueReadWriter, sch schema.Sc
 		return IndexFromProllyMap(m), nil
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
 type nomsIndex struct {
 	index types.Map
 	vrw   types.ValueReadWriter
+	ns    tree.NodeStore
 }
 
 var _ Index = nomsIndex{}
+
+func IterAllIndexes(
+	ctx context.Context,
+	sch schema.Schema,
+	set IndexSet,
+	cb func(name string, idx Index) error,
+) error {
+	for _, def := range sch.Indexes().AllIndexes() {
+		idx, err := set.GetIndex(ctx, sch, nil, def.Name())
+		if err != nil {
+			return err
+		}
+		if err = cb(def.Name(), idx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // NomsMapFromIndex unwraps the Index and returns the underlying types.Map.
 func NomsMapFromIndex(i Index) types.Map {
@@ -149,10 +177,11 @@ func NomsMapFromIndex(i Index) types.Map {
 }
 
 // IndexFromNomsMap wraps a types.Map and returns it as an Index.
-func IndexFromNomsMap(m types.Map, vrw types.ValueReadWriter) Index {
+func IndexFromNomsMap(m types.Map, vrw types.ValueReadWriter, ns tree.NodeStore) Index {
 	return nomsIndex{
 		index: m,
 		vrw:   vrw,
+		ns:    ns,
 	}
 }
 
@@ -164,13 +193,13 @@ func (i nomsIndex) HashOf() (hash.Hash, error) {
 }
 
 // Count implements Index.
-func (i nomsIndex) Count() uint64 {
-	return i.index.Len()
+func (i nomsIndex) Count() (uint64, error) {
+	return i.index.Len(), nil
 }
 
 // Empty implements Index.
-func (i nomsIndex) Empty() bool {
-	return i.index.Len() == 0
+func (i nomsIndex) Empty() (bool, error) {
+	return i.index.Len() == 0, nil
 }
 
 // Format implements Index.
@@ -178,9 +207,22 @@ func (i nomsIndex) Format() *types.NomsBinFormat {
 	return i.vrw.Format()
 }
 
+// bytes implements Index.
+func (i nomsIndex) bytes() ([]byte, error) {
+	rowschunk, err := types.EncodeValue(i.index, i.vrw.Format())
+	if err != nil {
+		return nil, err
+	}
+	return rowschunk.Data(), nil
+}
+
 func (i nomsIndex) AddColumnToRows(ctx context.Context, newCol string, newSchema schema.Schema) (Index, error) {
 	// no-op for noms indexes because of tag-based mapping
 	return i, nil
+}
+
+func (i nomsIndex) DebugString(ctx context.Context, ns tree.NodeStore, schema schema.Schema) string {
+	panic("Not implemented")
 }
 
 type prollyIndex struct {
@@ -205,18 +247,28 @@ func (i prollyIndex) HashOf() (hash.Hash, error) {
 }
 
 // Count implements Index.
-func (i prollyIndex) Count() uint64 {
-	return uint64(i.index.Count())
+func (i prollyIndex) Count() (uint64, error) {
+	c, err := i.index.Count()
+	return uint64(c), err
 }
 
 // Empty implements Index.
-func (i prollyIndex) Empty() bool {
-	return i.index.Count() == 0
+func (i prollyIndex) Empty() (bool, error) {
+	c, err := i.index.Count()
+	if err != nil {
+		return false, err
+	}
+	return c == 0, nil
 }
 
 // Format implements Index.
 func (i prollyIndex) Format() *types.NomsBinFormat {
 	return i.index.Format()
+}
+
+// bytes implements Index.
+func (i prollyIndex) bytes() ([]byte, error) {
+	return []byte(shim.ValueFromMap(i.index).(types.SerialMessage)), nil
 }
 
 var _ Index = prollyIndex{}
@@ -284,25 +336,56 @@ func (i prollyIndex) AddColumnToRows(ctx context.Context, newCol string, newSche
 	return IndexFromProllyMap(newMap), nil
 }
 
+func (i prollyIndex) DebugString(ctx context.Context, ns tree.NodeStore, schema schema.Schema) string {
+	var b bytes.Buffer
+	i.index.WalkNodes(ctx, func(ctx context.Context, nd tree.Node) error {
+		return tree.OutputProllyNode(ctx, &b, nd, ns, schema)
+	})
+	return b.String()
+}
+
 // NewIndexSet returns an empty IndexSet.
-func NewIndexSet(ctx context.Context, vrw types.ValueReadWriter) IndexSet {
-	if vrw.Format() == types.Format_DOLT_DEV {
-		builder := flatbuffers.NewBuilder(24)
-		serial.RefMapStart(builder)
-		builder.Finish(serial.RefMapEnd(builder))
-		return doltDevIndexSet{vrw, serial.GetRootAsRefMap(builder.FinishedBytes(), 0)}
+func NewIndexSet(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore) (IndexSet, error) {
+	if vrw.Format().UsesFlatbuffers() {
+		emptyam, err := prolly.NewEmptyAddressMap(ns)
+		if err != nil {
+			return nil, err
+		}
+		return doltDevIndexSet{vrw, ns, emptyam}, nil
 	}
 
-	empty, _ := types.NewMap(ctx, vrw)
+	empty, err := types.NewMap(ctx, vrw)
+	if err != nil {
+		return nil, err
+	}
 	return nomsIndexSet{
 		indexes: empty,
 		vrw:     vrw,
+	}, nil
+}
+
+func NewIndexSetWithEmptyIndexes(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, sch schema.Schema) (IndexSet, error) {
+	s, err := NewIndexSet(ctx, vrw, ns)
+	if err != nil {
+		return nil, err
 	}
+	for _, index := range sch.Indexes().AllIndexes() {
+		empty, err := NewEmptyIndex(ctx, vrw, ns, index.Schema())
+		if err != nil {
+			return nil, err
+		}
+		s, err = s.PutIndex(ctx, index.Name(), empty)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 type nomsIndexSet struct {
 	indexes types.Map
 	vrw     types.ValueReadWriter
+	ns      tree.NodeStore
 }
 
 var _ IndexSet = nomsIndexSet{}
@@ -312,8 +395,17 @@ func (s nomsIndexSet) HashOf() (hash.Hash, error) {
 	return s.indexes.Hash(s.vrw.Format())
 }
 
+// HasIndex implements IndexSet.
+func (s nomsIndexSet) HasIndex(ctx context.Context, name string) (bool, error) {
+	_, ok, err := s.indexes.MaybeGet(ctx, types.String(name))
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
 // GetIndex implements IndexSet.
-func (s nomsIndexSet) GetIndex(ctx context.Context, sch schema.Schema, name string) (Index, error) {
+func (s nomsIndexSet) GetIndex(ctx context.Context, tableSch schema.Schema, idxSch schema.Schema, name string) (Index, error) {
 	v, ok, err := s.indexes.MaybeGet(ctx, types.String(name))
 	if !ok {
 		err = fmt.Errorf("index %s not found in IndexSet", name)
@@ -322,17 +414,17 @@ func (s nomsIndexSet) GetIndex(ctx context.Context, sch schema.Schema, name stri
 		return nil, err
 	}
 
-	idx := sch.Indexes().GetByName(name)
+	idx := tableSch.Indexes().GetByName(name)
 	if idx == nil {
 		return nil, fmt.Errorf("index not found: %s", name)
 	}
 
-	return indexFromRef(ctx, s.vrw, idx.Schema(), v.(types.Ref))
+	return indexFromRef(ctx, s.vrw, s.ns, idxSch, v.(types.Ref))
 }
 
-// PutIndex implements IndexSet.
+// PutNomsIndex implements IndexSet.
 func (s nomsIndexSet) PutNomsIndex(ctx context.Context, name string, idx types.Map) (IndexSet, error) {
-	return s.PutIndex(ctx, name, IndexFromNomsMap(idx, s.vrw))
+	return s.PutIndex(ctx, name, IndexFromNomsMap(idx, s.vrw, s.ns))
 }
 
 // PutIndex implements IndexSet.
@@ -347,7 +439,7 @@ func (s nomsIndexSet) PutIndex(ctx context.Context, name string, idx Index) (Ind
 		return nil, err
 	}
 
-	return nomsIndexSet{indexes: im, vrw: s.vrw}, nil
+	return nomsIndexSet{indexes: im, vrw: s.vrw, ns: s.ns}, nil
 }
 
 // DropIndex implements IndexSet.
@@ -357,7 +449,7 @@ func (s nomsIndexSet) DropIndex(ctx context.Context, name string) (IndexSet, err
 		return nil, err
 	}
 
-	return nomsIndexSet{indexes: im, vrw: s.vrw}, nil
+	return nomsIndexSet{indexes: im, vrw: s.vrw, ns: s.ns}, nil
 }
 
 func (s nomsIndexSet) RenameIndex(ctx context.Context, oldName, newName string) (IndexSet, error) {
@@ -375,7 +467,7 @@ func (s nomsIndexSet) RenameIndex(ctx context.Context, oldName, newName string) 
 		return nil, err
 	}
 
-	return nomsIndexSet{indexes: im, vrw: s.vrw}, nil
+	return nomsIndexSet{indexes: im, vrw: s.vrw, ns: s.ns}, nil
 }
 
 func mapFromIndexSet(ic IndexSet) types.Map {
@@ -384,25 +476,38 @@ func mapFromIndexSet(ic IndexSet) types.Map {
 
 type doltDevIndexSet struct {
 	vrw types.ValueReadWriter
-	msg *serial.RefMap
+	ns  tree.NodeStore
+	am  prolly.AddressMap
 }
 
 var _ IndexSet = doltDevIndexSet{}
 
 func (is doltDevIndexSet) HashOf() (hash.Hash, error) {
-	return types.SerialMessage(is.msg.Table().Bytes).Hash(is.vrw.Format())
+	return is.am.HashOf(), nil
 }
 
-func (is doltDevIndexSet) GetIndex(ctx context.Context, sch schema.Schema, name string) (Index, error) {
-	addr := datas.RefMapLookup(is.msg, name)
-	if addr.IsEmpty() {
+func (is doltDevIndexSet) HasIndex(ctx context.Context, targetName string) (bool, error) {
+	addr, _, err := is.searchForCaseInsensitiveIndexName(ctx, targetName)
+	return !addr.IsEmpty(), err
+}
+
+func (is doltDevIndexSet) GetIndex(ctx context.Context, tableSch schema.Schema, idxSch schema.Schema, name string) (Index, error) {
+	foundAddr, _, err := is.searchForCaseInsensitiveIndexName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if foundAddr.IsEmpty() {
 		return nil, fmt.Errorf("index %s not found in IndexSet", name)
 	}
-	idxSch := sch.Indexes().GetByName(name)
-	if idxSch == nil {
+
+	idx := tableSch.Indexes().GetByName(name)
+	if idx == nil {
 		return nil, fmt.Errorf("index schema not found: %s", name)
 	}
-	return indexFromAddr(ctx, is.vrw, idxSch.Schema(), addr)
+	if idxSch == nil {
+		idxSch = idx.Schema()
+	}
+	return indexFromAddr(ctx, is.vrw, is.ns, idxSch, foundAddr)
 }
 
 func (is doltDevIndexSet) PutIndex(ctx context.Context, name string, idx Index) (IndexSet, error) {
@@ -411,43 +516,94 @@ func (is doltDevIndexSet) PutIndex(ctx context.Context, name string, idx Index) 
 		return nil, err
 	}
 
-	builder := flatbuffers.NewBuilder(1024)
-	off := datas.RefMapApplyEdits(is.msg, builder, []datas.RefMapEdit{{Name: name, Addr: ref.TargetHash()}})
-	builder.Finish(off)
-	msg := serial.GetRootAsRefMap(builder.FinishedBytes(), 0)
+	ae := is.am.Editor()
+	err = ae.Update(ctx, name, ref.TargetHash())
+	if err != nil {
+		return nil, err
+	}
+	am, err := ae.Flush(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	return doltDevIndexSet{is.vrw, msg}, nil
+	return doltDevIndexSet{is.vrw, is.ns, am}, nil
 }
 
 func (is doltDevIndexSet) PutNomsIndex(ctx context.Context, name string, idx types.Map) (IndexSet, error) {
-	return is.PutIndex(ctx, name, IndexFromNomsMap(idx, is.vrw))
+	return is.PutIndex(ctx, name, IndexFromNomsMap(idx, is.vrw, is.ns))
 }
 
 func (is doltDevIndexSet) DropIndex(ctx context.Context, name string) (IndexSet, error) {
-	builder := flatbuffers.NewBuilder(1024)
-	off := datas.RefMapApplyEdits(is.msg, builder, []datas.RefMapEdit{{Name: name}})
-	builder.Finish(off)
-	msg := serial.GetRootAsRefMap(builder.FinishedBytes(), 0)
-	return doltDevIndexSet{is.vrw, msg}, nil
+	foundAddr, foundName, err := is.searchForCaseInsensitiveIndexName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if foundAddr.IsEmpty() {
+		return nil, fmt.Errorf("index %s not found in IndexSet", name)
+	}
+
+	ae := is.am.Editor()
+	err = ae.Delete(ctx, foundName)
+	if err != nil {
+		return nil, err
+	}
+	am, err := ae.Flush(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return doltDevIndexSet{is.vrw, is.ns, am}, nil
 }
 
 func (is doltDevIndexSet) RenameIndex(ctx context.Context, oldName, newName string) (IndexSet, error) {
-	addr := datas.RefMapLookup(is.msg, oldName)
-	if addr.IsEmpty() {
+	foundOldAddr, foundOldName, err := is.searchForCaseInsensitiveIndexName(ctx, oldName)
+	if err != nil {
+		return nil, err
+	}
+	if foundOldAddr.IsEmpty() {
 		return nil, fmt.Errorf("index %s not found in IndexSet", oldName)
 	}
-	newaddr := datas.RefMapLookup(is.msg, newName)
-	if !newaddr.IsEmpty() {
+
+	foundNewIndex, err := is.HasIndex(ctx, newName)
+	if err != nil {
+		return nil, err
+	}
+	if foundNewIndex {
 		return nil, fmt.Errorf("index %s found in IndexSet when attempting to rename index", newName)
 	}
 
-	builder := flatbuffers.NewBuilder(1024)
-	off := datas.RefMapApplyEdits(is.msg, builder, []datas.RefMapEdit{
-		{Name: newName, Addr: addr},
-		{Name: oldName},
-	})
-	builder.Finish(off)
-	msg := serial.GetRootAsRefMap(builder.FinishedBytes(), 0)
+	ae := is.am.Editor()
+	err = ae.Update(ctx, newName, foundOldAddr)
+	if err != nil {
+		return nil, err
+	}
+	err = ae.Delete(ctx, foundOldName)
+	if err != nil {
+		return nil, err
+	}
 
-	return doltDevIndexSet{is.vrw, msg}, nil
+	am, err := ae.Flush(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return doltDevIndexSet{is.vrw, is.ns, am}, nil
+}
+
+// searchForCaseInsensitiveIndexName searches through the index names in this index set looking for a case-insensitive
+// match against |targetName|. If found, the address is returned, along with the exact case name. If no match was
+// found, a nil address is returned, along with an empty string.
+func (is doltDevIndexSet) searchForCaseInsensitiveIndexName(ctx context.Context, targetName string) (foundAddr hash.Hash, foundName string, err error) {
+	// Indexes are stored with their original case name, so we have to iterate over the index names and
+	// do a case-insensitive match to find a matching index
+	err = is.am.IterAll(ctx, func(name string, address hash.Hash) error {
+		if strings.EqualFold(name, targetName) {
+			foundAddr = address
+			foundName = name
+		}
+		return nil
+	})
+	if err != nil {
+		return hash.Hash{}, "", err
+	}
+	return foundAddr, foundName, nil
 }

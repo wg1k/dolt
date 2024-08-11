@@ -16,18 +16,22 @@ package sqle
 
 import (
 	"context"
-	"errors"
+	goerrors "errors"
 	"fmt"
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/parse"
+	"github.com/dolthub/go-mysql-server/sql/planbuilder"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/src-d/go-errors.v1"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
+	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
@@ -36,83 +40,82 @@ import (
 )
 
 func TestRenameTable(t *testing.T) {
-	otherTable := "other"
-	cc := schema.NewColCollection(
-		schema.NewColumn("id", uint64(100), types.UUIDKind, true, schema.NotNullConstraint{}),
-	)
-	otherSch, err := schema.SchemaFromCols(cc)
-	require.NoError(t, err)
+	setup := `
+	CREATE TABLE people (
+	    id varchar(36) primary key,
+	    name varchar(40) not null,
+	    age int unsigned,
+	    is_married int,
+	    title varchar(40),
+	    INDEX idx_name (name)
+	);
+	INSERT INTO people VALUES
+		('00000000-0000-0000-0000-000000000000', 'Bill Billerson', 32, 1, 'Senior Dufus'),
+		('00000000-0000-0000-0000-000000000001', 'John Johnson', 25, 0, 'Dufus'),
+		('00000000-0000-0000-0000-000000000002', 'Rob Robertson', 21, 0, '');
+	CREATE TABLE other (c0 int, c1 int);`
 
 	tests := []struct {
-		name           string
-		tableName      string
-		newTableName   string
-		expectedSchema schema.Schema
-		expectedRows   []row.Row
-		expectedErr    string
+		description string
+		oldName     string
+		newName     string
+		expectedErr string
 	}{
 		{
-			name:           "rename table",
-			tableName:      "people",
-			newTableName:   "newPeople",
-			expectedSchema: dtestutils.TypedSchema,
-			expectedRows:   dtestutils.TypedRows,
+			description: "rename table",
+			oldName:     "people",
+			newName:     "newPeople",
 		},
 		{
-			name:         "table not found",
-			tableName:    "notFound",
-			newTableName: "newNotfound",
-			expectedErr:  doltdb.ErrTableNotFound.Error(),
+			description: "table not found",
+			oldName:     "notFound",
+			newName:     "newNotfound",
+			expectedErr: doltdb.ErrTableNotFound.Error(),
 		},
 		{
-			name:         "name already in use",
-			tableName:    "people",
-			newTableName: otherTable,
-			expectedErr:  doltdb.ErrTableExists.Error(),
+			description: "name already in use",
+			oldName:     "people",
+			newName:     "other",
+			expectedErr: doltdb.ErrTableExists.Error(),
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dEnv := dtestutils.CreateEnvWithSeedData(t)
+		t.Run(tt.description, func(t *testing.T) {
 			ctx := context.Background()
-
-			dtestutils.CreateTestTable(t, dEnv, otherTable, otherSch)
-
+			dEnv := dtestutils.CreateTestEnv()
+			defer dEnv.DoltDB.Close()
 			root, err := dEnv.WorkingRoot(ctx)
 			require.NoError(t, err)
 
-			updatedRoot, err := renameTable(ctx, root, tt.tableName, tt.newTableName)
+			// setup tests
+			root, err = ExecuteSql(dEnv, root, setup)
+			require.NoError(t, err)
+
+			schemas, err := doltdb.GetAllSchemas(ctx, root)
+			require.NoError(t, err)
+			beforeSch := schemas[tt.oldName]
+
+			updatedRoot, err := renameTable(ctx, root, tt.oldName, tt.newName)
 			if len(tt.expectedErr) > 0 {
-				require.Error(t, err)
+				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedErr)
 				return
-			} else {
-				require.NoError(t, err)
 			}
+			assert.NoError(t, err)
+			err = dEnv.UpdateWorkingRoot(ctx, root)
+			require.NoError(t, err)
 
-			has, err := updatedRoot.HasTable(ctx, tt.tableName)
+			has, err := updatedRoot.HasTable(ctx, doltdb.TableName{Name: tt.oldName})
 			require.NoError(t, err)
 			assert.False(t, has)
-			newTable, ok, err := updatedRoot.GetTable(ctx, tt.newTableName)
+			has, err = updatedRoot.HasTable(ctx, doltdb.TableName{Name: tt.newName})
 			require.NoError(t, err)
-			require.True(t, ok)
+			assert.True(t, has)
 
-			sch, err := newTable.GetSchema(ctx)
+			schemas, err = doltdb.GetAllSchemas(ctx, updatedRoot)
 			require.NoError(t, err)
-			require.Equal(t, tt.expectedSchema, sch)
-
-			rowData, err := newTable.GetNomsRowData(ctx)
-			require.NoError(t, err)
-			var foundRows []row.Row
-			err = rowData.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
-				tpl, err := row.FromNoms(tt.expectedSchema, key.(types.Tuple), value.(types.Tuple))
-				foundRows = append(foundRows, tpl)
-				return false, err
-			})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedRows, foundRows)
+			require.Equal(t, beforeSch, schemas[tt.newName])
 		})
 	}
 }
@@ -120,6 +123,9 @@ func TestRenameTable(t *testing.T) {
 const tableName = "people"
 
 func TestAddColumnToTable(t *testing.T) {
+	origRows, sch, err := dtestutils.RowsAndSchema()
+	require.NoError(t, err)
+
 	tests := []struct {
 		name           string
 		tag            uint64
@@ -136,11 +142,11 @@ func TestAddColumnToTable(t *testing.T) {
 			name:       "bool column no default",
 			tag:        dtestutils.NextTag,
 			newColName: "newCol",
-			colKind:    types.BoolKind,
+			colKind:    types.IntKind,
 			nullable:   Null,
-			expectedSchema: dtestutils.AddColumnToSchema(dtestutils.TypedSchema,
-				schema.NewColumn("newCol", dtestutils.NextTag, types.BoolKind, false)),
-			expectedRows: dtestutils.TypedRows,
+			expectedSchema: dtestutils.AddColumnToSchema(sch,
+				schema.NewColumn("newCol", dtestutils.NextTag, types.IntKind, false)),
+			expectedRows: origRows,
 		},
 		{
 			name:       "nullable with nil default",
@@ -148,9 +154,9 @@ func TestAddColumnToTable(t *testing.T) {
 			newColName: "newCol",
 			colKind:    types.IntKind,
 			nullable:   Null,
-			expectedSchema: dtestutils.AddColumnToSchema(dtestutils.TypedSchema,
+			expectedSchema: dtestutils.AddColumnToSchema(sch,
 				schemaNewColumnWithDefault("newCol", dtestutils.NextTag, types.IntKind, false, "")),
-			expectedRows: dtestutils.TypedRows,
+			expectedRows: origRows,
 		},
 		{
 			name:       "nullable with non-nil default",
@@ -159,9 +165,9 @@ func TestAddColumnToTable(t *testing.T) {
 			colKind:    types.IntKind,
 			nullable:   Null,
 			defaultVal: mustStringToColumnDefault("42"),
-			expectedSchema: dtestutils.AddColumnToSchema(dtestutils.TypedSchema,
+			expectedSchema: dtestutils.AddColumnToSchema(sch,
 				schemaNewColumnWithDefault("newCol", dtestutils.NextTag, types.IntKind, false, "42")),
-			expectedRows: dtestutils.AddColToRows(t, dtestutils.TypedRows, dtestutils.NextTag, types.NullValue),
+			expectedRows: addColToRows(t, origRows, dtestutils.NextTag, types.NullValue),
 		},
 		{
 			name:       "first order",
@@ -173,13 +179,13 @@ func TestAddColumnToTable(t *testing.T) {
 			order:      &sql.ColumnOrder{First: true},
 			expectedSchema: dtestutils.CreateSchema(
 				schemaNewColumnWithDefault("newCol", dtestutils.NextTag, types.IntKind, false, "42"),
-				schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.AddColToRows(t, dtestutils.TypedRows, dtestutils.NextTag, types.NullValue),
+			expectedRows: addColToRows(t, origRows, dtestutils.NextTag, types.NullValue),
 		},
 		{
 			name:       "middle order",
@@ -190,14 +196,14 @@ func TestAddColumnToTable(t *testing.T) {
 			defaultVal: mustStringToColumnDefault("42"),
 			order:      &sql.ColumnOrder{AfterColumn: "age"},
 			expectedSchema: dtestutils.CreateSchema(
-				schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 				schemaNewColumnWithDefault("newCol", dtestutils.NextTag, types.IntKind, false, "42"),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.AddColToRows(t, dtestutils.TypedRows, dtestutils.NextTag, types.NullValue),
+			expectedRows: addColToRows(t, origRows, dtestutils.NextTag, types.NullValue),
 		},
 		{
 			name:        "tag collision",
@@ -205,7 +211,7 @@ func TestAddColumnToTable(t *testing.T) {
 			newColName:  "newCol",
 			colKind:     types.IntKind,
 			nullable:    NotNull,
-			expectedErr: fmt.Sprintf("Cannot create column newCol, the tag %d was already used in table people", dtestutils.AgeTag),
+			expectedErr: fmt.Sprintf("cannot create column newCol on table people, the tag %d was already used in table people", dtestutils.AgeTag),
 		},
 		{
 			name:        "name collision",
@@ -220,12 +226,15 @@ func TestAddColumnToTable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dEnv := dtestutils.CreateEnvWithSeedData(t)
 			ctx := context.Background()
+			dEnv, err := makePeopleTable(ctx, dtestutils.CreateTestEnv())
+			require.NoError(t, err)
+			defer dEnv.DoltDB.Close()
 
 			root, err := dEnv.WorkingRoot(ctx)
-			assert.NoError(t, err)
-			tbl, _, err := root.GetTable(ctx, tableName)
+			require.NoError(t, err)
+			tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: tableName})
+			assert.True(t, ok)
 			assert.NoError(t, err)
 
 			updatedTable, err := addColumnToTable(ctx, root, tbl, tableName, tt.tag, tt.newColName, typeinfo.FromKind(tt.colKind), tt.nullable, tt.defaultVal, "", tt.order)
@@ -243,36 +252,47 @@ func TestAddColumnToTable(t *testing.T) {
 			index := sch.Indexes().GetByName(dtestutils.IndexName)
 			assert.NotNil(t, index)
 			tt.expectedSchema.Indexes().AddIndex(index)
-			tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
+			_, err = tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
+			require.NoError(t, err)
 			require.Equal(t, tt.expectedSchema, sch)
-
-			rowData, err := updatedTable.GetNomsRowData(ctx)
-			require.NoError(t, err)
-
-			var foundRows []row.Row
-			err = rowData.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
-				tpl, err := row.FromNoms(tt.expectedSchema, key.(types.Tuple), value.(types.Tuple))
-
-				if err != nil {
-					return false, err
-				}
-
-				foundRows = append(foundRows, tpl)
-				return false, nil
-			})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedRows, foundRows)
-
-			indexRowData, err := updatedTable.GetNomsIndexRowData(ctx, dtestutils.IndexName)
-			require.NoError(t, err)
-			assert.Greater(t, indexRowData.Len(), uint64(0))
 		})
 	}
 }
 
+func makePeopleTable(ctx context.Context, dEnv *env.DoltEnv) (*env.DoltEnv, error) {
+	_, sch, err := dtestutils.RowsAndSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	root, err := dEnv.WorkingRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := durable.NewEmptyIndex(ctx, root.VRW(), root.NodeStore(), sch)
+	if err != nil {
+		return nil, err
+	}
+	indexes, err := durable.NewIndexSetWithEmptyIndexes(ctx, root.VRW(), root.NodeStore(), sch)
+	if err != nil {
+		return nil, err
+	}
+	tbl, err := doltdb.NewTable(ctx, root.VRW(), root.NodeStore(), sch, rows, indexes, nil)
+	if err != nil {
+		return nil, err
+	}
+	root, err = root.PutTable(ctx, doltdb.TableName{Name: tableName}, tbl)
+	if err != nil {
+		return nil, err
+	}
+	if err = dEnv.UpdateWorkingRoot(ctx, root); err != nil {
+		return nil, err
+	}
+	return dEnv, nil
+}
+
 func mustStringToColumnDefault(defaultString string) *sql.ColumnDefaultValue {
-	def, err := parse.StringToColumnDefaultValue(sql.NewEmptyContext(), defaultString)
+	def, err := planbuilder.StringToColumnDefaultValue(sql.NewEmptyContext(), defaultString)
 	if err != nil {
 		panic(err)
 	}
@@ -285,170 +305,12 @@ func schemaNewColumnWithDefault(name string, tag uint64, kind types.NomsKind, pa
 	return col
 }
 
-func TestDropColumn(t *testing.T) {
-	tests := []struct {
-		name           string
-		colName        string
-		expectedSchema schema.Schema
-		expectedRows   []row.Row
-		expectedErr    string
-	}{
-		{
-			name:           "remove int",
-			colName:        "age",
-			expectedSchema: dtestutils.RemoveColumnFromSchema(dtestutils.TypedSchema, dtestutils.AgeTag),
-			expectedRows:   dtestutils.TypedRows,
-		},
-		{
-			name:           "remove string",
-			colName:        "title",
-			expectedSchema: dtestutils.RemoveColumnFromSchema(dtestutils.TypedSchema, dtestutils.TitleTag),
-			expectedRows:   dtestutils.TypedRows,
-		},
-		{
-			name:        "column not found",
-			colName:     "not found",
-			expectedErr: "column not found",
-		},
-		{
-			name:        "remove primary key col",
-			colName:     "id",
-			expectedErr: "Cannot drop column in primary key",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dEnv := dtestutils.CreateEnvWithSeedData(t)
-			ctx := context.Background()
-
-			root, err := dEnv.WorkingRoot(ctx)
-			require.NoError(t, err)
-			tbl, _, err := root.GetTable(ctx, tableName)
-			require.NoError(t, err)
-
-			updatedTable, err := dropColumn(ctx, tbl, tt.colName)
-			if len(tt.expectedErr) > 0 {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectedErr)
-				return
-			} else {
-				require.NoError(t, err)
-			}
-
-			sch, err := updatedTable.GetSchema(ctx)
-			require.NoError(t, err)
-			originalSch, err := tbl.GetSchema(ctx)
-			require.NoError(t, err)
-			index := originalSch.Indexes().GetByName(dtestutils.IndexName)
-			tt.expectedSchema.Indexes().AddIndex(index)
-			tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
-			require.Equal(t, tt.expectedSchema, sch)
-
-			rowData, err := updatedTable.GetNomsRowData(ctx)
-			require.NoError(t, err)
-
-			var foundRows []row.Row
-			err = rowData.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
-				tpl, err := row.FromNoms(dtestutils.TypedSchema, key.(types.Tuple), value.(types.Tuple))
-				assert.NoError(t, err)
-				foundRows = append(foundRows, tpl)
-				return false, nil
-			})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedRows, foundRows)
-		})
-	}
-}
-
-func TestDropColumnUsedByIndex(t *testing.T) {
-	tests := []struct {
-		name           string
-		colName        string
-		expectedIndex  bool
-		expectedSchema schema.Schema
-		expectedRows   []row.Row
-	}{
-		{
-			name:           "remove int",
-			colName:        "age",
-			expectedIndex:  true,
-			expectedSchema: dtestutils.RemoveColumnFromSchema(dtestutils.TypedSchema, dtestutils.AgeTag),
-			expectedRows:   dtestutils.TypedRows,
-		},
-		{
-			name:           "remove string",
-			colName:        "title",
-			expectedIndex:  true,
-			expectedSchema: dtestutils.RemoveColumnFromSchema(dtestutils.TypedSchema, dtestutils.TitleTag),
-			expectedRows:   dtestutils.TypedRows,
-		},
-		{
-			name:           "remove name",
-			colName:        "name",
-			expectedIndex:  false,
-			expectedSchema: dtestutils.RemoveColumnFromSchema(dtestutils.TypedSchema, dtestutils.NameTag),
-			expectedRows:   dtestutils.TypedRows,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dEnv := dtestutils.CreateEnvWithSeedData(t)
-			ctx := context.Background()
-
-			root, err := dEnv.WorkingRoot(ctx)
-			require.NoError(t, err)
-			tbl, _, err := root.GetTable(ctx, tableName)
-			require.NoError(t, err)
-
-			updatedTable, err := dropColumn(ctx, tbl, tt.colName)
-			require.NoError(t, err)
-
-			sch, err := updatedTable.GetSchema(ctx)
-			require.NoError(t, err)
-			originalSch, err := tbl.GetSchema(ctx)
-			require.NoError(t, err)
-			tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
-
-			index := originalSch.Indexes().GetByName(dtestutils.IndexName)
-			assert.NotNil(t, index)
-			if tt.expectedIndex {
-				tt.expectedSchema.Indexes().AddIndex(index)
-				indexRowData, err := updatedTable.GetNomsIndexRowData(ctx, dtestutils.IndexName)
-				require.NoError(t, err)
-				assert.Greater(t, indexRowData.Len(), uint64(0))
-			} else {
-				assert.Nil(t, sch.Indexes().GetByName(dtestutils.IndexName))
-				_, err := updatedTable.GetNomsIndexRowData(ctx, dtestutils.IndexName)
-				assert.Error(t, err)
-			}
-			require.Equal(t, tt.expectedSchema, sch)
-
-			rowData, err := updatedTable.GetNomsRowData(ctx)
-			require.NoError(t, err)
-
-			var foundRows []row.Row
-			err = rowData.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
-				tpl, err := row.FromNoms(dtestutils.TypedSchema, key.(types.Tuple), value.(types.Tuple))
-				assert.NoError(t, err)
-				foundRows = append(foundRows, tpl)
-				return false, nil
-			})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedRows, foundRows)
-		})
-	}
-}
-
 func TestDropPks(t *testing.T) {
 	var dropTests = []struct {
-		name      string
-		setup     []string
-		exit      int
-		fkIdxName string
+		name        string
+		setup       []string
+		expectedErr *errors.Kind
+		fkIdxName   string
 	}{
 		{
 			name: "no error on drop pk",
@@ -456,7 +318,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id))",
 				"insert into parent values (1,1,1),(2,2,2)",
 			},
-			exit: 0,
 		},
 		{
 			name: "no error if backup index",
@@ -464,7 +325,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id), key `backup` (id))",
 				"create table child (id int, name varchar(1), age int, primary key (id), constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -473,7 +333,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `backup` (age))",
 				"create table child (id int, name varchar(1), age int, primary key (id), constraint `fk` foreign key (age) references parent (age))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -482,7 +341,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `backup` (id, age))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id, age) references parent (id, age))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -491,7 +349,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age, name), key `backup` (id, age))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id, age) references parent (id, age))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -500,7 +357,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `backup` (id))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -509,7 +365,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `bad_backup1` (age, id), key `bad_backup2` (age), key `backup` (id, age, name))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -518,16 +373,14 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `bad_backup` (age, id), key `backup1` (id), key `backup2` (id, age, name))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      0,
 			fkIdxName: "backup1",
 		},
 		{
 			name: "prefer unique key",
 			setup: []string{
-				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `bad_backup` (age, id), key `backup1` (id, age, name), unique key `backup2` (id, age))",
+				"create table parent (id int, name varchar(1), age int, primary key (id, age), key `bad_backup` (age, id), key `backup1` (id, age, name), unique key `backup2` (id, age, name))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      0,
 			fkIdxName: "backup2",
 		},
 		{
@@ -536,7 +389,6 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, other int, primary key (id, age, name), key `backup` (id, age, other))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id, age) references parent (id, age))",
 			},
-			exit:      0,
 			fkIdxName: "backup",
 		},
 		{
@@ -545,8 +397,8 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id))",
 				"create table child (id int, name varchar(1), age int, primary key (id), constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      1,
-			fkIdxName: "id",
+			expectedErr: sql.ErrCantDropIndex,
+			fkIdxName:   "id",
 		},
 		{
 			name: "error if FK ref but bad backup index",
@@ -554,8 +406,8 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, primary key (id), key `bad_backup2` (age))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      1,
-			fkIdxName: "id",
+			expectedErr: sql.ErrCantDropIndex,
+			fkIdxName:   "id",
 		},
 		{
 			name: "error if misordered compound backup index for FK",
@@ -563,8 +415,8 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, constraint `primary` primary key (id), key `backup` (age, id))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (id) references parent (id))",
 			},
-			exit:      1,
-			fkIdxName: "id",
+			expectedErr: sql.ErrCantDropIndex,
+			fkIdxName:   "id",
 		},
 		{
 			name: "error if incomplete compound backup index for FK",
@@ -572,8 +424,8 @@ func TestDropPks(t *testing.T) {
 				"create table parent (id int, name varchar(1), age int, constraint `primary` primary key (age, id), key `backup` (age, name))",
 				"create table child (id int, name varchar(1), age int, constraint `fk` foreign key (age, id) references parent (age,  id))",
 			},
-			exit:      1,
-			fkIdxName: "ageid",
+			expectedErr: sql.ErrCantDropIndex,
+			fkIdxName:   "ageid",
 		},
 	}
 
@@ -584,25 +436,32 @@ func TestDropPks(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			dEnv := dtestutils.CreateTestEnv()
+			defer dEnv.DoltDB.Close()
 			ctx := context.Background()
+			tmpDir, err := dEnv.TempTableFilesDir()
+			require.NoError(t, err)
+			opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: tmpDir}
+			db, err := NewDatabase(ctx, "dolt", dEnv.DbData(), opts)
+			require.NoError(t, err)
 
-			opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
-			db := NewDatabase("dolt", dEnv.DbData(), opts)
 			root, _ := dEnv.WorkingRoot(ctx)
-			engine, sqlCtx, err := NewTestEngine(t, dEnv, ctx, db, root)
+			engine, sqlCtx, err := NewTestEngine(dEnv, ctx, db)
 			require.NoError(t, err)
 
 			for _, query := range tt.setup {
-				_, _, err := engine.Query(sqlCtx, query)
+				_, _, _, err := engine.Query(sqlCtx, query)
 				require.NoError(t, err)
 			}
 
 			drop := "alter table parent drop primary key"
-			_, _, err = engine.Query(sqlCtx, drop)
-			switch tt.exit {
-			case 1:
+			_, iter, _, err := engine.Query(sqlCtx, drop)
+			require.NoError(t, err)
+
+			err = drainIter(sqlCtx, iter)
+			if tt.expectedErr != nil {
 				require.Error(t, err)
-			default:
+				assert.True(t, tt.expectedErr.Is(err), "Expected error of type %s but got %s", tt.expectedErr, err)
+			} else {
 				require.NoError(t, err)
 			}
 
@@ -614,9 +473,11 @@ func TestDropPks(t *testing.T) {
 				fk, ok := foreignKeyCollection.GetByNameCaseInsensitive(childFkName)
 				assert.True(t, ok)
 				assert.Equal(t, childName, fk.TableName)
-				assert.Equal(t, tt.fkIdxName, fk.ReferencedTableIndex)
+				if tt.fkIdxName != "" && fk.ReferencedTableIndex != "" {
+					assert.Equal(t, tt.fkIdxName, fk.ReferencedTableIndex)
+				}
 
-				parent, ok, err := root.GetTable(ctx, parentName)
+				parent, ok, err := root.GetTable(ctx, doltdb.TableName{Name: parentName})
 				assert.NoError(t, err)
 				assert.True(t, ok)
 
@@ -635,7 +496,7 @@ func TestNewPkOrdinals(t *testing.T) {
 			schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 			schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 			schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-			schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+			schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 			schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 		),
 	)
@@ -654,7 +515,7 @@ func TestNewPkOrdinals(t *testing.T) {
 				schema.NewColCollection(
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
-					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 				),
 			),
@@ -668,7 +529,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("new", dtestutils.NextTag, types.StringKind, false),
-					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 				),
 			),
@@ -682,7 +543,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 				),
 			),
 			expPkOrdinals: []int{4, 1},
@@ -692,7 +553,7 @@ func TestNewPkOrdinals(t *testing.T) {
 			newSch: schema.MustSchemaFromCols(
 				schema.NewColCollection(
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
@@ -719,7 +580,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 					schema.NewColumn("new", dtestutils.NextTag, types.StringKind, true),
 				),
@@ -733,7 +594,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("is_married", dtestutils.NextTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("is_married", dtestutils.NextTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 				),
 			),
@@ -746,7 +607,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("new", dtestutils.IsMarriedTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("new", dtestutils.IsMarriedTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 				),
 			),
@@ -759,7 +620,7 @@ func TestNewPkOrdinals(t *testing.T) {
 					schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, false, schema.NotNullConstraint{}),
 					schema.NewColumn("name", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-					schema.NewColumn("new", dtestutils.NextTag, types.BoolKind, true, schema.NotNullConstraint{}),
+					schema.NewColumn("new", dtestutils.NextTag, types.IntKind, true, schema.NotNullConstraint{}),
 					schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 				),
 			),
@@ -771,7 +632,7 @@ func TestNewPkOrdinals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			res, err := modifyPkOrdinals(oldSch, tt.newSch)
 			if tt.err != nil {
-				require.True(t, errors.Is(err, tt.err))
+				require.True(t, goerrors.Is(err, tt.err))
 			} else {
 				require.Equal(t, res, tt.expPkOrdinals)
 			}
@@ -784,18 +645,18 @@ func TestModifyColumn(t *testing.T) {
 		schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 		schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 		schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-		schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+		schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 		schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 	)
-	ti, err := typeinfo.FromSqlType(sql.MustCreateStringWithDefaults(sqltypes.VarChar, 599))
+	ti, err := typeinfo.FromSqlType(gmstypes.MustCreateStringWithDefaults(sqltypes.VarChar, 599))
 	require.NoError(t, err)
 	newNameColSameTag, err := schema.NewColumnWithTypeInfo("name", dtestutils.NameTag, ti, false, "", false, "", schema.NotNullConstraint{})
 	require.NoError(t, err)
 	alteredTypeSch2 := dtestutils.CreateSchema(
-		schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+		schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 		newNameColSameTag,
 		schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-		schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+		schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 		schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 	)
 
@@ -805,34 +666,31 @@ func TestModifyColumn(t *testing.T) {
 		newColumn      schema.Column
 		order          *sql.ColumnOrder
 		expectedSchema schema.Schema
-		expectedRows   []row.Row
 		expectedErr    string
 	}{
 		{
 			name:           "column rename",
-			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
-			newColumn:      schema.NewColumn("newId", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
+			newColumn:      schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 			expectedSchema: dtestutils.CreateSchema(
-				schema.NewColumn("newId", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.TypedRows,
 		},
 		{
 			name:           "remove null constraint",
 			existingColumn: schema.NewColumn("age", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 			newColumn:      schema.NewColumn("newAge", dtestutils.AgeTag, types.UintKind, false),
 			expectedSchema: dtestutils.CreateSchema(
-				schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("newAge", dtestutils.AgeTag, types.UintKind, false),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.TypedRows,
 		},
 		{
 			name:           "reorder first",
@@ -841,12 +699,11 @@ func TestModifyColumn(t *testing.T) {
 			order:          &sql.ColumnOrder{First: true},
 			expectedSchema: dtestutils.CreateSchema(
 				schema.NewColumn("newAge", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
-				schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.TypedRows,
 		},
 		{
 			name:           "reorder middle",
@@ -854,79 +711,51 @@ func TestModifyColumn(t *testing.T) {
 			newColumn:      schema.NewColumn("newAge", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 			order:          &sql.ColumnOrder{AfterColumn: "is_married"},
 			expectedSchema: dtestutils.CreateSchema(
-				schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+				schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 				schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
-				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.BoolKind, false, schema.NotNullConstraint{}),
+				schema.NewColumn("is_married", dtestutils.IsMarriedTag, types.IntKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("newAge", dtestutils.AgeTag, types.UintKind, false, schema.NotNullConstraint{}),
 				schema.NewColumn("title", dtestutils.TitleTag, types.StringKind, false),
 			),
-			expectedRows: dtestutils.TypedRows,
 		},
 		{
 			name:           "tag collision",
-			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
-			newColumn:      schema.NewColumn("newId", dtestutils.NameTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
+			newColumn:      schema.NewColumn("newId", dtestutils.NameTag, types.StringKind, true, schema.NotNullConstraint{}),
 			expectedErr:    "two different columns with the same tag",
 		},
 		{
 			name:           "name collision",
-			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
-			newColumn:      schema.NewColumn("name", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
-			expectedErr:    "A column with the name name already exists",
+			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
+			newColumn:      schema.NewColumn("name", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
+			expectedErr:    "two different columns with the same name exist",
 		},
 		{
 			name:           "type change",
-			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.UUIDKind, true, schema.NotNullConstraint{}),
+			existingColumn: schema.NewColumn("id", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 			newColumn:      schema.NewColumn("newId", dtestutils.IdTag, types.StringKind, true, schema.NotNullConstraint{}),
 			expectedSchema: alteredTypeSch,
-			expectedRows: []row.Row{
-				dtestutils.NewRow(
-					alteredTypeSch,
-					types.String("00000000-0000-0000-0000-000000000000"),
-					types.String("Bill Billerson"),
-					types.Uint(32),
-					types.Bool(true),
-					types.String("Senior Dufus"),
-				),
-				dtestutils.NewRow(
-					alteredTypeSch,
-					types.String("00000000-0000-0000-0000-000000000001"),
-					types.String("John Johnson"),
-					types.Uint(25),
-					types.Bool(false),
-					types.String("Dufus"),
-				),
-				dtestutils.NewRow(
-					alteredTypeSch,
-					types.String("00000000-0000-0000-0000-000000000002"),
-					types.String("Rob Robertson"),
-					types.Uint(21),
-					types.Bool(false),
-					types.String(""),
-				),
-			},
 		},
 		{
 			name:           "type change same tag",
 			existingColumn: schema.NewColumn("name", dtestutils.NameTag, types.StringKind, false, schema.NotNullConstraint{}),
 			newColumn:      newNameColSameTag,
 			expectedSchema: alteredTypeSch2,
-			expectedRows:   dtestutils.TypedRows,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dEnv := dtestutils.CreateEnvWithSeedData(t)
 			ctx := context.Background()
+			dEnv, err := makePeopleTable(ctx, dtestutils.CreateTestEnv())
+			require.NoError(t, err)
+			defer dEnv.DoltDB.Close()
 
 			root, err := dEnv.WorkingRoot(ctx)
 			assert.NoError(t, err)
-			tbl, _, err := root.GetTable(ctx, tableName)
+			tbl, _, err := root.GetTable(ctx, doltdb.TableName{Name: tableName})
 			assert.NoError(t, err)
-
-			opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
-			updatedTable, err := modifyColumn(ctx, tbl, tt.existingColumn, tt.newColumn, tt.order, opts)
+			updatedTable, err := modifyColumn(ctx, tbl, tt.existingColumn, tt.newColumn, tt.order)
 			if len(tt.expectedErr) > 0 {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedErr)
@@ -940,35 +769,30 @@ func TestModifyColumn(t *testing.T) {
 			index := sch.Indexes().GetByName(dtestutils.IndexName)
 			assert.NotNil(t, index)
 			tt.expectedSchema.Indexes().AddIndex(index)
-			tt.expectedSchema.SetPkOrdinals(sch.GetPkOrdinals())
-			tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
+			err = tt.expectedSchema.SetPkOrdinals(sch.GetPkOrdinals())
+			require.NoError(t, err)
+			_, err = tt.expectedSchema.Checks().AddCheck("test-check", "age < 123", true)
+			require.NoError(t, err)
 			require.Equal(t, tt.expectedSchema, sch)
-
-			rowData, err := updatedTable.GetNomsRowData(ctx)
-			require.NoError(t, err)
-
-			var foundRows []row.Row
-			err = rowData.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
-				tpl, err := row.FromNoms(tt.expectedSchema, key.(types.Tuple), value.(types.Tuple))
-
-				if err != nil {
-					return false, err
-				}
-
-				foundRows = append(foundRows, tpl)
-				return false, nil
-			})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedRows, foundRows)
-
-			updatedIndexRows, err := updatedTable.GetNomsIndexRowData(context.Background(), index.Name())
-			require.NoError(t, err)
-			expectedIndexRows, err := editor.RebuildIndex(context.Background(), updatedTable, index.Name(), opts)
-			require.NoError(t, err)
-			if uint64(len(foundRows)) != updatedIndexRows.Len() || !updatedIndexRows.Equals(expectedIndexRows) {
-				t.Error("index contents are incorrect")
-			}
 		})
 	}
+}
+
+// addColToRows adds a column to all the rows given and returns it. This method relies on the fact that
+// noms_row.SetColVal doesn't need a full schema, just one that includes the column being set.
+func addColToRows(t *testing.T, rs []row.Row, tag uint64, val types.Value) []row.Row {
+	if types.IsNull(val) {
+		return rs
+	}
+
+	colColl := schema.NewColCollection(schema.NewColumn("unused", tag, val.Kind(), false))
+	fakeSch := schema.UnkeyedSchemaFromCols(colColl)
+
+	newRows := make([]row.Row, len(rs))
+	var err error
+	for i, r := range rs {
+		newRows[i], err = r.SetColVal(tag, val, fakeSch)
+		require.NoError(t, err)
+	}
+	return newRows
 }

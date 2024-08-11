@@ -15,6 +15,7 @@
 package rowconv
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestFieldMapping(t *testing.T) {
 		mappingFile := ""
 		if test.mappingJSON != "" {
 			mappingFile = "mapping.json"
-			fs.WriteFile(mappingFile, []byte(test.mappingJSON))
+			fs.WriteFile(mappingFile, []byte(test.mappingJSON), os.ModePerm)
 		}
 
 		var mapping *FieldMapping
@@ -105,10 +106,6 @@ func TestFieldMapping(t *testing.T) {
 			if !reflect.DeepEqual(mapping.SrcToDest, test.expected) {
 				t.Error("Mapping does not match expected.  Expected:", test.expected, "Actual:", mapping.SrcToDest)
 			}
-
-			//if test.identity != mapping.IsIdentityMapping() {
-			//	t.Error("identity expected", test.identity, "actual:", !test.identity)
-			//}
 		}
 	}
 }

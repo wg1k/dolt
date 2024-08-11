@@ -31,6 +31,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -44,8 +45,10 @@ func getDBAtDir(ctx context.Context, dir string) (datas.Database, types.ValueRea
 	cs, err := nbs.NewLocalStore(ctx, types.Format_Default.VersionString(), dir, 1<<28, nbs.NewUnlimitedMemQuotaProvider())
 	poe(err)
 
-	vrw := types.NewValueStore(nbs.NewNBSMetricWrapper(cs))
-	return datas.NewTypesDatabase(vrw), vrw
+	csm := nbs.NewNBSMetricWrapper(cs)
+	vrw := types.NewValueStore(csm)
+	ns := tree.NewNodeStore(csm)
+	return datas.NewTypesDatabase(vrw, ns), vrw
 }
 
 const (
@@ -225,7 +228,7 @@ func BenchmarkMapItr(b *testing.B) {
 	sch, err := schema.SchemaFromCols(schema.NewColCollection(testDataCols...))
 	require.NoError(b, err)
 
-	dmItr := index.NewDoltMapIter(itr.NextTuple, closeFunc, index.NewKVToSqlRowConverterForCols(m.Format(), sch))
+	dmItr := index.NewDoltMapIter(itr.NextTuple, closeFunc, index.NewKVToSqlRowConverterForCols(m.Format(), sch, nil))
 	sqlCtx := sql.NewContext(ctx)
 
 	b.ResetTimer()
@@ -242,7 +245,7 @@ func BenchmarkMapItr(b *testing.B) {
 	if err != io.EOF {
 		require.NoError(b, err)
 	}
-	dmItr.Close(sqlCtx)
+	_ = dmItr.Close(sqlCtx)
 }
 
 /*func BenchmarkFullScan(b *testing.B) {
@@ -263,7 +266,7 @@ func BenchmarkMapItr(b *testing.B) {
 	root, err := cm.GetRootValue()
 	require.NoError(b, err)
 
-	tbl, ok, err := root.GetTable(ctx, tableName)
+	tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: tableName})
 	require.NoError(b, err)
 	require.True(b, ok)
 

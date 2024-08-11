@@ -1,18 +1,40 @@
 #!/bin/bash
 
-GEN_DIR="../gen/fb/serial"
+set -eou pipefail
+SRC=$(dirname ${BASH_SOURCE[0]})
+
+GEN_DIR="$SRC/../gen/fb/serial"
 
 # cleanup old generated files
-rm $GEN_DIR/*.go
+if [ ! -z "$(ls $GEN_DIR)" ]; then
+    rm $GEN_DIR/*.go
+fi
+
+FLATC=${FLATC:-$SRC/../../proto/third_party/flatbuffers/bazel-bin/flatc}
+
+if [ ! -x "$FLATC" ]; then
+  echo "$FLATC is not an executable. Did you remember to run 'bazel build //:flatc' in $(dirname $(dirname $FLATC))"
+  exit 1
+fi
 
 # generate golang (de)serialization package
-flatc -o $GEN_DIR --gen-onefile --filename-suffix "" --gen-mutable --go-namespace "serial" --go \
+"$FLATC" -o $GEN_DIR --gen-onefile --filename-suffix "" --gen-mutable --go-namespace "serial" --go \
+  addressmap.fbs \
+  blob.fbs \
+  branchcontrol.fbs \
+  collation.fbs \
   commit.fbs \
-  database.fbs \
+  commitclosure.fbs \
+  encoding.fbs \
+  foreign_key.fbs \
+  mergeartifacts.fbs \
   prolly.fbs \
   rootvalue.fbs \
   schema.fbs \
+  stash.fbs \
+  stashlist.fbs \
   storeroot.fbs \
+  stat.fbs \
   table.fbs \
   tag.fbs \
   workingset.fbs
