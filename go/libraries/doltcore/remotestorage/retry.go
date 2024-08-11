@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -46,30 +46,18 @@ func processHttpResp(resp *http.Response, err error) error {
 
 // ProcessGrpcErr converts an error from a Grpc call into a RetriableCallState
 func processGrpcErr(err error) error {
-	if err == nil {
-		return nil
+	st, _ := status.FromError(err)
+	if statusCodeIsPermanentError(st) {
+		return backoff.Permanent(err)
 	}
+	return err
+}
 
-	st, ok := status.FromError(err)
-
-	if !ok {
-		return err
+func statusCodeIsPermanentError(s *status.Status) bool {
+	if s == nil {
+		return false
 	}
-
-	switch st.Code() {
-	case codes.OK:
-		return nil
-
-	case codes.Canceled,
-		codes.Unknown,
-		codes.DeadlineExceeded,
-		codes.Aborted,
-		codes.Internal,
-		codes.DataLoss,
-		codes.ResourceExhausted,
-		codes.Unavailable:
-		return err
-
+	switch s.Code() {
 	case codes.InvalidArgument,
 		codes.NotFound,
 		codes.AlreadyExists,
@@ -78,8 +66,7 @@ func processGrpcErr(err error) error {
 		codes.Unimplemented,
 		codes.OutOfRange,
 		codes.Unauthenticated:
-		return backoff.Permanent(err)
+		return true
 	}
-
-	return err
+	return false
 }

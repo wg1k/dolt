@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,30 +17,35 @@
 package serial
 
 import (
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type StoreRoot struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsStoreRoot(buf []byte, offset flatbuffers.UOffsetT) *StoreRoot {
+func InitStoreRootRoot(o *StoreRoot, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &StoreRoot{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsStoreRoot(buf []byte, offset flatbuffers.UOffsetT) *StoreRoot {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsStoreRoot(buf []byte, offset flatbuffers.UOffsetT) (*StoreRoot, error) {
 	x := &StoreRoot{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitStoreRootRoot(x, buf, offset)
 }
 
-func (rcv *StoreRoot) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsStoreRoot(buf []byte, offset flatbuffers.UOffsetT) (*StoreRoot, error) {
+	x := &StoreRoot{}
+	return x, InitStoreRootRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *StoreRoot) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if StoreRootNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *StoreRoot) Table() flatbuffers.Table {
@@ -81,8 +86,10 @@ func (rcv *StoreRoot) MutateAddressMap(j int, n byte) bool {
 	return false
 }
 
+const StoreRootNumFields = 1
+
 func StoreRootStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(StoreRootNumFields)
 }
 func StoreRootAddAddressMap(builder *flatbuffers.Builder, addressMap flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(addressMap), 0)

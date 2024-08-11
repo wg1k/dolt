@@ -17,7 +17,8 @@ namespace serial;
 table AddressMap {
   // sorted array of key items
   key_items:[ubyte] (required);
-  // items offets for |key_items|, zeroth offset omitted
+  // items offets for |key_items|
+  // first offset is 0, last offset is len(key_items)
   key_offsets:[uint16] (required);
 
   // array of chunk addresses
@@ -25,7 +26,8 @@ table AddressMap {
   //  - value addresses for AddressMap leaf nodes
   address_array:[ubyte] (required);
 
-  // array of uvarint encoded subtree counts
+  // array of varint encoded subtree counts
+  // see: go/store/prolly/message/varint.go
   subtree_counts:[ubyte];
   // total count of prolly tree
   tree_count:uint64;

@@ -24,9 +24,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	flag "github.com/juju/gnuflag"
 
@@ -124,12 +126,21 @@ func runShow(ctx context.Context, args []string) int {
 }
 
 func outputType(value types.Value) {
+	typeString := typeString(value)
+	fmt.Fprint(os.Stdout, typeString, " - ")
+}
+
+func typeString(value types.Value) string {
 	var typeString string
 	switch value := value.(type) {
 	case types.SerialMessage:
 		switch serial.GetFileID(value) {
 		case serial.StoreRootFileID:
 			typeString = "StoreRoot"
+		case serial.StashListFileID:
+			typeString = "StashList"
+		case serial.StashFileID:
+			typeString = "Stash"
 		case serial.TagFileID:
 			typeString = "Tag"
 		case serial.WorkingSetFileID:
@@ -138,12 +149,18 @@ func outputType(value types.Value) {
 			typeString = "Commit"
 		case serial.RootValueFileID:
 			typeString = "RootValue"
+		case serial.DoltgresRootValueFileID:
+			typeString = "DoltgresRootValue"
 		case serial.TableFileID:
-			typeString = "TableFile"
+			typeString = "Table"
 		case serial.ProllyTreeNodeFileID:
 			typeString = "ProllyTreeNode"
 		case serial.AddressMapFileID:
 			typeString = "AddressMap"
+		case serial.CommitClosureFileID:
+			typeString = "CommitClosure"
+		case serial.TableSchemaFileID:
+			typeString = "TableSchema"
 		default:
 			t, err := types.TypeOf(value)
 			util.CheckErrorNoUsage(err)
@@ -154,21 +171,21 @@ func outputType(value types.Value) {
 		util.CheckErrorNoUsage(err)
 		typeString = t.HumanReadableString()
 	}
-	fmt.Fprint(os.Stdout, typeString, " - ")
+	return typeString
 }
 
 func outputEncodedValue(ctx context.Context, w io.Writer, value types.Value) error {
 	switch value := value.(type) {
-	case types.TupleRowStorage:
-		node := shim.NodeFromValue(value)
-		return tree.OutputProllyNode(w, node)
 	// Some types of serial message need to be output here because of dependency cycles between types / tree package
 	case types.SerialMessage:
 		switch serial.GetFileID(value) {
 		case serial.TableFileID:
-			msg := serial.GetRootAsTable(value, 0)
+			msg, err := serial.TryGetRootAsTable(value, serial.MessagePrefixSz)
+			if err != nil {
+				return err
+			}
 
-			fmt.Fprintf(w, "{\n")
+			fmt.Fprintf(w, " {\n")
 			fmt.Fprintf(w, "\tSchema: #%s\n", hash.New(msg.SchemaBytes()).String())
 			fmt.Fprintf(w, "\tViolations: #%s\n", hash.New(msg.ViolationsBytes()).String())
 			fmt.Fprintf(w, "\tArtifacts: #%s\n", hash.New(msg.ArtifactsBytes()).String())
@@ -176,15 +193,32 @@ func outputEncodedValue(ctx context.Context, w io.Writer, value types.Value) err
 
 			fmt.Fprintf(w, "\tAutoinc: %d\n", msg.AutoIncrementValue())
 
-			fmt.Fprintf(w, "\tPrimary index: {\n")
-			node := tree.NodeFromBytes(msg.PrimaryIndexBytes())
-			tree.OutputProllyNode(w, node)
+			// clustered index
+			node, err := tree.NodeFromBytes(msg.PrimaryIndexBytes())
+			if err != nil {
+				return err
+			}
+			c, err := node.TreeCount()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "\tPrimary Index (rows %d, depth %d) #%s {",
+				c, node.Level()+1, node.HashOf().String())
+			tree.OutputProllyNodeBytes(w, node)
 			fmt.Fprintf(w, "\t}\n")
 
-			fmt.Fprintf(w, "\tSecondary indexes: {\n")
-
-			node = tree.NodeFromBytes(msg.SecondaryIndexesBytes())
-			err := tree.OutputAddressMapNode(w, node)
+			// secondary indexes
+			node, err = tree.NodeFromBytes(msg.SecondaryIndexesBytes())
+			if err != nil {
+				return err
+			}
+			c, err = node.TreeCount()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "\tSecondary Indexes (indexes %d, depth %d) %s {",
+				c, node.Level()+1, node.HashOf().String()[:8])
+			err = tree.OutputAddressMapNode(w, node)
 			if err != nil {
 				return err
 			}
@@ -193,14 +227,41 @@ func outputEncodedValue(ctx context.Context, w io.Writer, value types.Value) err
 
 			return nil
 		case serial.StoreRootFileID:
-			msg := serial.GetRootAsStoreRoot(value, 0)
+			msg, err := serial.TryGetRootAsStoreRoot(value, serial.MessagePrefixSz)
+			if err != nil {
+				return err
+			}
 			ambytes := msg.AddressMapBytes()
-			node := tree.NodeFromBytes(ambytes)
+			node, err := tree.NodeFromBytes(ambytes)
+			if err != nil {
+				return err
+			}
 			return tree.OutputAddressMapNode(w, node)
+		case serial.ProllyTreeNodeFileID:
+			fallthrough
+		case serial.AddressMapFileID:
+			node, err := shim.NodeFromValue(value)
+			if err != nil {
+				return err
+			}
+			return tree.OutputProllyNodeBytes(w, node)
 		default:
 			return types.WriteEncodedValue(ctx, w, value)
 		}
 	default:
 		return types.WriteEncodedValue(ctx, w, value)
+	}
+}
+
+func locationFromTimezoneArg(tz string, defaultTZ *time.Location) (*time.Location, error) {
+	switch tz {
+	case "local":
+		return time.Local, nil
+	case "utc":
+		return time.UTC, nil
+	case "":
+		return defaultTZ, nil
+	default:
+		return nil, errors.New("value must be: local or utc")
 	}
 }

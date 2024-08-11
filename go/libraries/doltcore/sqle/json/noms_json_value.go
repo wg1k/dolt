@@ -17,9 +17,12 @@ package json
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -35,20 +38,20 @@ const (
 // logic to be kept separate from the storage-layer code in pkg types.
 type NomsJSON types.JSON
 
-var _ sql.JSONValue = NomsJSON{}
+var _ sql.JSONWrapper = NomsJSON{}
 
 // NomsJSONFromJSONValue converts a sql.JSONValue to a NomsJSON value.
-func NomsJSONFromJSONValue(ctx context.Context, vrw types.ValueReadWriter, val sql.JSONValue) (NomsJSON, error) {
+func NomsJSONFromJSONValue(ctx context.Context, vrw types.ValueReadWriter, val sql.JSONWrapper) (NomsJSON, error) {
 	if noms, ok := val.(NomsJSON); ok {
 		return noms, nil
 	}
 
-	sqlDoc, err := val.Unmarshall(sql.NewContext(ctx))
+	sqlVal, err := val.ToInterface()
 	if err != nil {
 		return NomsJSON{}, err
 	}
 
-	v, err := marshalJSON(ctx, vrw, sqlDoc.Val)
+	v, err := marshalJSON(ctx, vrw, sqlVal)
 	if err != nil {
 		return NomsJSON{}, err
 	}
@@ -59,6 +62,10 @@ func NomsJSONFromJSONValue(ctx context.Context, vrw types.ValueReadWriter, val s
 	}
 
 	return NomsJSON(doc), nil
+}
+
+func (v NomsJSON) Clone(_ context.Context) sql.JSONWrapper {
+	return v
 }
 
 func marshalJSON(ctx context.Context, vrw types.ValueReadWriter, val interface{}) (types.Value, error) {
@@ -133,19 +140,32 @@ func marshalJSONObject(ctx context.Context, vrw types.ValueReadWriter, obj map[s
 	return types.NewMap(ctx, vrw, vals...)
 }
 
-// Unmarshall implements the sql.JSONValue interface.
-func (v NomsJSON) Unmarshall(ctx *sql.Context) (doc sql.JSONDocument, err error) {
+func (v NomsJSON) ToInterface() (interface{}, error) {
 	nomsVal, err := types.JSON(v).Inner()
 	if err != nil {
-		return sql.JSONDocument{}, err
+		return nil, err
+	}
+
+	val, err := unmarshalJSON(context.Background(), nomsVal)
+	if err != nil {
+		return nil, err
+	}
+	return val, nil
+}
+
+// Unmarshall implements the sql.JSONValue interface.
+func (v NomsJSON) Unmarshall(ctx *sql.Context) (doc gmstypes.JSONDocument, err error) {
+	nomsVal, err := types.JSON(v).Inner()
+	if err != nil {
+		return gmstypes.JSONDocument{}, err
 	}
 
 	val, err := unmarshalJSON(ctx, nomsVal)
 	if err != nil {
-		return sql.JSONDocument{}, err
+		return gmstypes.JSONDocument{}, err
 	}
 
-	return sql.JSONDocument{Val: val}, nil
+	return gmstypes.JSONDocument{Val: val}, nil
 }
 
 func unmarshalJSON(ctx context.Context, val types.Value) (interface{}, error) {
@@ -190,23 +210,13 @@ func unmarshalJSONObject(ctx context.Context, m types.Map) (obj map[string]inter
 	return
 }
 
-// Compare implements the sql.JSONValue interface.
-func (v NomsJSON) Compare(ctx *sql.Context, other sql.JSONValue) (cmp int, err error) {
-	noms, ok := other.(NomsJSON)
-	if !ok {
-		doc, err := v.Unmarshall(ctx)
-		if err != nil {
-			return 0, err
-		}
-		return doc.Compare(ctx, other)
-	}
-
-	return types.JSON(v).Compare(types.JSON(noms))
+// JSONString implements the sql.JSONWrapper interface.
+func (v NomsJSON) JSONString() (string, error) {
+	return NomsJSONToString(context.Background(), v)
 }
 
-// ToString implements the sql.JSONValue interface.
-func (v NomsJSON) ToString(ctx *sql.Context) (string, error) {
-	jd, err := types.JSON(v).Inner()
+func NomsJSONToString(ctx context.Context, js NomsJSON) (string, error) {
+	jd, err := types.JSON(js).Inner()
 	if err != nil {
 		return "", err
 	}
@@ -250,25 +260,42 @@ func marshalToString(ctx context.Context, sb *strings.Builder, val types.Value) 
 		sb.WriteRune(']')
 
 	case types.Map:
-		sb.WriteRune('{')
-		seenOne := false
-		err = val.Iter(ctx, func(k, v types.Value) (stop bool, err error) {
-			if seenOne {
-				sb.WriteString(", ")
+		obj := make(map[string]types.Value, val.Len())
+		var keys []string
+		err = val.Iter(ctx, func(key, value types.Value) (stop bool, err error) {
+			ks, ok := key.(types.String)
+			if !ok {
+				return false, ErrUnexpectedJSONTypeOut
 			}
-			seenOne = true
-
-			sb.WriteString(k.HumanReadableString())
-			sb.WriteString(": ")
-
-			err = marshalToString(ctx, sb, v)
+			obj[string(ks)] = value
+			keys = append(keys, string(ks))
 			return
 		})
 		if err != nil {
 			return err
 		}
-		sb.WriteRune('}')
+		// JSON map keys are sorted k by length then alphabetically
+		sort.Slice(keys, func(i, j int) bool {
+			if len(keys[i]) != len(keys[j]) {
+				return len(keys[i]) < len(keys[j])
+			}
+			return keys[i] < keys[j]
+		})
 
+		sb.WriteRune('{')
+		seenOne := false
+		for _, k := range keys {
+			if seenOne {
+				sb.WriteString(", ")
+			}
+			seenOne = true
+			sb.WriteString(fmt.Sprintf("\"%s\": ", k))
+			err = marshalToString(ctx, sb, obj[k])
+			if err != nil {
+				return err
+			}
+		}
+		sb.WriteRune('}')
 	default:
 		err = ErrUnexpectedJSONTypeOut
 	}

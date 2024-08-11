@@ -3,12 +3,26 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     cat <<DELIM > 1pk5col-ints.csv
 pk,c1,c2,c3,c4,c5
 0,1,2,3,4,5
 1,1,2,3,4,5
+DELIM
+
+    cat <<DELIM > 1pkjsonmap.csv
+pk,j
+0,"{""a"":1,""b"":""value""}"
+DELIM
+
+    cat <<DELIM > 1pkjsonarray.csv
+pk,j
+1,"[1,2,3]"
+DELIM
+
+    cat <<DELIM > 1pklongtext.csv
+pk,t
+1,imzinjwrqbntxwvroeilncaqtfhmvyapmkfwydcprxuobofasoqqsjikrpbfbiugifrxbudrdxvpngeucqfhkjubuctibzgunzitfpiezccgdosjspbajeoykgvubrnmpxggvdrmjgqebhkzjiihmktiieuxwuxandzgazahztuuslydjxyhtmntslbvfbiknhhaomdeeyljrccskfewldpsunsqtiuxnebzelvlolnxubroofbdacyjizzpscioymhbtmmyfxtcpkccdwgkiyhdbrgnwgaudrqhpvyidvgxelvdmbbetvusfdqsvpvttzxuvgnfoycytavufzpkixewauaaqsofyovcbeyhjwznwzyfrvaqxyrovcywauydgvecnbgedcvqolhtodmrgkskmmavfeotujjbadilledpwkykrjhrpppqamqxbeajjtzrvwpdzowbqksbevexidoltpulwgmlxlrcfxvobjgjscvhpzkatmzbusxhoxidjjudwoultrtaiyilwgwsxurpbcclnnegtmdopzewidzexgbraxywryimsukugxoxyzhghsbqfasmgevrrpntijskjtxvrchuoxbllqijgtvodzdxdobudibkaoghsyfuehftilybmfujrkkxvwnfyonapzyipxlnktcfxmhirfspqkyltdmmwscvyamjwiuagvrqcnrtsibidngypeqcbdqipdlswztmqrwfmsilihaxokcbfhahdwluequvdgiurbomlahecltccevdimtzugehsnuycjlnebnladjvvuvoleamjhlpuspfmgowdahqxizfbsayfhiwfbbyfgljhqzilyqvlpwxytlqdynbyjchgbcaidrbvxldnzmgmsleixgttsclzrutmjoqfqocaifssztaoqsshhlghwoanutrnaylpnijgmkhktvzqteflvnconisnbdssleeuakcqcigssjobqibwzruqqitjmujwhuwefmnozsyftdimilpwczbttkspjitnxmafrdjlabaklsjudbkdqzidtlvjakyandguqcrhqogsxhbfmfvpnyotbswjcsqtxtcvvrsgfmyrwyhqkadoggzmzugwbzazmuigrntjsdyxfmcpapxlqyllbegwscwfpluehtxebgdluffqkgzlbmrjopnefnmlahmubrtmcphakkmgaikjeigfoxszvunwabicsrxiaaodeizqdwdrgczoquvtjuykdvzghrpghvtvvnbnyhswwzfghjduprszznbqsmcbmjkoywbaxbpbnejmzfqnrhilutxnhctsnvmebqyljnpnghvmaziyhhxxonojrjxrvjapqxhmimxpkpkvrmpsoldqjxwpccuayuwvasqgmphpvmtnyojgihlniffdoobdcrgmxnycithvwekvgeyynlckxndmtjoiluecvfivvegyhaiwrqenzaeovugcligvdcrcfwhiiqojajeihxztnhxhqaktnwblvvwrgcvyfbqncgktxsvrrfdesdsxjaoiseoqmcsceospawxabjaladbrjhsninefqybahoezxwdcsqjnmvmzugepiohamlwdgxxjmljnqxzffxjixxhyehsfifoucgkdlnnduollhzwweynujukmnaxnjtynpjwssdhzmdhpkxxxdpymtimozatzfopatlknlluujitqgallwqswlfdgovdymgelractxmckameulrvnurhmpwojnkztbjuwmcrxwzsqenhxwjuwfldqtltagwsnufhsetnromyvfuajivuthqxpplzdzevjahlphnidjowjydclwaeoylvoibtvnnohkepmvdhilspxunubrmxmgqponogwujbtvmcucclvfterepzppbdonqcqhlsjthsiajxmjfkzvkxezroieyqqbbsicuuniqnnigqmzncuctptatlosunxxxfikvgvnigkohxdsopacubidnzcxyxwyexsulzuawzuxecogwpawimrudwgsjfsrjdjgimevisqgvqdotqtzvxogmuvevfmgihsrvcgiuaafoockbqmepmcsjsijyzrksqmcdtuyzcopvsfjyqxmdvnrlrownchedabcrfmrjzbvctbcqfgrxgqtijranslelbmwrrpqnwbookahuavrncyclbcieuoedprgounqgtxygjqkwjqzofiacpvkjsyrjpumxypgixkpldtfpldnmniiiyxbnhodthjlqheyicnpxtlutdmtrxsqgadhxqrwsgimjcmjbpfklwaqsgqxhjqkqgtpnjkwfhwrbnpkjqtefjddqptcshkahkovktjmxibuyzxgjswbdantucqxyqdanprxouopmbanbgwzkbqyohnlbevwxhcuvwvsofhjbgadbgkqusxtnkeaxiyihfkjidtastpplehadkvftpdlivflodekmpdfwsyvbcdttmgicvcqoaehvlgtgbdslwuueuqausjjxufijvonjlfkffmhgaoodmavqpcssqzbvqxdpfbauagvgoutikngdmfyoirihginzwrmotgdyzojahtamsjraxjfyyupnwjhfjgrgyzdlrkqnktxppldjcuaulvimnbccwjcjbynbizpfdfoeblsodjzketiefebxafsfkmsrjyimdjsbkyfyfqimpqdzkmsyfsswhmjefwbtqcteeshebwwzfisaxzexfiooecgoxjfqykshoqtriaiwsnsmfcxtsrmrwrudfmojiyeqglhlbutjvmokejtduojtznosdajgfgnvahhewdvdqflpeasltsqgnbxqnqccnczqrfcrvusbipyblmfupgbbnoqxtgowajozffcsmienpxmlnynsyvealrubnihepvgxbsetyobrfqoabtjhigrlgvbmdaswquahwcddkzsnqovrbikdnylpiemqpsaipnnhmdwitzdqxouedqmomidiuaxhdvhogzjmzezbkikplwnbymqezsndvjfsnervwpwsykwmmjsrazxuxeyctyclxhezhmhhnsmbesrhdnxspdbgcbekyzhlwfaqzwukhtryrpaearbhcjkkgticegjvpoujkouqecwroznscpsrlabfnbolynfptktfjxzwrqkquchszwaqhtgzpcghmcwwhbwbojlphhyjalgrtctqfligyxxajdpcuaopqymczfammytovljaetumbqcyfsukrxdjtifhsdzmqanfjjugyhuqftzhuiqahrltsowvecbkbsxlqswrikbzifjjfgztpbampvebnoupmfbihcraofsqfngxbrsjqpymilbcrquwnbyiduqdwocabptgfqzjnienzhqaltshdhljjvkoxnyslgridqjwgebpzpanwqmfwsczodqmyalfwgmuxrvagkjryvbvqhnzgfgmlpxuejfgmbmjrwlefozibqdgaujxgrskgevwmgeuohciwuwxrighkrlgwecmablejkgxdzxhzexlcxnnexmilmuatknvhaxtnahjfzudrfuytdbounertogvicfncnbbxzglczeevvlywjzbbwuzhqfxshtzkyknnplublkmljkrmanoqhdtqpmfkernutmgxeasvbfhepfokbqwrtysrxemriveuwqtndfbxhihtdyqbmhqgkwibrtxlcvmtajdbqfrfvdbmxkyaeijycdzvvohxtrwbhibtbpwufdsgymjbgeiykclcxemeieuofwacxweoeoaonvawgjvqkzzsanlugdjldcaffqocywheipjpgcsjpnrefuahgbhcucbdtwsalwugjlehiuitdgmsmoqvwtqwzjfkjjkkdpucyowqmfreoebuznwlghnfzgyqtjkpyhrsyunvdhrtkubdbqltyrqdwgoajeqgiaivthzmvwiehgjgfnaqnzthisiwlnnekwhbonjxhbozarowlqsxnzbrmrvdgarorhoeclqcisyqbkfqsxztrekoeayuoavedjaepaapcohdleijxksjbqyejsolwodjyqaymdjerwuglakawdzfhwtptcdhhontmvwgczgcgrtbqzclakgclsnuaxwqcdmgpnedrrecivaaznxyncchazvgtnlrcyvxqbwnrfqrccwapjgpqgxzrezhxxfxfokojirmmhgkcbjchiojwhbqayqkvcxhusxsknjjpenchcbsxgbxshsmwfdyuywcmatrwaamnrnopkqoryldzjkjvpvbdqutdlsjyfsvzgglbbfrrjvgrxtzuedkxymjcfejhdljmdqtimgrxdazicvdiqoyfxzojnrswrxvjktalmvtcpomdiqyyheoiablzmqgiayhksmnqkdpuadmtziplmqihprihrksayriqmpawsupaffmhokqjzxzpfncryohbwooddpnebeivgpklnmyitmagigqrahwmprhgmfghajhlfuqvwyyhrrolyxzhtsookexramcxcktcgxsnswqanfnsvchcozvdngkekstmskpcgetyzmuyaikmqlnoijuohgmegpeatjngirqtwkslkbsmqpwdaalbtiqfoljfauwspigblfwrtvlwlrvkyhlglxnuqkggkjeuwerzmsiajfxuasunfglcrcycbqwqtnllvhqehskqxtnedfrgpwlezwdghcznwlsddheifqrbloiqsxuvqrlxyvwraayzgcdewbopfomhrxiubkovpmdzjsrfhdafltcafxpcxbbyygqmvjijprhlsuswqrxpeudlmnvauzisylomgokpvrybjsxrubjwqhcpptrlfxjvtuchrnohdrfuqahkqqhgydiydsqhzmlbenwbgddtuetlftagfejzesatdgkjxikcdfggcgiabjpzorftvzfnbizpegtaykcioeymllgewxyiomdbevhaxxdwaxhnghdwvftdvqonzjnjpiwfikwowhzmettgpntbrbrfakqhbcmwvutosnugdohagliejtftcdxdgdpyrzsqmqcvpmhvcfpszhmvqyhrgaodiaiijrtseubbubozvnppwbvhrxllurcycwxudnqbegtcbiwovglitxhiwjhydhwsexafkvpzjdgjjrhuwynbdedcbvjxypjspipcnhllrrbokdtzsditkpxkyktnebszbldnsfwlrsyyiylxwoxysqfujuhgvbrfqfxxxgknpbpdftwfhlkysyyedrioopuoisrrrvwhxisiqanlogedfzkfhcamrqugctkgrjeumzgfosjgbbxgaebachrtwrubwsywzqlchpbxediaxsvuevvzxqtticpguladcypsnuenepufumcismswmlxhqkyuwqjjwdoqtdnkeshpuuaaekwayfiwhwmcydgfnmybhwtloidjqunvyezeycqnldljigadwgpoekzqswmetnksmowunatpwwzuudajpmeoqifyolbzsysqndbpbjskhamduqlccgpzwoolxqtymaypnlvlxmzghvunrgtklcjiinrrblefcrmiubvrhkedcmzfqjbpyyrhajctbwcwzrvgrllqhcgccltxajniaxcsylnnwfmfxhfghwlqtzntkivtgzomzjsslkqfktilbufkmsukttrpbevtpuxwvmyhxocgwzafekaahsecewmqhbudxwaadipfephxzctxaxvlruqzyubnptxexhrbkwjyeexdqbnejvexpntdthzcqftttrnkdsysolobwndpcmvnyeqzhmtstfgpzgrmidlmwjrjxeutbepnqtefimygqrjujqjpaumfosikdpxtptjptnvsdzomfgovpqvggnawxdarrtnahjydbouyrkwjruzgpzfgqoiqtdibdwggeugeepblhipobtktufskiwixvdjkhjgnvxsaxwcbjgqehlnurjwnjctwmhafkctwlrqjpvatigdfvuftwvqohoabtyztxhfsreroezhdwapqpsrnkgeszzompdaaxxhmwiqjelkjczmnovotipnrrpgfavexmhqlizcznrjsixgrsmbylahplomeblrfgoxbjsmhhrjskoivgcwdhyylisjdsrucwiezshvjqlstycspegvzlocowdtzmacgplanudotdeqicmvtgzfxtcppkwjfmyjurshhxeggchdegdcsmlasypeioszxfbqvrdhibwubhcvjuzcevushtvolgligzppqsaoymtwthejzajspqixfhgvbbcylumqlfqmfvpnroaogrundewtvbcuiuuzmiqnruowgshjngrdidgkutxqpdzcdnoyujbgqioenuzalpqsquroaiuxduizwhuznlzcmxwpbdgyjejpvluhdxlhmovgogfmaiavjlhgnmiihnjejgeznxianhmtwnorxussxvvwocaiadopwcxupkfrhxeicozmgojnhxnvfttuivoljlsgkrfuhiqyygrrqlnelqrypbvjhmbmzgrhbugdlrsyawozgwahujnwhuwanutoinbgqssdoapfsmvlgvlhnrdmajgwlymojmgrbkictcpllmmlaolpfemkgrcythkazozmgjmjsxehudlkxmgsevszenrbucayevgkwjznnjlssimtvjevwbahcucfantaerorvsimleoblzvztgrbuwrnoufjyoigyujnhexogiqaygcprxzihbeturjlcyawcgwzwfsiegmwgzupdjgayukvdonisgdwwlcsmtqijjkhwevimszxuqslesqmhkylgwhfbbbthsdgvjgbmicrzlveppdqjwqfmwwjxfxuzvpdiflfrfljypqpyvhxkyiwozczooherrwxmupmafubkoyaayxburlcmygmspqwradslurmqbqahklkaesbrbcrvliaunsatytozbjbgadflfebkrtjadjyqftljiksjcmlrjwhhwkywxujtofkqxhlggciupioqwvwvebuknonqqauhbrvybfozmlrudoqhdekbjjclrxgzxntourtjjdnzttqrslunjznqezormkjxjdwcwsvvsupvjvyudakufmqzqqnvnpwmhuqlohzjtsolyupmropvbqqklxfizshjgzgdnjsxykbewdtjzpyytqssgjcgdwuxyikfephhnvnwlpjvbexvdysgqfbjosdfifajzqpukpzpzzwncpfvgnquvokxonaglizskzjdmexrdmseyfjpczqxewgyobxhmywjkufjajlmeqzjembjddxugvuzhioqeqvqkwoypnskadkvraardpzuhlayibxrpmilppbgmrzlzyffaxzzsgukeubzfgequjbtpdvsirjqbtevzcdqlcbsfugrhsvkprmuypagmokhfbvovhzebmgjrdaatonhuaqtsvgghenzxcpspygoyryjytyksbctpoqdgegzphkexyvqmuzvnjuysfgaljnmcvnvjvpodxoqwxzyqpplzdgelzzopcyyrmzshxdpofvzwdrzmjohbutglvkdxmrhdvbnnrzaimwngqsftlcgpxewglpmyivpevhzormedutmwjudbpwzpducqldugeoyuyicmktbevuzmijzdjawusegmevufcfqewweogindtisosnfixmlywoxqjhtbmgqatmokubuqkbbrjciofnrdyekiutsqqitoovmrnwpyigwmhqhchgcvqbxumigexpmszamktgrzwffmllxwhhghqnueryidqktisjhvzpudqykkwgagkgzxxbkcppujbxolhiyqkcfvublusyrdpgvjkqdgrznfjmhuguclyddjccrvaeytvisodqswglazpwwzjlerzxuwqqmikaigwuufudaxilnraeueigwfqcvtxerwnpwxfejnqeiskpetgfllkvwgtcjmgertnweotxthadkwogqrsviluhyfwifiznzzukvbmftxrsfolffzuoxyclmacakyqcvyziuwijjrgboxlmelmplrmcxmvskomztmmpnfalzhsoprqfewypjumhitadnlvrcaqukohhbfetrzctmctkcxbqcskycnvfwzoygvvpopuhfvwpiligtdcdfjgsaipnduorlvopvsirenqsswllgqyomrisleeivemgwggerkswqrdfzcanqidirwrhuunbwfgjnuuceyizfazezvvmahapikuyjxsovvhctvlvqghjmkscmwljteqhtrbzngeyxrpgqfpvuxgqqbordilmhzxsryofeygwozwcszsycfyrbzlokhsznuxtkaoofdqtrukdxhblchlvzimqhbffnihaxeumqjatxwwtwnvkvfvppirczzkdiufgdmzeewfdworpqbdfpntwntdnltzowkvtsrugahcjahsnrnljnmvalypdkalbguzlphlkmccqgddappjjoiclzjpujtbfdwxfnvxqueoscnhrcgfifnvvbfshjdxafwgqvsffvkioncczaguglhmegndesrcxaagsukggzulezqsmmjopujnsvkavgxdwsibamlicckadetbadpjoxxnuohtgrwojyrltiyqbyfqwfncudrqahvkjqvrvsvuqdmqljqogxmoqgebtqimypyqokidtscekkbrorlqsaxfjynotybwbjthgvzaukjvphmrwezmycbxwnlttqxlavgirszjsrchkdeixbyxsnfyrbgzieeystnnawawzmmszbgmkagltcmwuzbarqcxlmbsgxbjbinbyeyhyuwymuxkbpqswkuwdkfjsannfcxdbephnootlxvkgdqccbmlcdnwbojbpjxbntxarzklvkqkkrvzqjhxgxynysrtennksoqiwfalpysocrowcnomqmbwjnpdvikbatrtnixflqtqmytuopxthrogcctqdrcyeccyyzgwuvojtcwvsswprvoaogjqcevwjjshjyilkptvjhruiiazbhcjqatwjybinqsjlppwwovdvgnnxhrrigcinojytaomnxrlpngemxezbgubkimukbtqjpiyxshvfvqnusclvuafmwvgicxhxfhmuzinabvswptvvctotkgjrpsvgouthvklufucjacumyaoscpvwlegtbxcryrgeafurvjnoiqmspboiteclrllukpcjddudorpplxvevwivbmqukpgvomnhxpuqpytwtlokxzqayphmsnztqqkmprtiyersstucbxbosushkazcgwinahamztalkcafaitlksgyipeelvqziqantawlebaeccjjxsavorzpuwxwlygttgzsykymgctwgyqfbisfaajpaihxijprvvgbmafgwmtbczdfasxohtewylijerhsmfcnjzlhuptatkfbfjexblcursmkmhhuhnppppctqxcqxveufzfahbzfkvcwgvhyuomovudbhvnwhdqqmzzyqztkawosauudcujpfdimoknblcgbzcystzfwvyalxsvbtpmhhbrybjnwnknzmkadcsbmhbvohgnndcjfdtvegwhvidyppxacenkpsnqtybpjfcyfmbegjqhnklbkkoaistysojrnquyisxrepdwxtvlxpjhfjzekevkkypexxpinahegmpzmopvhixrmewqszyakmsyzgsuhqexclymlossyvwvtpgwcjztvedccqtcryidmqupwkrdjgiizereajmgixlurbrgrahielwtlehoisceajmfwteslckawgfviogialbtxwrzrxuvkeblyfamikduylmnypowbxehnwesejcesejssbmuuodjyakyshevghcbbpyggwirickqcwodbkfgldlfsrqaqnfhrtmsxmomctmxpzsxptrcxfpjjpmkkylfpkqxskcpznvegiujayyaeuknwkopfunauxmgwtdlkrhbfvusfrxvgjuzcbeoeznilcooccsnyquebtuonekjkhsembqrtigryglqulzrxmpewvmcxurmcytrhxdcepmkoxityliljekkoficoflvedhngajwowdruetpvfezvkfxtmerlijoxgiuekeozqunyouzpafrqjxwmkhczgdwkxwqlzeqehdapgogehvjzeigfnffedzwfgdmbnuhmfalxxfmmwsldzjdkfynnbhspfgiinffdscdkjxzoutwrbptupyydjjsnnqbbmmyuyxwqgahypsilwqlcwdcoyyxkrupnofljiuxwdrnaeeabfrpruebvxzjppcjkyolngzfmmoyrjlcmxkzmbpaffvtegvjwsvozlowaexddkwrarpowmqsjgogkvnebjxrbyjpavmlauhittozprdyfypcytgoscdsqtjmigszonevrzkbnesextihskpdopoqesiyofxhxavmcvynfbcpnqhaniqdieeoejrwkjfdslegesljibbcwwrydouxuwkkikapgmwkjduelbvujojxzftawwamjdbdyltqtayumvkuzxnulksbcttmosxzjkeetrsmgdtpdhaemwdehdhhlmlctvmxaqnpxplkqujsofsiuowlxyptmgtjwevhdwnwczwbcjkhwisgbhnghbhhozxixatkaqmeqtlajajclryreuiugdxuethaedravgjifurfcmoovbcuzdfnzgbvadqdygloktddbenktalpvuyzglcajlblvaftuulqswmkdwsmpiqtytqygwboogjthlefgjmwmyikygwpdddqmrffvxmtiecksgypxtjqbilizculyffgicwtqdzjfeligeocyxjrlboqretfkssirnldfmovxeweplfgeblraelqvuexrurhtwdsizkmxpnntppuujxpeuewaylmwirbqfupwqcxoifadsmcwfoyhlxcpphtckbjfytlunsgbmaoyynwttubehlehhqnpxqdpbunntxpxhsmkhvztlbajnmglwkkcmcxpoqnmkxxderezsblkocpfqoblhqbmzivazjzdqltvvbomzpfxkohkzyovjgdjcntcnuayzbwvbbalboucshezuflknytkajcefuibstolzaeymjtsjrbrwpoopbsztuzbmglyqmaphnklmakuovatkybqfubiirevflkiisksfulpbnctjqevmirdiyyuvpwswlqhoomvckjqkrqtzgushutgnvaqpnnnxtgtjrvrhfceneimksbbrktslgllfzmqsohuckcjgqosyafnqmhggziywomogfrfuphblummkoturmibrpuskhabpxlqfbqwcqyshhrbpraqzcfkieycdbttvhlvxyvatlqctqzplpmwwrtxxtnxmvoehqejvgsoauecwidnleeqprjqzsigsqbxerludnagjaawflqftrikulrgspchkikuhwlsnksihpllqcqcbctxvlzmmgvxkgvozdqfcfuupwuhagcqlcslzfuabtpcjpszjeakbdjhdwqjvnqklwddwqfyfqurggmgsiwbppruiullyatfhdqslcvzgmcibyskfqcplloaoejijlhyxebfywnchkkfewyyxjwihmiasxoljvgmkuolmcvqedbesmidaoizmjujpotdwuymoatxlbhtixzibyqzjzosdtscvkrpitzjcohttmjbicruafgofqjvtcwsbnminynpbibhblbxpnnqoacsdysakodblvcgbxxislkrutidjwpztmsluzabvknsgtytixelizxjlxgnlbgeicigofaaymodujdzbvspfhywjkgtjlhewnayrztkmdeoandefxhayguselqdvpngucrucwgecqpgwerhaejpxwvdudhkrynyjzqadnuymrismhfwftrmvqfciztsyhfmptlzuhjdoabwvjgkjpbhirelxnefyodtrqqtidtjkymlvhseimfenxjjfpitiolkcbgeehiszsbjrwpdfyevhghhytbirtueqkijoujixfioayyoejpunrsbcftcqlgloobpynnasevgoomtiuzgdpymvhqogsdoebjnxdaarziajqyonfqysmsgifsoiskjuzhxgzgoyfdmqcgvhzuopezwokztzroruingkwbhluhtzcbqnvbfoturwswnvvcczffypxsbvtepykicpcbjhmpwkvvinkuhiqdxcfbqvrirbizwxdsssccynvsvpvsyslqpwbawdblgtzwmcootoolnrphgqnnsnxvvyobratcucejfqnzmesvbfjipewwlsurmmqsfiydxycmcsuaeuifswrtxijjntrhosuunxolsupcgwlowgvpilllayzylocqapktnazqdjrxlctrlwnjplrpgsqjosmqxuohrjrqakhuivmwjtwnytkisvmxoipvglkchlulzmwjpzqhfqocyvudahxtsyuwzzppbrprazyxdibmxnnmbrmdzganroswistlyapvkgkzswkgjwsfhayrehpjgzwdxfdujtlumrtsgcxlaygyesdcepxgsqwswqrujhgbvgcvomvretwfgqrknhrrklurtqudezlvuojewbvufysigpqfwqwcbsuepubacmlpjbkjkzonjyagbdqtzeuujjtmnpyzjwvsoetkhfvbwbjcjifadckpxsarsxavkmyzcgzenmujtnolagrxgitzfrzzmlsysngbptlplkvbxklvicvgoxopohnpunnnhbdfocyqysihwawvlpcttbrwnbcnacjwepwlkeqdrpecyjwrdpwbidrltrwuaqqrzwtxgvpiwbptldffmlejaowzhpwzrzqmwqcyifpknmhrlfcfcmatksnzgspbhcwtomojgdroobptadwhtcxbalsvqflianuigbqaotnlapdpujbnplwkmcbekfncwfkjtwxyixgrptdvsqhrirpdemdaiebzgoucidvzqxnipbgqxpveqkvugfzwqervxgtqwprxbtxdpgajtoklxoswwbovwnyjtylwpctyqmaijhxreaclzzkrqgddeljslbopjqdntddwlmlpbroavdqmmupxnxawnwypxgamwoqwdugebsfequutrrtspisnrmtouqiizpzgnfgbfqhitwckzrcfwnixbyjbfmnqjdicbfhlzxmikmrbgqycpweluoqeultyunnmyyeohtkyfbmxpxnhfqjhkhrgrqwfpsdtkscrctrzenopxzyqtkhqljtoylvrzzolqeazhfxhhyhywfthvilxuugydlqmsvmtadwkypelbmbyxytdgtrgfucnjgsmuaeaiubyzqjwbwkwjvcmgkhejfwgkjmjdqrzuzveipfjbswvrctnqdiceeydgsorqrinfveumtdbwmgkyxzvnufyjlaxjcjudsgttzwgluvbajnnjcobkctgwiiedonudfvcgkqkukbzoanxlsxpagsscgeyyqyzasnvtzbrhnoljmuktsyahqgialfdmnifqhfahiaimlrvovvmodkdduyiccserjuqiwhpneuccglckstuwskapbmpfjgfodgvrjadyvzgromfrfinkkecnityecmnjzrigxybjwhhtguwsstgykxeyjesfghnivepcigfykiornhenfttgrehuqiexccfbtyzhnfsdgfrpxpjujctppvttlddxopwydzrbkpqykwbkksgyvmciyelrnzbfltcvoqmjdxomonopnqyevrdyxxvypxsxlevvebppdbcugxcpumripjdsznptnmvmabfngavlfsmqcpcgfgavgdovynkhzpvnuxelcbchtfezcecvwgwwoyydywyrfwtbrchawfylgappclgdqxjhcdjuulvrmggfixszqwdjfpuuxruftgdjovwwnyvnheywjxbybzgdlqbhdnykckuizdahmtkkzytuqfhepebrjvdsoykvmseunwizmowtqxffrcqtgcgrvbxietchnerrzjkoxwnouyiclfiltmttbmcgoqrpsfovetwchkenjcpisqgxnnsmgxeidmazesdgztdwdwtskmgzzcqvizirpiflydzoghvmboudmqlwgpdteueuwpteqrxwjpfxlzlfynylyaihksoddtlotmhkrgiuawbmcaafzsgzncivlxcbdoaxfviollbegiddvsmzdofiemmsqzfrwcvlqmdqitkusrnlpqpbfejerhmtxouwonksagjvztehckfwusgauehlgzrmxnpvlmrpfzxqhabhhklwwjveyomaqlozalbecvzcgyqdixgzvlxclxhzwqnhmwpmdwbigrxjysokfuqrhmtcsukmrgplzrotephvgcssborhslgxcyqbppewbxbdchmhlffyqnxajswztvhsgzkfwevnggreqeogkhytuopvfaarbezcmizwjppbfkfnwikezbgxeygiesxpgegvbspeofvwtcipjwnusszmuqxbbirqivtuzpwsypbzalpcjnddrsvrvyzeiydikcntajssvevkmwhcmzbydyyegkhysvolyplbhusgculxzpxqggbpkjghyqlldxgodnleodfejqzhocsupvlbmfrtzfnszukqsjlyzwljtucivlqldzrxakcwxkguosmqtppnpktbfxerpxzooseaaehhzbixoqszhrvmrvuidgxvbjqxlfptsoltrkzivuhdwfaoslifcifkbbcydghljekdinqwsiqdofgdfkmgpwvfukclpreofviiwewewgibwzydgemrcdxzjiimsoqhmrogorrkxuyeyhwofiwhxuabjrdeijdnnnshdiexqeaufhlbyciqrvwrsknoqtdfogdeaegtwawokgpvovwcriwscbsbbgadhlwqvdmkecfyrcbpxezicuvviuimefjdmibnztsrltwygepnozstpfrvkaisvcobdprkgekufythdxgjebzeufdudhrngodskzkxcfuoqwsbpiakcvgucarqgdrgnoxjrqhphucgutuwqhhpxebbqglntdtslwxfvgvtkdwqpweworlksyqxaiiaezkwrngrgsluadvqlqhblnlrdfwquaqnygynfciqyieqgyncfffsuhumqxrhgqdzzddginjidzfwqjnxrcfevscmpxbgitnkksnplwdsrqmrhaclpirhbhqlwcgubbsiyrnhjoeohhhplobegyepjqeiitywqpcqgwnkpmqfdpdpxvedywxghjoqcpjqsgczivzmdomhgdlgllmwfffojljmzpqijcpkmmszvxovrwvphbzrirzappfblblelnhggfayrunxparxkjblctpplhezkcxtxfxbnrejjqtgmtaoocacojvvahluwspxchgyhhfceygbkffdjvosbqticxtdekaddjkvlucmasuixpwumvfmqwdovjmzxqzzzknmsvxtyqepaqbyzzelbvrgtoykigsqjeaioqujuaypwduxdigjphikmlvwatxbyacatwwosrvhqoshgitrqhmvmyruipfqijojcmunwmlcqczyypywoelhsronvpkaklyuulnbrlxzsabaitqyckjgxuhdjuyayqyvxkjpqfsyjjhtafmckivmnvssohwhnrhbyqrumbatvjrivlslwfwjeguwbcviuzqoyywtjokrgfsdhqwipfvkzhunqcrdszrmpzwojechlhzfbsqmwdxdnrknunvnquzvzydxhhxxfxcuzrhqoeenxulqtiuiljmbsimgnxkbjuvesbeopznjmhqswatiudoagrzwmqtwtivtjhwivjkpuwyrxfplyotkmkzgimkvxhpqoqjgwtzpctruylffrardbipmmqnmgdobvhhhnnnfsiacnhrswggefjxjwqiiattumeuwjltpdgnxgbuoygnxcfvgrifxdjbbfuzrstzjckmqnajyjulpsicaavnfenjhwntlfjzvjlxlxbgbbyzatomxtdwoemyjodiukowizngxhkqswcorceflxerlieqndvgudopqdlngpopbwvsqgqhctzeuzrywbhypzhftigusocddftbfajfclpvwcdwsybyomvoucdyyywfvrtcmanojooamdvbxgsbfxnxvvjuuiccbwmxrdfblcmszdgkgziolhyoiktikhxfvdjkwwxyrzxpwdhpnprdpgpnfqxeaqrjjorvdqbcsevzvmuxtyicgxcwgyugdiucyougwahnfxfnl
 DELIM
 
     cat <<DELIM > 1pksupportedtypes.csv
@@ -73,6 +87,28 @@ teardown() {
     ! [[ "$output" =~ "test" ]] || false
 }
 
+@test "schema-import: import json type" {
+    run dolt schema import --dry-run -c --pks=pk test 1pkjsonmap.csv
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    [[ "${lines[0]}" =~ "test" ]] || false
+    [[ "$output" =~ "\`j\` json" ]] || false
+
+    run dolt schema import --dry-run -c --pks=pk test 1pkjsonarray.csv
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    [[ "${lines[0]}" =~ "test" ]] || false
+    [[ "$output" =~ "\`j\` json" ]] || false
+}
+
+@test "schema-import: import long text" {
+    run dolt schema import --dry-run -c --pks=pk test 1pklongtext.csv
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    [[ "${lines[0]}" =~ "test" ]] || false
+    [[ "$output" =~ "\`t\` text" ]] || false
+}
+
 @test "schema-import: with a bunch of types" {
     run dolt schema import --dry-run -c --pks=pk test 1pksupportedtypes.csv
     [ "$status" -eq 0 ]
@@ -80,11 +116,11 @@ teardown() {
     [[ "${lines[0]}" =~ "test" ]] || false
     [[ "$output" =~ "\`pk\` int" ]] || false
     [[ "$output" =~ "\`int\` int" ]] || false
-    [[ "$output" =~ "\`string\` varchar(16383)" ]] || false
+    [[ "$output" =~ "\`string\` varchar(1023)" ]] || false
     [[ "$output" =~ "\`boolean\` tinyint" ]] || false
     [[ "$output" =~ "\`float\` float" ]] || false
-    [[ "$output" =~ "\`uint\` int unsigned" ]] || false
-    [[ "$output" =~ "\`uuid\` char(36) character set ascii collate ascii_bin" ]] || false
+    [[ "$output" =~ "\`uint\` int" ]] || false
+    [[ "$output" =~ "\`uuid\` char(36) CHARACTER SET ascii COLLATE ascii_bin" ]] || false
 }
 
 @test "schema-import: with an empty csv" {
@@ -105,17 +141,14 @@ DELIM
     [[ "${lines[0]}" =~ "test" ]] || false
     [[ "$output" =~ "\`pk\` int" ]] || false
     [[ "$output" =~ "\`int\` int" ]] || false
-    [[ "$output" =~ "\`string\` varchar(16383)" ]] || false
+    [[ "$output" =~ "\`string\` varchar(1023)" ]] || false
     [[ "$output" =~ "\`boolean\` tinyint" ]] || false
     [[ "$output" =~ "\`float\` float" ]] || false
     [[ "$output" =~ "\`uint\` int" ]] || false
-    [[ "$output" =~ "\`uuid\` char(36) character set ascii collate ascii_bin" ]] || false
+    [[ "$output" =~ "\`uuid\` char(36) CHARACTER SET ascii COLLATE ascii_bin" ]] || false
 }
 
 @test "schema-import: with invalid names" {
-    run dolt schema import -c --pks=pk 123 1pk5col-ints.csv
-    [ "$status" -eq 1 ]
-    [[ "$output" =~ "not a valid table name" ]] || false
     run dolt schema import -c --pks=pk dolt_docs 1pk5col-ints.csv
     [ "$status" -eq 1 ]
     [[ "$output" =~ "not a valid table name" ]] || false
@@ -168,8 +201,8 @@ DELIM
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 7 ]
     [[ "${lines[0]}" =~ "test" ]] || false
-    [[ "$output" =~ "\`pk\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`headerOne\` varchar(16383)" ]] || false
+    [[ "$output" =~ "\`pk\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`headerOne\` varchar(1023)" ]] || false
     [[ "$output" =~ "\`headerTwo\` int" ]] || false
 }
 
@@ -194,7 +227,7 @@ DELIM
     [[ "$output" =~ "\`c3\` int" ]] || false
     [[ "$output" =~ "\`c4\` int" ]] || false
     [[ "$output" =~ "\`c5\` int" ]] || false
-    [[ "$output" =~ "\`c6\` varchar(16383)" ]] || false
+    [[ "$output" =~ "\`c6\` varchar(1023)" ]] || false
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
 
@@ -210,12 +243,12 @@ DELIM
     [ "${#lines[@]}" -eq 11 ]
     [[ "${lines[0]}" =~ "test" ]] || false
     [[ "$output" =~ "\`pk\` int" ]] || false
-    [[ "$output" =~ "\`c1\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`c2\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`c3\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`c4\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`c5\` varchar(16383)" ]] || false
-    [[ "$output" =~ "\`c6\` varchar(16383)" ]] || false
+    [[ "$output" =~ "\`c1\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`c2\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`c3\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`c4\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`c5\` varchar(1023)" ]] || false
+    [[ "$output" =~ "\`c6\` varchar(1023)" ]] || false
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
 
@@ -253,41 +286,54 @@ DELIM
 
 @test "schema-import: --update adds new columns" {
     dolt table import -c -pk=pk test abc.csv
+    dolt sql -q 'delete from test'
+
     dolt add test
     dolt commit -m "added table"
     run dolt schema import -pks=pk -u test abc-xyz.csv
     [ "$status" -eq 0 ]
 
-    dolt diff --schema
     run dolt diff --schema
     [ "$status" -eq 0 ]
-    [[ "$output" =~ '+  `x` varchar(16383) NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `y` float NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `z` int NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `x` varchar(1023),' ]] || false
+    [[ "$output" =~ '+  `y` float,' ]] || false
+    [[ "$output" =~ '+  `z` int,' ]] || false
     # assert no columns were deleted/replaced
     [[ ! "$output" = "-    \`" ]] || false
 
     run dolt sql -r csv -q 'select * from test'
     [ "$status" -eq 0 ]
     [[ "$output" =~ "pk,a,b,c,x,y,z" ]] || false
-    skip "schema import --update is currently deleting table data"
-    [[ "$output" =~ "0,red,1.1,true,,," ]] || false
-    [[ "$output" =~ "1,blue,2.2,false,,," ]] || false
+}
+
+@test "schema-import: --update blocked on non-empty table" {
+    dolt table import -c -pk=pk test abc.csv
+    dolt add test
+    dolt commit -m "added table"
+    
+    run dolt schema import -pks=pk -u test abc-xyz.csv
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "will delete all row data" ]] || false
+    [[ "$output" =~ "dolt sql -q 'delete from test'" ]] || false
+
+    dolt sql -q 'delete from test'
+    dolt schema import -pks=pk -u test abc-xyz.csv
 }
 
 @test "schema-import: --replace adds new columns" {
     dolt table import -c -pk=pk test abc.csv
+    dolt sql -q 'delete from test'
+
     dolt add test
     dolt commit -m "added table"
     run dolt schema import -pks=pk -r test abc-xyz.csv
     [ "$status" -eq 0 ]
 
-    dolt diff --schema
     run dolt diff --schema
     [ "$status" -eq 0 ]
-    [[ "$output" =~ '+  `x` varchar(16383) NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `y` float NOT NULL,' ]] || false
-    [[ "$output" =~ '+  `z` int NOT NULL,' ]] || false
+    [[ "$output" =~ '+  `x` varchar(1023),' ]] || false
+    [[ "$output" =~ '+  `y` float,' ]] || false
+    [[ "$output" =~ '+  `z` int,' ]] || false
     # assert no columns were deleted/replaced
     [[ ! "$output" = "-    \`" ]] || false
 
@@ -295,6 +341,20 @@ DELIM
     [ "$status" -eq 0 ]
     [[ "$output" =~ "count(*)" ]] || false
     [[ "$output" =~ "0" ]] || false
+}
+
+@test "schema-import: --replace blocked on non-empty table" {
+    dolt table import -c -pk=pk test abc.csv
+    dolt add test
+    dolt commit -m "added table"
+
+    run dolt schema import -pks=pk -r test abc-xyz.csv
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "will delete all row data" ]] || false
+    [[ "$output" =~ "dolt sql -q 'delete from test'" ]] || false
+
+    dolt sql -q 'delete from test'    
+    dolt schema import -pks=pk -u test abc-xyz.csv
 }
 
 @test "schema-import: --replace drops missing columns" {
@@ -305,16 +365,17 @@ pk,x,y,z
 DELIM
     dolt table import -c -pk=pk test abc-xyz.csv
     dolt add test
+    dolt sql -q 'delete from test'
+
     dolt commit -m "added test"
     run dolt schema import -pks=pk -r test xyz.csv
     [ "$status" -eq 0 ]
 
-    dolt diff --schema
     run dolt diff --schema
     [ "$status" -eq 0 ]
-    [[ "$output" =~ '-  `a` varchar(16383) NOT NULL,' ]] || false
-    [[ "$output" =~ '-  `b` float NOT NULL,' ]] || false
-    [[ "$output" =~ '-  `c` tinyint NOT NULL,' ]] || false
+    [[ "$output" =~ '-  `a` varchar(1023),' ]] || false
+    [[ "$output" =~ '-  `b` float,' ]] || false
+    [[ "$output" =~ '-  `c` tinyint(1),' ]] || false
     # assert no columns were added
     [[ ! "$output" = "+    \`" ]] || false
 }

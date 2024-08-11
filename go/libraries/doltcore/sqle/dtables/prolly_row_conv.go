@@ -15,13 +15,13 @@
 package dtables
 
 import (
+	"context"
+
 	"github.com/dolthub/go-mysql-server/sql"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/diff"
 	"github.com/dolthub/dolt/go/libraries/doltcore/rowconv"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
-	"github.com/dolthub/dolt/go/store/prolly/shim"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/val"
 )
 
@@ -37,10 +37,11 @@ type ProllyRowConverter struct {
 	pkTargetTypes    []sql.Type
 	nonPkTargetTypes []sql.Type
 	warnFn           rowconv.WarnFunction
+	ns               tree.NodeStore
 }
 
-func NewProllyRowConverter(inSch, outSch schema.Schema, warnFn rowconv.WarnFunction) (ProllyRowConverter, error) {
-	keyProj, valProj, err := diff.MapSchemaBasedOnName(inSch, outSch)
+func NewProllyRowConverter(inSch, outSch schema.Schema, warnFn rowconv.WarnFunction, ns tree.NodeStore) (ProllyRowConverter, error) {
+	keyProj, valProj, err := schema.MapSchemaBasedOnTagAndName(inSch, outSch)
 	if err != nil {
 		return ProllyRowConverter{}, err
 	}
@@ -54,10 +55,13 @@ func NewProllyRowConverter(inSch, outSch schema.Schema, warnFn rowconv.WarnFunct
 			continue
 		}
 		inColType := inSch.GetPKCols().GetByIndex(i).TypeInfo.ToSqlType()
-		outColType := outSch.GetAllCols().GetByIndex(j).TypeInfo.ToSqlType()
+		outColType := outSch.GetPKCols().GetByIndex(j).TypeInfo.ToSqlType()
 		if !inColType.Equals(outColType) {
 			pkTargetTypes[i] = outColType
 		}
+		// translate tuple offset to row placement
+		t := outSch.GetPKCols().GetByIndex(j).Tag
+		keyProj[i] = outSch.GetAllCols().TagToIdx[t]
 	}
 
 	for i, j := range valProj {
@@ -65,13 +69,23 @@ func NewProllyRowConverter(inSch, outSch schema.Schema, warnFn rowconv.WarnFunct
 			continue
 		}
 		inColType := inSch.GetNonPKCols().GetByIndex(i).TypeInfo.ToSqlType()
-		outColType := outSch.GetAllCols().GetByIndex(j).TypeInfo.ToSqlType()
+		outColType := outSch.GetNonPKCols().GetByIndex(j).TypeInfo.ToSqlType()
 		if !inColType.Equals(outColType) {
 			nonPkTargetTypes[i] = outColType
 		}
+
+		// translate tuple offset to row placement
+		t := outSch.GetNonPKCols().GetByIndex(j).Tag
+		valProj[i] = outSch.GetAllCols().TagToIdx[t]
 	}
 
-	kd, vd := shim.MapDescriptorsFromSchema(inSch)
+	if len(valProj) != 0 && schema.IsKeyless(inSch) {
+		// Adjust for cardinality
+		valProj = append(val.OrdinalMapping{-1}, valProj...)
+		nonPkTargetTypes = append([]sql.Type{nil}, nonPkTargetTypes...)
+	}
+
+	kd, vd := inSch.GetMapDescriptors()
 	return ProllyRowConverter{
 		inSchema:         inSch,
 		outSchema:        outSch,
@@ -82,43 +96,42 @@ func NewProllyRowConverter(inSch, outSch schema.Schema, warnFn rowconv.WarnFunct
 		pkTargetTypes:    pkTargetTypes,
 		nonPkTargetTypes: nonPkTargetTypes,
 		warnFn:           warnFn,
+		ns:               ns,
 	}, nil
 }
 
 // PutConverted converts the |key| and |value| val.Tuple from |inSchema| to |outSchema|
 // and places the converted row in |dstRow|.
-func (c ProllyRowConverter) PutConverted(key, value val.Tuple, dstRow []interface{}) error {
-	err := c.putFields(key, c.keyProj, c.keyDesc, c.pkTargetTypes, dstRow)
+func (c ProllyRowConverter) PutConverted(ctx context.Context, key, value val.Tuple, dstRow []interface{}) error {
+	err := c.putFields(ctx, key, c.keyProj, c.keyDesc, c.pkTargetTypes, dstRow)
 	if err != nil {
 		return err
 	}
 
-	err = c.putFields(value, c.valProj, c.valDesc, c.nonPkTargetTypes, dstRow)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.putFields(ctx, value, c.valProj, c.valDesc, c.nonPkTargetTypes, dstRow)
 }
 
-func (c ProllyRowConverter) putFields(tup val.Tuple, proj val.OrdinalMapping, desc val.TupleDesc, targetTypes []sql.Type, dstRow []interface{}) error {
+func (c ProllyRowConverter) putFields(ctx context.Context, tup val.Tuple, proj val.OrdinalMapping, desc val.TupleDesc, targetTypes []sql.Type, dstRow []interface{}) error {
 	for i, j := range proj {
 		if j == -1 {
 			continue
 		}
-		f, err := index.GetField(desc, i, tup)
+		f, err := tree.GetField(ctx, desc, i, tup, c.ns)
 		if err != nil {
 			return err
 		}
 		if t := targetTypes[i]; t != nil {
-			dstRow[j], err = t.Convert(f)
+			var inRange sql.ConvertInRange
+			dstRow[j], inRange, err = t.Convert(f)
 			if sql.ErrInvalidValue.Is(err) && c.warnFn != nil {
 				col := c.inSchema.GetAllCols().GetByIndex(i)
 				c.warnFn(rowconv.DatatypeCoercionFailureWarningCode, rowconv.DatatypeCoercionFailureWarning, col.Name)
 				dstRow[j] = nil
 				err = nil
-			}
-			if err != nil {
+			} else if !inRange {
+				c.warnFn(rowconv.TruncatedOutOfRangeValueWarningCode, rowconv.TruncatedOutOfRangeValueWarning, t, f)
+				dstRow[j] = nil
+			} else if err != nil {
 				return err
 			}
 		} else {

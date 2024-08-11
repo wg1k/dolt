@@ -25,10 +25,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table"
 )
 
 // writeBufSize is the size of the buffer used when writing a csv file.  It is set at the package level and all
@@ -41,12 +42,14 @@ type CSVWriter struct {
 	closer  io.Closer
 	info    *CSVFileInfo
 	sch     schema.Schema
+	sqlSch  sql.Schema
 	useCRLF bool // True to use \r\n as the line terminator
 }
 
+var _ table.SqlRowWriter = (*CSVWriter)(nil)
+
 // NewCSVWriter writes rows to the given WriteCloser based on the Schema and CSVFileInfo provided
 func NewCSVWriter(wr io.WriteCloser, outSch schema.Schema, info *CSVFileInfo) (*CSVWriter, error) {
-
 	csvw := &CSVWriter{
 		wr:     bufio.NewWriterSize(wr, writeBufSize),
 		closer: wr,
@@ -78,59 +81,98 @@ func NewCSVWriter(wr io.WriteCloser, outSch schema.Schema, info *CSVFileInfo) (*
 	return csvw, nil
 }
 
-// GetSchema gets the schema of the rows that this writer writes
-func (csvw *CSVWriter) GetSchema() schema.Schema {
-	return csvw.sch
-}
-
-// WriteRow will write a row to a table
-func (csvw *CSVWriter) WriteRow(ctx context.Context, r row.Row) error {
-	allCols := csvw.sch.GetAllCols()
-	colValStrs := make([]*string, allCols.Size())
-
-	sqlRow, err := sqlutil.DoltRowToSqlRow(r, csvw.sch)
-	if err != nil {
-		return err
+// NewCSVSqlWriter writes rows to the given WriteCloser based on the sql schema and CSVFileInfo provided
+func NewCSVSqlWriter(wr io.WriteCloser, sch sql.Schema, info *CSVFileInfo) (*CSVWriter, error) {
+	csvw := &CSVWriter{
+		wr:     bufio.NewWriterSize(wr, writeBufSize),
+		closer: wr,
+		info:   info,
+		sqlSch: sch,
 	}
 
-	for i, val := range sqlRow {
-		if val == nil {
-			colValStrs[i] = nil
-		} else {
-			v, err := sqlutil.SqlColToStr(ctx, csvw.sch.GetAllCols().GetAtIndex(i).TypeInfo.ToSqlType(), val)
-			if err != nil {
-				return err
-			}
-			colValStrs[i] = &v
+	if info.HasHeaderLine {
+		colNames := make([]*string, len(sch))
+		for i, col := range sch {
+			nm := col.Name
+			colNames[i] = &nm
+		}
+
+		err := csvw.write(colNames)
+		if err != nil {
+			wr.Close()
+			return nil, err
+		}
+	}
+
+	return csvw, nil
+}
+
+func (csvw *CSVWriter) WriteSqlRow(ctx context.Context, r sql.Row) error {
+	var colValStrs []*string
+	var err error
+	if csvw.sch != nil {
+		colValStrs, err = csvw.processRowWithSchema(r)
+		if err != nil {
+			return err
+		}
+	} else {
+		colValStrs, err = csvw.processRowWithSqlSchema(r)
+		if err != nil {
+			return err
 		}
 	}
 
 	return csvw.write(colValStrs)
 }
 
-func (csvw *CSVWriter) WriteSqlRow(ctx context.Context, r sql.Row) error {
+func toCsvString(colType sql.Type, val interface{}) (string, error) {
+	var v string
+	// Due to BIT's unique output, we special-case writing the integer specifically for CSV
+	if _, ok := colType.(types.BitType); ok {
+		v = strconv.FormatUint(val.(uint64), 10)
+	} else {
+		var err error
+		v, err = sqlutil.SqlColToStr(colType, val)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return v, nil
+}
+
+func (csvw *CSVWriter) processRowWithSchema(r sql.Row) ([]*string, error) {
 	colValStrs := make([]*string, csvw.sch.GetAllCols().Size())
 	for i, val := range r {
 		if val == nil {
 			colValStrs[i] = nil
 		} else {
-			var v string
-			var err error
-			colType := csvw.sch.GetAllCols().GetAtIndex(i).TypeInfo.ToSqlType()
-			// Due to BIT's unique output, we special-case writing the integer specifically for CSV
-			if _, ok := colType.(sql.BitType); ok {
-				v = strconv.FormatUint(val.(uint64), 10)
-			} else {
-				v, err = sqlutil.SqlColToStr(ctx, colType, val)
-				if err != nil {
-					return err
-				}
+			colType := csvw.sch.GetAllCols().GetByIndex(i).TypeInfo.ToSqlType()
+			v, err := toCsvString(colType, val)
+			if err != nil {
+				return nil, err
 			}
 			colValStrs[i] = &v
 		}
 	}
+	return colValStrs, nil
+}
 
-	return csvw.write(colValStrs)
+func (csvw *CSVWriter) processRowWithSqlSchema(r sql.Row) ([]*string, error) {
+	colValStrs := make([]*string, len(csvw.sqlSch))
+	for i, val := range r {
+		if val == nil {
+			colValStrs[i] = nil
+		} else {
+			colType := csvw.sqlSch[i].Type
+			v, err := toCsvString(colType, val)
+			if err != nil {
+				return nil, err
+			}
+			colValStrs[i] = &v
+		}
+	}
+	return colValStrs, nil
 }
 
 // Close should flush all writes, release resources being held
@@ -146,12 +188,12 @@ func (csvw *CSVWriter) Close(ctx context.Context) error {
 }
 
 func (csvw *CSVWriter) write(record []*string) error {
-	return WriteCSVRow(csvw.wr, record, csvw.info.Delim, csvw.useCRLF)
+	return writeCsvRow(csvw.wr, record, csvw.info.Delim, csvw.useCRLF)
 }
 
-// WriteCSVRow is directly copied from csv.Writer.Write() with the addition of the `isNull []bool` parameter
+// writeCsvRow is directly copied from csv.Writer.Write() with the addition of the `isNull []bool` parameter
 // this method has been adapted for Dolt's special quoting logic, ie `10,,""` -> (10,NULL,"")
-func WriteCSVRow(wr *bufio.Writer, record []*string, delim string, useCRLF bool) error {
+func writeCsvRow(wr *bufio.Writer, record []*string, delim string, useCRLF bool) error {
 	for n, field := range record {
 		if n > 0 {
 			if _, err := wr.WriteString(delim); err != nil {
@@ -233,19 +275,18 @@ func WriteCSVRow(wr *bufio.Writer, record []*string, delim string, useCRLF bool)
 // Below is the method comment from csv.Writer.fieldNeedsQuotes. It is relevant
 // to Dolt's quoting logic for NULLs and ""s, and for import/export compatibility
 //
-// 		fieldNeedsQuotes reports whether our field must be enclosed in quotes.
-// 		Fields with a Comma, fields with a quote or newline, and
-// 		fields which start with a space must be enclosed in quotes.
-// 		We used to quote empty strings, but we do not anymore (as of Go 1.4).
-// 		The two representations should be equivalent, but Postgres distinguishes
-// 		quoted vs non-quoted empty string during database imports, and it has
-// 		an option to force the quoted behavior for non-quoted CSV but it has
-// 		no option to force the non-quoted behavior for quoted CSV, making
-// 		CSV with quoted empty strings strictly less useful.
-// 		Not quoting the empty string also makes this package match the behavior
-// 		of Microsoft Excel and Google Drive.
-// 		For Postgres, quote the data terminating string `\.`.
-//
+//	fieldNeedsQuotes reports whether our field must be enclosed in quotes.
+//	Fields with a Comma, fields with a quote or newline, and
+//	fields which start with a space must be enclosed in quotes.
+//	We used to quote empty strings, but we do not anymore (as of Go 1.4).
+//	The two representations should be equivalent, but Postgres distinguishes
+//	quoted vs non-quoted empty string during database imports, and it has
+//	an option to force the quoted behavior for non-quoted CSV but it has
+//	no option to force the non-quoted behavior for quoted CSV, making
+//	CSV with quoted empty strings strictly less useful.
+//	Not quoting the empty string also makes this package match the behavior
+//	of Microsoft Excel and Google Drive.
+//	For Postgres, quote the data terminating string `\.`.
 func fieldNeedsQuotes(field *string, delim string) bool {
 	if field != nil && *field == "" {
 		// special Dolt logic

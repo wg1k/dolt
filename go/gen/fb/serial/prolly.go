@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package serial
 import (
 	"strconv"
 
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type ItemType byte
@@ -50,23 +50,28 @@ type ProllyTreeNode struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) *ProllyTreeNode {
+func InitProllyTreeNodeRoot(o *ProllyTreeNode, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &ProllyTreeNode{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) *ProllyTreeNode {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) (*ProllyTreeNode, error) {
 	x := &ProllyTreeNode{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitProllyTreeNodeRoot(x, buf, offset)
 }
 
-func (rcv *ProllyTreeNode) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) (*ProllyTreeNode, error) {
+	x := &ProllyTreeNode{}
+	return x, InitProllyTreeNodeRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *ProllyTreeNode) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if ProllyTreeNodeNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *ProllyTreeNode) Table() flatbuffers.Table {
@@ -335,8 +340,10 @@ func (rcv *ProllyTreeNode) MutateTreeLevel(n byte) bool {
 	return rcv._tab.MutateByteSlot(24, n)
 }
 
+const ProllyTreeNodeNumFields = 11
+
 func ProllyTreeNodeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(ProllyTreeNodeNumFields)
 }
 func ProllyTreeNodeAddKeyItems(builder *flatbuffers.Builder, keyItems flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(keyItems), 0)
@@ -393,109 +400,5 @@ func ProllyTreeNodeAddTreeLevel(builder *flatbuffers.Builder, treeLevel byte) {
 	builder.PrependByteSlot(10, treeLevel, 0)
 }
 func ProllyTreeNodeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	return builder.EndObject()
-}
-
-type CommitClosure struct {
-	_tab flatbuffers.Table
-}
-
-func GetRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) *CommitClosure {
-	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &CommitClosure{}
-	x.Init(buf, n+offset)
-	return x
-}
-
-func GetSizePrefixedRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) *CommitClosure {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
-	x := &CommitClosure{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
-}
-
-func (rcv *CommitClosure) Init(buf []byte, i flatbuffers.UOffsetT) {
-	rcv._tab.Bytes = buf
-	rcv._tab.Pos = i
-}
-
-func (rcv *CommitClosure) Table() flatbuffers.Table {
-	return rcv._tab
-}
-
-func (rcv *CommitClosure) RefArray(j int) byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
-	}
-	return 0
-}
-
-func (rcv *CommitClosure) RefArrayLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *CommitClosure) RefArrayBytes() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
-	if o != 0 {
-		return rcv._tab.ByteVector(o + rcv._tab.Pos)
-	}
-	return nil
-}
-
-func (rcv *CommitClosure) MutateRefArray(j int, n byte) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
-	if o != 0 {
-		a := rcv._tab.Vector(o)
-		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
-	}
-	return false
-}
-
-func (rcv *CommitClosure) TreeCount() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *CommitClosure) MutateTreeCount(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(6, n)
-}
-
-func (rcv *CommitClosure) TreeLevel() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
-	if o != 0 {
-		return rcv._tab.GetByte(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *CommitClosure) MutateTreeLevel(n byte) bool {
-	return rcv._tab.MutateByteSlot(8, n)
-}
-
-func CommitClosureStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
-}
-func CommitClosureAddRefArray(builder *flatbuffers.Builder, refArray flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(refArray), 0)
-}
-func CommitClosureStartRefArrayVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(1, numElems, 1)
-}
-func CommitClosureAddTreeCount(builder *flatbuffers.Builder, treeCount uint64) {
-	builder.PrependUint64Slot(1, treeCount, 0)
-}
-func CommitClosureAddTreeLevel(builder *flatbuffers.Builder, treeLevel byte) {
-	builder.PrependByteSlot(2, treeLevel, 0)
-}
-func CommitClosureEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }

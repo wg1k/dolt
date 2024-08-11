@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
 	"github.com/dolthub/dolt/go/store/constants"
 	"github.com/dolthub/dolt/go/store/hash"
 )
@@ -153,36 +154,6 @@ func TestRoundTrips(t *testing.T) {
 	mseq, err := newListMetaSequence(1, []metaTuple{mt1, mt2}, vs)
 	require.NoError(t, err)
 	assertRoundTrips(newList(mseq))
-}
-
-func TestNonFiniteNumbers(tt *testing.T) {
-	vs := newTestValueStore_7_18()
-
-	t := func(f float64) (err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				if err == nil {
-					err = r.(error)
-				}
-			}
-		}()
-
-		v := Float(f)
-		_, err = EncodeValue(v, vs.Format())
-		return
-	}
-
-	err := t(math.NaN())
-	assert.Error(tt, err)
-	assert.Contains(tt, err.Error(), "NaN is not a supported number")
-
-	err = t(math.Inf(1))
-	assert.Error(tt, err)
-	assert.Contains(tt, err.Error(), "+Inf is not a supported number")
-
-	err = t(math.Inf(-1))
-	assert.Error(tt, err)
-	assert.Contains(tt, err.Error(), "-Inf is not a supported number")
 }
 
 func TestWritePrimitives(t *testing.T) {
@@ -646,15 +617,11 @@ func TestWriteEmptyUnionList(t *testing.T) {
 }
 
 func TestNomsBinFormat(t *testing.T) {
-	v, _ := os.LookupEnv("DOLT_DEFAULT_BIN_FORMAT")
+	v, _ := os.LookupEnv(dconfig.EnvDefaultBinFormat)
 	switch v {
-	case constants.Format718String:
-		assert.Equal(t, Format_7_18, Format_Default)
 	case constants.FormatLD1String:
 		assert.Equal(t, Format_LD_1, Format_Default)
-	case constants.FormatDolt1String:
-		assert.Equal(t, Format_DOLT_1, Format_Default)
-	case constants.FormatDoltDevString:
-		assert.Equal(t, Format_DOLT_DEV, Format_Default)
+	case constants.FormatDoltString:
+		assert.Equal(t, Format_DOLT, Format_Default)
 	}
 }

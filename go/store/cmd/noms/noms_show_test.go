@@ -73,7 +73,7 @@ func (s *nomsShowTestSuite) writeTestData(str string, value types.Value) types.R
 }
 
 func (s *nomsShowTestSuite) TestNomsShow() {
-	if types.Format_Default == types.Format_DOLT_DEV {
+	if types.Format_Default != types.Format_LD_1 {
 		s.T().Skip()
 	}
 	datasetName := "dsTest"
@@ -152,8 +152,9 @@ func (s *nomsShowTestSuite) TestNomsShowRaw() {
 	s.NoError(err)
 
 	numChildChunks := 0
-	err = types.WalkAddrs(l, vrw.Format(), func(_ hash.Hash, _ bool) {
+	err = types.WalkAddrs(l, vrw.Format(), func(_ hash.Hash, _ bool) error {
 		numChildChunks++
+		return nil
 	})
 	s.NoError(err)
 	s.True(numChildChunks > 0)

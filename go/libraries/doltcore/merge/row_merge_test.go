@@ -19,10 +19,10 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/store/prolly/shim"
 	"github.com/dolthub/dolt/go/store/types"
 	"github.com/dolthub/dolt/go/store/val"
 )
@@ -174,16 +174,6 @@ var testCases = []testCase{
 		true,
 		false,
 	},
-	{
-		"dropping a column should be equivalent to setting a column to null",
-		build(1, 2, 0),
-		build(2, 1),
-		build(1, 1, 1),
-		3, 2, 3,
-		build(2, 2),
-		true,
-		false,
-	},
 	// TODO (dhruv): need to fix this test case for new storage format
 	//{
 	//	"add rows but one holds a new column",
@@ -208,9 +198,11 @@ var testCases = []testCase{
 }
 
 func TestRowMerge(t *testing.T) {
-	if types.Format_Default != types.Format_DOLT_1 {
+	if types.Format_Default != types.Format_DOLT {
 		t.Skip()
 	}
+
+	ctx := sql.NewEmptyContext()
 
 	tests := make([]rowMergeTest, len(testCases))
 	for i, t := range testCases {
@@ -219,18 +211,19 @@ func TestRowMerge(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			v := newValueMerger(test.mergedSch, test.leftSch, test.rightSch, test.baseSch, syncPool)
+			v := newValueMerger(test.mergedSch, test.leftSch, test.rightSch, test.baseSch, syncPool, nil)
 
-			merged, isConflict := v.tryMerge(test.row, test.mergeRow, test.ancRow)
-			assert.Equal(t, test.expectConflict, isConflict)
-			vD := shim.ValueDescriptorFromSchema(test.mergedSch)
+			merged, ok, err := v.tryMerge(ctx, test.row, test.mergeRow, test.ancRow)
+			assert.NoError(t, err)
+			assert.Equal(t, test.expectConflict, !ok)
+			vD := test.mergedSch.GetValueDescriptor()
 			assert.Equal(t, vD.Format(test.expectedResult), vD.Format(merged))
 		})
 	}
 }
 
 func TestNomsRowMerge(t *testing.T) {
-	if types.Format_Default == types.Format_DOLT_1 {
+	if types.Format_Default == types.Format_DOLT {
 		t.Skip()
 	}
 
@@ -342,7 +335,7 @@ func buildTup(sch schema.Schema, r []*int) val.Tuple {
 		return nil
 	}
 
-	vD := shim.ValueDescriptorFromSchema(sch)
+	vD := sch.GetValueDescriptor()
 	vB := val.NewTupleBuilder(vD)
 	for i, v := range r {
 		if v != nil {

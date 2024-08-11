@@ -25,24 +25,9 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/dolthub/dolt/go/store/d"
 	"github.com/dolthub/dolt/go/store/hash"
 )
-
-func assertInputInStore(input string, h hash.Hash, s ChunkStore, assert *assert.Assertions) {
-	chunk, err := s.Get(context.Background(), h)
-	assert.NoError(err)
-	assert.False(chunk.IsEmpty(), "Shouldn't get empty chunk for %s", h.String())
-	assert.Equal(input, string(chunk.Data()))
-}
-
-func assertInputNotInStore(input string, h hash.Hash, s ChunkStore, assert *assert.Assertions) {
-	chunk, err := s.Get(context.Background(), h)
-	assert.NoError(err)
-	assert.True(chunk.IsEmpty(), "Shouldn't get non-empty chunk for %s: %v", h.String(), chunk)
-}
 
 type TestStorage struct {
 	MemoryStorage
@@ -71,6 +56,10 @@ func (s *TestStoreView) GetMany(ctx context.Context, hashes hash.HashSet, found 
 	return s.ChunkStore.GetMany(ctx, hashes, found)
 }
 
+func (s *TestStoreView) CacheHas(_ hash.Hash) bool {
+	return false
+}
+
 func (s *TestStoreView) Has(ctx context.Context, h hash.Hash) (bool, error) {
 	atomic.AddInt32(&s.hases, 1)
 	return s.ChunkStore.Has(ctx, h)
@@ -81,18 +70,33 @@ func (s *TestStoreView) HasMany(ctx context.Context, hashes hash.HashSet) (hash.
 	return s.ChunkStore.HasMany(ctx, hashes)
 }
 
-func (s *TestStoreView) Put(ctx context.Context, c Chunk) error {
+func (s *TestStoreView) Put(ctx context.Context, c Chunk, getAddrs GetAddrsCurry) error {
 	atomic.AddInt32(&s.writes, 1)
-	return s.ChunkStore.Put(ctx, c)
+	return s.ChunkStore.Put(ctx, c, getAddrs)
 }
 
-func (s *TestStoreView) MarkAndSweepChunks(ctx context.Context, last hash.Hash, keepChunks <-chan []hash.Hash, dest ChunkStore) error {
+func (s *TestStoreView) BeginGC(keeper func(hash.Hash) bool) error {
+	collector, ok := s.ChunkStore.(ChunkStoreGarbageCollector)
+	if !ok {
+		return ErrUnsupportedOperation
+	}
+	return collector.BeginGC(keeper)
+}
+
+func (s *TestStoreView) EndGC() {
+	collector, ok := s.ChunkStore.(ChunkStoreGarbageCollector)
+	if !ok {
+		panic(ErrUnsupportedOperation)
+	}
+	collector.EndGC()
+}
+
+func (s *TestStoreView) MarkAndSweepChunks(ctx context.Context, hashes <-chan []hash.Hash, dest ChunkStore) error {
 	collector, ok := s.ChunkStore.(ChunkStoreGarbageCollector)
 	if !ok || dest != s {
 		return ErrUnsupportedOperation
 	}
-
-	return collector.MarkAndSweepChunks(ctx, last, keepChunks, collector)
+	return collector.MarkAndSweepChunks(ctx, hashes, collector)
 }
 
 func (s *TestStoreView) Reads() int {

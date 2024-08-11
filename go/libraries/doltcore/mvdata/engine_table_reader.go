@@ -20,6 +20,8 @@ import (
 
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/plan"
+	"github.com/dolthub/go-mysql-server/sql/planbuilder"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/commands/engine"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
@@ -27,6 +29,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	dsqle "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 )
 
@@ -39,45 +42,43 @@ type sqlEngineTableReader struct {
 }
 
 func NewSqlEngineReader(ctx context.Context, dEnv *env.DoltEnv, tableName string) (*sqlEngineTableReader, error) {
-	mrEnv, err := env.DoltEnvAsMultiEnv(ctx, dEnv)
+	mrEnv, err := env.MultiEnvForDirectory(ctx, dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
 	if err != nil {
 		return nil, err
 	}
 
-	// Choose the first DB as the current one. This will be the DB in the working dir if there was one there
-	var dbName string
-	mrEnv.Iter(func(name string, _ *env.DoltEnv) (stop bool, err error) {
-		dbName = name
-		return true, nil
-	})
-
 	config := &engine.SqlEngineConfig{
-		InitialDb:    dbName,
-		IsReadOnly:   false,
-		PrivFilePath: "",
-		ServerUser:   "root",
-		ServerPass:   "",
-		Autocommit:   true,
+		ServerUser: "root",
+		Autocommit: true,
 	}
 	se, err := engine.NewSqlEngine(
 		ctx,
 		mrEnv,
-		engine.FormatCsv,
 		config,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	sqlCtx, err := se.NewContext(ctx)
+	sqlCtx, err := se.NewLocalContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sqlCtx.SetCurrentDatabase(mrEnv.GetFirstDatabase())
+
+	sqlEngine := se.GetUnderlyingEngine()
+	binder := planbuilder.New(sqlCtx, sqlEngine.Analyzer.Catalog, sqlEngine.Parser)
+	ret, _, _, _, err := binder.Parse(fmt.Sprintf("show create table `%s`", tableName), false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Add root client
-	sqlCtx.Session.SetClient(sql.Client{User: "root", Address: "%", Capabilities: 0})
+	create, ok := ret.(*plan.ShowCreateTable)
+	if !ok {
+		return nil, fmt.Errorf("expected *plan.ShowCreate table, found %T", ret)
+	}
 
-	sch, iter, err := se.Query(sqlCtx, fmt.Sprintf("SELECT * FROM `%s`", tableName))
+	_, iter, _, err := se.Query(sqlCtx, fmt.Sprintf("SELECT * FROM `%s`", tableName))
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +88,7 @@ func NewSqlEngineReader(ctx context.Context, dEnv *env.DoltEnv, tableName string
 		return nil, err
 	}
 
-	doltSchema, err := sqlutil.ToDoltSchema(ctx, root, tableName, sql.NewPrimaryKeySchema(sch), nil)
+	doltSchema, err := sqlutil.ToDoltSchema(ctx, root, tableName, create.PrimaryKeySchema, nil, sql.Collation_Default)
 	if err != nil {
 		return nil, err
 	}
@@ -102,23 +103,22 @@ func NewSqlEngineReader(ctx context.Context, dEnv *env.DoltEnv, tableName string
 }
 
 // Used by Dolthub API
-func NewSqlEngineTableReaderWithEngine(sqlCtx *sql.Context, se *sqle.Engine, db dsqle.Database, root *doltdb.RootValue, tableName string) (*sqlEngineTableReader, error) {
-	sch, iter, err := se.Query(sqlCtx, fmt.Sprintf("SELECT * FROM `%s`", tableName))
+func NewSqlEngineTableReaderWithEngine(sqlCtx *sql.Context, se *sqle.Engine, db dsqle.Database, root doltdb.RootValue, tableName string) (*sqlEngineTableReader, error) {
+	sch, iter, _, err := se.Query(sqlCtx, fmt.Sprintf("SELECT * FROM `%s`", tableName))
 	if err != nil {
 		return nil, err
 	}
 
-	doltSchema, err := sqlutil.ToDoltSchema(sqlCtx, root, tableName, sql.NewPrimaryKeySchema(sch), nil)
+	doltSchema, err := sqlutil.ToDoltSchema(sqlCtx, root, tableName, sql.NewPrimaryKeySchema(sch), nil, sql.Collation_Default)
 	if err != nil {
 		return nil, err
 	}
 
 	return &sqlEngineTableReader{
-		se:     engine.NewRebasedSqlEngine(se, map[string]dsqle.SqlDatabase{db.Name(): db}),
+		se:     engine.NewRebasedSqlEngine(se, map[string]dsess.SqlDatabase{db.Name(): db}),
 		sqlCtx: sqlCtx,
-
-		sch:  doltSchema,
-		iter: iter,
+		sch:    doltSchema,
+		iter:   iter,
 	}, nil
 }
 

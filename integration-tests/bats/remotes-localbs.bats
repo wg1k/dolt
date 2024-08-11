@@ -9,7 +9,6 @@ setup() {
     cd $BATS_TMPDIR
     cd dolt-repo-$$
     mkdir "dolt-repo-clones"
-    skip_nbf_dolt_1
 }
 
 teardown() {
@@ -36,7 +35,7 @@ SQL
     # push to a localbs based remote
     mkdir remotedir
     dolt remote add origin localbs://remotedir
-    dolt push origin main
+    dolt push --set-upstream origin main
 
     # clone from a directory
     cd dolt-repo-clones
@@ -93,7 +92,7 @@ SQL
 
     #add origin push and fetch
     dolt remote add origin localbs://remote1
-    dolt push main:notmain
+    dolt push origin main:notmain
 
     #fetch should now work without a specified remote because origin exists
     dolt fetch

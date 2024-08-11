@@ -17,9 +17,8 @@ package index
 import (
 	"github.com/dolthub/go-mysql-server/sql"
 
-	"github.com/dolthub/dolt/go/store/prolly"
-
 	"github.com/dolthub/dolt/go/libraries/doltcore/table/typed/noms"
+	"github.com/dolthub/dolt/go/store/prolly"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -203,14 +202,15 @@ func ReadRangesEqual(nr1, nr2 *noms.ReadRange) bool {
 	return true
 }
 
-func NomsRangesFromIndexLookup(lookup sql.IndexLookup) []*noms.ReadRange {
-	return lookup.(*doltIndexLookup).nomsRanges
+func NomsRangesFromIndexLookup(ctx *sql.Context, lookup sql.IndexLookup) ([]*noms.ReadRange, error) {
+	return lookup.Index.(*doltIndex).nomsRanges(ctx, lookup.Ranges...)
 }
 
-func ProllyRangesFromIndexLookup(lookup sql.IndexLookup) []prolly.Range {
-	return lookup.(*doltIndexLookup).prollyRanges
+func ProllyRangesFromIndexLookup(ctx *sql.Context, lookup sql.IndexLookup) ([]prolly.Range, error) {
+	idx := lookup.Index.(*doltIndex)
+	return idx.prollyRanges(ctx, idx.ns, lookup.Ranges...)
 }
 
-func IndexFromIndexLookup(lookup sql.IndexLookup) DoltIndex {
-	return lookup.(*doltIndexLookup).idx
+func DoltIndexFromSqlIndex(idx sql.Index) DoltIndex {
+	return idx.(DoltIndex)
 }

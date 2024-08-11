@@ -20,7 +20,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/vt/proto/query"
+
+	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/types"
+	"github.com/dolthub/dolt/go/store/val"
 )
 
 var FeatureFlagKeylessSchema = true
@@ -38,6 +44,9 @@ type schemaImpl struct {
 	indexCollection            IndexCollection
 	checkCollection            CheckCollection
 	pkOrdinals                 []int
+	collation                  Collation
+	contentHashedFields        []uint64
+	comment                    string
 }
 
 var _ Schema = (*schemaImpl)(nil)
@@ -45,7 +54,53 @@ var _ Schema = (*schemaImpl)(nil)
 var ErrInvalidPkOrdinals = errors.New("incorrect number of primary key ordinals")
 var ErrMultipleNotNullConstraints = errors.New("multiple not null constraints on same column")
 
+// NewSchema creates a fully defined schema from its parameters.
+// This function should be updated when new components are added to Schema.
+// If |len(pkOrdinals)| == 0, then the default ordinals are kept. |indexes| and |checks| may be nil.
+func NewSchema(allCols *ColCollection, pkOrdinals []int, collation Collation, indexes IndexCollection, checks CheckCollection) (Schema, error) {
+	sch, err := SchemaFromCols(allCols)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pkOrdinals) != 0 {
+		err = sch.SetPkOrdinals(pkOrdinals)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	sch.SetCollation(collation)
+
+	if indexes != nil {
+		indexColImpl := indexes.(*indexCollectionImpl)
+
+		sch.(*schemaImpl).indexCollection = indexColImpl
+
+		// Index collection contains information about the total list of columns and their definitions.
+		// Do a simple sanity check here to make sure those columns match |allCols|.
+		// TODO: Add an equality check between |allCols| and the cols that |indexes| refer to.
+
+		if len(indexColImpl.pks) != sch.GetPKCols().Size() {
+			return nil, fmt.Errorf("IndexCollection referring to %d pks while Schema refers to %d pks", len(indexColImpl.pks), sch.GetPKCols().Size())
+		}
+		for i, tag := range sch.GetPKCols().Tags {
+			if indexColImpl.pks[i] != tag {
+				return nil, fmt.Errorf("IndexCollection pk tags does not match Schema's pk tags")
+			}
+		}
+	}
+
+	if checks != nil {
+		sch.(*schemaImpl).checkCollection = checks
+	}
+
+	return sch, nil
+}
+
 // SchemaFromCols creates a Schema from a collection of columns
+//
+// Deprecated: Use NewSchema instead.
 func SchemaFromCols(allCols *ColCollection) (Schema, error) {
 	var pkCols []Column
 	var nonPKCols []Column
@@ -72,9 +127,13 @@ func SchemaFromCols(allCols *ColCollection) (Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	sch.SetCollation(Collation_Default)
 	return sch, nil
 }
 
+// SchemaFromColCollections creates a schema from the three collections.
+//
+// Deprecated: Use NewSchema instead.
 func SchemaFromColCollections(allCols, pkColColl, nonPKColColl *ColCollection) Schema {
 	return &schemaImpl{
 		pkCols:          pkColColl,
@@ -83,6 +142,7 @@ func SchemaFromColCollections(allCols, pkColColl, nonPKColColl *ColCollection) S
 		indexCollection: NewIndexCollection(allCols, pkColColl),
 		checkCollection: NewCheckCollection(),
 		pkOrdinals:      []int{},
+		collation:       Collation_Default,
 	}
 }
 
@@ -118,6 +178,7 @@ func ValidateForInsert(allCols *ColCollection) error {
 			seenPkCol = true
 			break
 		}
+		c.TypeInfo.ToSqlType()
 	}
 
 	if !seenPkCol && !FeatureFlagKeylessSchema {
@@ -138,7 +199,7 @@ func ValidateForInsert(allCols *ColCollection) error {
 		}
 		colNames[col.Name] = true
 
-		if col.AutoIncrement && !isAutoIncrementKind(col.Kind) {
+		if col.AutoIncrement && !(isAutoIncrementKind(col.Kind) || isAutoIncrementType(col.TypeInfo.ToSqlType().Type())) {
 			return true, ErrNonAutoIncType
 		}
 
@@ -148,9 +209,58 @@ func ValidateForInsert(allCols *ColCollection) error {
 	return err
 }
 
+// MaxRowStorageSize returns the storage length for Dolt types.
+func MaxRowStorageSize(sch sql.Schema) int64 {
+	var numBytesPerRow int64 = 0
+	for _, col := range sch {
+		switch n := col.Type.(type) {
+		case sql.NumberType:
+			numBytesPerRow += 8
+		case sql.StringType:
+			if gmstypes.IsTextBlob(n) {
+				numBytesPerRow += 20
+			} else {
+				numBytesPerRow += n.MaxByteLength()
+			}
+		case gmstypes.BitType:
+			numBytesPerRow += 8
+		case sql.DatetimeType:
+			numBytesPerRow += 8
+		case sql.DecimalType:
+			numBytesPerRow += int64(n.MaximumScale())
+		case sql.EnumType:
+			numBytesPerRow += 2
+		case gmstypes.JsonType:
+			numBytesPerRow += 20
+		case sql.NullType:
+			numBytesPerRow += 1
+		case gmstypes.TimeType:
+			numBytesPerRow += 16
+		case sql.YearType:
+			numBytesPerRow += 8
+		default:
+			panic(fmt.Sprintf("unknown type in create table: %s", n.String()))
+		}
+	}
+	return numBytesPerRow
+}
+
 // isAutoIncrementKind returns true is |k| is a numeric kind.
 func isAutoIncrementKind(k types.NomsKind) bool {
 	return k == types.IntKind || k == types.UintKind || k == types.FloatKind
+}
+
+// isAutoIncrementType returns true is |t| is a numeric type.
+// This is an alternative way for the numeric type check.
+func isAutoIncrementType(t query.Type) bool {
+	switch t {
+	case query.Type_INT8, query.Type_INT16, query.Type_INT24, query.Type_INT32, query.Type_INT64,
+		query.Type_UINT8, query.Type_UINT16, query.Type_UINT24, query.Type_UINT32, query.Type_UINT64,
+		query.Type_FLOAT32, query.Type_FLOAT64, query.Type_DECIMAL:
+		return true
+	default:
+		return false
+	}
 }
 
 // UnkeyedSchemaFromCols creates a schema without any primary keys to be used for displaying to users, tests, etc. Such
@@ -173,10 +283,13 @@ func UnkeyedSchemaFromCols(allCols *ColCollection) Schema {
 		allCols:         nonPKColColl,
 		indexCollection: NewIndexCollection(nil, nil),
 		checkCollection: NewCheckCollection(),
+		collation:       Collation_Default,
 	}
 }
 
 // SchemaFromPKAndNonPKCols creates a Schema from a collection of the key columns, and the non-key columns.
+//
+// Deprecated: Use NewSchema instead.
 func SchemaFromPKAndNonPKCols(pkCols, nonPKCols *ColCollection) (Schema, error) {
 	allCols := make([]Column, pkCols.Size()+nonPKCols.Size())
 
@@ -201,6 +314,14 @@ func SchemaFromPKAndNonPKCols(pkCols, nonPKCols *ColCollection) (Schema, error) 
 
 	allColColl := NewColCollection(allCols...)
 	return SchemaFromColCollections(allColColl, pkCols, nonPKCols), nil
+}
+
+func (si *schemaImpl) GetComment() string {
+	return si.comment
+}
+
+func (si *schemaImpl) SetComment(comment string) {
+	si.comment = comment
 }
 
 // GetAllCols gets the collection of all columns (pk and non-pk)
@@ -340,6 +461,164 @@ func (si schemaImpl) AddColumn(newCol Column, order *ColumnOrder) (Schema, error
 	return &si, nil
 }
 
+// GetMapDescriptors implements the Schema interface.
+func (si *schemaImpl) GetMapDescriptors() (keyDesc, valueDesc val.TupleDesc) {
+	keyDesc = si.GetKeyDescriptor()
+	valueDesc = si.GetValueDescriptor()
+	return
+}
+
+// GetKeyDescriptor implements the Schema interface.
+func (si *schemaImpl) GetKeyDescriptor() val.TupleDesc {
+	return si.getKeyColumnsDescriptor(true)
+}
+
+// GetKeyDescriptorWithNoConversion implements the Schema interface.
+func (si *schemaImpl) GetKeyDescriptorWithNoConversion() val.TupleDesc {
+	return si.getKeyColumnsDescriptor(false)
+}
+
+func (si *schemaImpl) getKeyColumnsDescriptor(convertAddressColumns bool) val.TupleDesc {
+	if IsKeyless(si) {
+		return val.KeylessTupleDesc
+	}
+
+	contentHashedFields := make(map[uint64]struct{})
+	for _, tag := range si.contentHashedFields {
+		contentHashedFields[tag] = struct{}{}
+	}
+
+	var tt []val.Type
+	var handlers []val.TupleTypeHandler
+	useCollations := false // We only use collations if a string exists
+	var collations []sql.CollationID
+	_ = si.GetPKCols().Iter(func(tag uint64, col Column) (stop bool, err error) {
+		sqlType := col.TypeInfo.ToSqlType()
+		queryType := sqlType.Type()
+		var t val.Type
+
+		contentHashedField := false
+		if _, ok := contentHashedFields[tag]; ok {
+			contentHashedField = true
+		}
+
+		if convertAddressColumns && !contentHashedField && queryType == query.Type_BLOB {
+			t = val.Type{
+				Enc:      val.Encoding(EncodingFromQueryType(query.Type_VARBINARY)),
+				Nullable: columnMissingNotNullConstraint(col),
+			}
+		} else if convertAddressColumns && !contentHashedField && queryType == query.Type_TEXT {
+			t = val.Type{
+				Enc:      val.Encoding(EncodingFromQueryType(query.Type_VARCHAR)),
+				Nullable: columnMissingNotNullConstraint(col),
+			}
+		} else if convertAddressColumns && !contentHashedField && queryType == query.Type_GEOMETRY {
+			t = val.Type{
+				Enc:      val.Encoding(serial.EncodingCell),
+				Nullable: columnMissingNotNullConstraint(col),
+			}
+		} else {
+			t = val.Type{
+				Enc:      val.Encoding(EncodingFromSqlType(sqlType)),
+				Nullable: columnMissingNotNullConstraint(col),
+			}
+		}
+		tt = append(tt, t)
+		if queryType == query.Type_CHAR || queryType == query.Type_VARCHAR || queryType == query.Type_TEXT {
+			useCollations = true
+			collations = append(collations, sqlType.(sql.StringType).Collation())
+		} else {
+			collations = append(collations, sql.Collation_Unspecified)
+		}
+
+		if extendedType, ok := sqlType.(gmstypes.ExtendedType); ok {
+			handlers = append(handlers, extendedType)
+		} else {
+			handlers = append(handlers, nil)
+		}
+		return
+	})
+
+	if useCollations {
+		if len(collations) != len(tt) {
+			panic(fmt.Errorf("cannot create tuple descriptor from %d collations and %d types", len(collations), len(tt)))
+		}
+		cmp := CollationTupleComparator{Collations: collations}
+		return val.NewTupleDescriptorWithArgs(val.TupleDescriptorArgs{Comparator: cmp, Handlers: handlers}, tt...)
+	} else {
+		return val.NewTupleDescriptorWithArgs(val.TupleDescriptorArgs{Handlers: handlers}, tt...)
+	}
+}
+
+// GetValueDescriptor implements the Schema interface.
+func (si *schemaImpl) GetValueDescriptor() val.TupleDesc {
+	var tt []val.Type
+	var handlers []val.TupleTypeHandler
+	var collations []sql.CollationID
+	if IsKeyless(si) {
+		tt = []val.Type{val.KeylessCardType}
+		handlers = []val.TupleTypeHandler{nil}
+		collations = []sql.CollationID{sql.Collation_Unspecified}
+	}
+
+	useCollations := false // We only use collations if a string exists
+	_ = si.GetNonPKCols().Iter(func(tag uint64, col Column) (stop bool, err error) {
+		if col.Virtual {
+			return
+		}
+
+		sqlType := col.TypeInfo.ToSqlType()
+		queryType := sqlType.Type()
+		tt = append(tt, val.Type{
+			Enc:      val.Encoding(EncodingFromSqlType(sqlType)),
+			Nullable: col.IsNullable(),
+		})
+		if queryType == query.Type_CHAR || queryType == query.Type_VARCHAR {
+			useCollations = true
+			collations = append(collations, sqlType.(sql.StringType).Collation())
+		} else {
+			collations = append(collations, sql.Collation_Unspecified)
+		}
+
+		if extendedType, ok := sqlType.(gmstypes.ExtendedType); ok {
+			handlers = append(handlers, extendedType)
+		} else {
+			handlers = append(handlers, nil)
+		}
+		return
+	})
+
+	if useCollations {
+		if len(collations) != len(tt) {
+			panic(fmt.Errorf("cannot create tuple descriptor from %d collations and %d types", len(collations), len(tt)))
+		}
+		cmp := CollationTupleComparator{Collations: collations}
+		return val.NewTupleDescriptorWithArgs(val.TupleDescriptorArgs{Comparator: cmp, Handlers: handlers}, tt...)
+	} else {
+		return val.NewTupleDescriptorWithArgs(val.TupleDescriptorArgs{Handlers: handlers}, tt...)
+	}
+}
+
+// GetCollation implements the Schema interface.
+func (si *schemaImpl) GetCollation() Collation {
+	// Schemas made before this change (and invalid schemas) will contain unspecified, so we'll the inherent collation
+	// instead (as that matches their behavior).
+	if si.collation == Collation_Unspecified {
+		return Collation_utf8mb4_0900_bin
+	}
+	return si.collation
+}
+
+// SetCollation implements the Schema interface.
+func (si *schemaImpl) SetCollation(collation Collation) {
+	// Schemas made before this change may try to set this to unspecified, so we'll set it to the inherent collation.
+	if collation == Collation_Unspecified {
+		si.collation = Collation_utf8mb4_0900_bin
+	} else {
+		si.collation = collation
+	}
+}
+
 // indexOf returns the index of the given column in the overall schema
 func (si *schemaImpl) indexOf(colName string) int {
 	i, idx := 0, -1
@@ -364,4 +643,26 @@ func primaryKeyOrdinals(sch *schemaImpl, keyCols []string) []int {
 	}
 
 	return ordinals
+}
+
+func columnMissingNotNullConstraint(col Column) bool {
+	for _, cnst := range col.Constraints {
+		if cnst.GetConstraintType() == NotNullConstraintType {
+			return false
+		}
+	}
+	return true
+}
+
+// Copy creates a copy of this schema safe to be edited independently. Some members, like column collections, are
+// immutable and don't need to be copied. Others, like index and check collections, must be copied.
+// We do this because it's cheaper to copy a schema than to deserialize one.
+func (si schemaImpl) Copy() Schema {
+	pkOrds := make([]int, len(si.pkOrdinals))
+	copy(pkOrds, si.pkOrdinals)
+
+	si.indexCollection = si.indexCollection.Copy()
+	si.checkCollection = si.checkCollection.Copy()
+
+	return &si
 }

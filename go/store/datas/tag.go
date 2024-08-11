@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 
 	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/hash"
@@ -111,7 +111,7 @@ func newTag(ctx context.Context, db *database, commitAddr hash.Hash, meta *TagMe
 	}
 }
 
-func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) []byte {
+func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) serial.Message {
 	builder := flatbuffers.NewBuilder(1024)
 	addroff := builder.CreateByteVector(commitAddr[:])
 	var nameOff, emailOff, descOff flatbuffers.UOffsetT
@@ -129,11 +129,10 @@ func tag_flatbuffer(commitAddr hash.Hash, meta *TagMeta) []byte {
 		serial.TagAddTimestampMillis(builder, meta.Timestamp)
 		serial.TagAddUserTimestampMillis(builder, meta.UserTimestamp)
 	}
-	builder.FinishWithFileIdentifier(serial.TagEnd(builder), []byte(serial.TagFileID))
-	return builder.FinishedBytes()
+	return serial.FinishMessage(builder, serial.TagEnd(builder), []byte(serial.TagFileID))
 }
 
-func IsTag(v types.Value) (bool, error) {
+func IsTag(ctx context.Context, v types.Value) (bool, error) {
 	if s, ok := v.(types.Struct); ok {
 		return types.IsValueSubtypeOf(s.Format(), v, valueTagType)
 	} else if sm, ok := v.(types.SerialMessage); ok {

@@ -213,7 +213,6 @@ SQL
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
 
-
 @test "sql-create-tables: create a table using sql with a string" {
     run dolt sql <<SQL
 CREATE TABLE test (
@@ -230,7 +229,6 @@ SQL
     [[ "$output" =~ "\`c1\` longtext" ]] || false
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
-
 
 @test "sql-create-tables: create a table using sql with an unsigned int" {
     run dolt sql -q "CREATE TABLE test (pk BIGINT NOT NULL, c1 BIGINT UNSIGNED, PRIMARY KEY (pk))"
@@ -306,7 +304,6 @@ SQL
     [[ "$output" =~ "date" ]] || false
 }
 
-
 @test "sql-create-tables: create two table with the same name" {
     dolt sql <<SQL
 CREATE TABLE test (
@@ -346,7 +343,7 @@ SQL
     [ "$status" -eq 0 ]
     [[ "$output" =~ "CREATE TABLE \`test2\`" ]] || false
     [[ "$output" =~ "\`pk\` bigint NOT NULL" ]] || false
-    [[ "$output" =~ "\`c1\` bigint DEFAULT 5 COMMENT 'hi'" ]] || false
+    [[ "$output" =~ "\`c1\` bigint DEFAULT '5' COMMENT 'hi'" ]] || false
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
 
@@ -362,7 +359,7 @@ SQL
     cd workspace
     dolt init
     cd ..
-    dolt sql --multi-db-dir ./ -b -q "USE workspace;CREATE TABLE mytable LIKE otherdb.othertable;"
+    dolt --data-dir ./ sql -b -q "USE workspace;CREATE TABLE mytable LIKE otherdb.othertable;"
     cd workspace
     run dolt schema show mytable
     [ "$status" -eq 0 ]
@@ -380,7 +377,7 @@ CREATE TABLE test1 (
 );
 SQL
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "same name" ]] || false
+    [[ "$output" =~ "duplicate column name" ]] || false
 
     run dolt sql <<SQL
 CREATE TABLE test1 (
@@ -389,7 +386,7 @@ CREATE TABLE test1 (
 );
 SQL
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "same name" ]] || false
+    [[ "$output" =~ "duplicate column name" ]] || false
 
     dolt sql <<SQL
 CREATE TABLE test1 (
@@ -534,7 +531,6 @@ SQL
     [[ "$output" =~ "On branch main" ]] || false
     [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
 }
-
 
 @test "sql-create-tables: You can create a temp table of the same name as a normal table. Run it through operations" {
     run dolt sql <<SQL
@@ -709,7 +705,7 @@ SQL
     cd repo2
     dolt init
     cd ..
-    run dolt sql --multi-db-dir ./ -b -q "USE repo2;CREATE TEMPORARY TABLE temp2 LIKE repo1.tableone;"
+    run dolt --data-dir ./ sql -b -q "USE repo2;CREATE TEMPORARY TABLE temp2 LIKE repo1.tableone;"
     [ "$status" -eq 0 ]
     cd repo2
 
@@ -769,5 +765,29 @@ DROP TABLE myTempTABLE;
 SELECT * FROM myTempTable;
 SQL
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "table not found: myTempTable" ]] || false
+    [[ "$output" =~ "table not found: mytemptable" ]] || false
+}
+
+@test "sql-create-tables: BINARY attributes" {
+    dolt sql <<SQL
+CREATE TABLE budgets(id CHAR(36) CHARACTER SET utf8mb4 BINARY);
+CREATE TABLE budgets2(id CHAR(36) BINARY);
+SQL
+    dolt sql -q "INSERT INTO budgets VALUES (UUID());"
+    dolt sql -q "INSERT INTO budgets2 VALUES (UUID());"
+}
+
+@test "sql-create-tables: tables should not reuse constraint names" {
+    run dolt sql -r csv <<SQL
+CREATE TABLE t1 (
+    pk int PRIMARY KEY,
+    val int CHECK (val > 0)
+);
+CREATE TABLE t2 LIKE t1;
+SELECT count(CONSTRAINT_NAME), count(distinct CONSTRAINT_NAME) FROM information_schema.table_constraints WHERE CONSTRAINT_TYPE="CHECK";
+SQL
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "2,2" ]] || false
+
 }

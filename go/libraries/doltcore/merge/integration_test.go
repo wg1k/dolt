@@ -16,14 +16,21 @@ package merge_test
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"math/rand"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	cmd "github.com/dolthub/dolt/go/cmd/dolt/commands"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands/cnfcmds"
+	"github.com/dolthub/dolt/go/cmd/dolt/commands/engine"
 	dtu "github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
@@ -89,9 +96,11 @@ func TestMerge(t *testing.T) {
 				{cmd.BranchCmd{}, args{"other"}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk varchar(120) primary key);"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES ('a'),('b'),('c');"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added rows on main"}},
 				{cmd.CheckoutCmd{}, args{"other"}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk varchar(120) primary key);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES ('x'),('y'),('z');"}},
 				{cmd.CommitCmd{}, args{"-am", "added rows on other"}},
 				{cmd.CheckoutCmd{}, args{env.DefaultInitBranch}},
@@ -113,17 +122,20 @@ func TestMerge(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			dEnv := dtu.CreateTestEnv()
+			defer dEnv.DoltDB.Close()
 
 			for _, tc := range setupCommon {
-				tc.exec(t, ctx, dEnv)
+				exit := tc.exec(t, ctx, dEnv)
+				require.Equal(t, 0, exit)
 			}
 			for _, tc := range test.setup {
-				tc.exec(t, ctx, dEnv)
+				exit := tc.exec(t, ctx, dEnv)
+				require.Equal(t, 0, exit)
 			}
 
 			root, err := dEnv.WorkingRoot(ctx)
 			require.NoError(t, err)
-			actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, test.query)
+			actRows, err := sqle.ExecuteSelect(dEnv, root, test.query)
 			require.NoError(t, err)
 
 			require.Equal(t, len(test.expected), len(actRows))
@@ -138,6 +150,7 @@ func TestMergeConflicts(t *testing.T) {
 
 	setupCommon := []testCommand{
 		{cmd.SqlCmd{}, args{"-q", "CREATE TABLE test (pk int PRIMARY KEY, c0 int);"}},
+		{cmd.AddCmd{}, []string{"."}},
 		{cmd.CommitCmd{}, args{"-am", "created table test"}},
 	}
 
@@ -169,6 +182,7 @@ func TestMergeConflicts(t *testing.T) {
 			setup: []testCommand{
 				{cmd.CheckoutCmd{}, args{"-b", "other"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO test VALUES (1,1),(2,2);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added rows on other"}},
 				{cmd.CheckoutCmd{}, args{env.DefaultInitBranch}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO test VALUES (1,11),(2,22);"}},
@@ -188,10 +202,12 @@ func TestMergeConflicts(t *testing.T) {
 				{cmd.CheckoutCmd{}, args{"-b", "other"}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk int PRIMARY KEY, c0 int);"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES (1,1),(2,2);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added rows on other"}},
 				{cmd.CheckoutCmd{}, args{env.DefaultInitBranch}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk int PRIMARY KEY, c0 int);"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES (1,11),(2,22);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added the same rows on main"}},
 				{cmd.MergeCmd{}, args{"other"}},
 			},
@@ -206,10 +222,12 @@ func TestMergeConflicts(t *testing.T) {
 				{cmd.CheckoutCmd{}, args{"-b", "other"}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk int PRIMARY KEY, c0 int);"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES (1,1),(2,2);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added rows on other"}},
 				{cmd.CheckoutCmd{}, args{env.DefaultInitBranch}},
 				{cmd.SqlCmd{}, args{"-q", "CREATE TABLE quiz (pk int PRIMARY KEY, c0 int);"}},
 				{cmd.SqlCmd{}, args{"-q", "INSERT INTO quiz VALUES (1,11),(2,22);"}},
+				{cmd.AddCmd{}, []string{"."}},
 				{cmd.CommitCmd{}, args{"-am", "added the same rows on main"}},
 				{cmd.MergeCmd{}, args{"other"}},
 				{cnfcmds.ResolveCmd{}, args{"--theirs", "quiz"}},
@@ -226,17 +244,26 @@ func TestMergeConflicts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			dEnv := dtu.CreateTestEnv()
+			defer dEnv.DoltDB.Close()
 
 			for _, tc := range setupCommon {
-				tc.exec(t, ctx, dEnv)
+				exit := tc.exec(t, ctx, dEnv)
+				// allow merge to fail with conflicts
+				if _, ok := tc.cmd.(cmd.MergeCmd); !ok {
+					require.Equal(t, 0, exit)
+				}
 			}
 			for _, tc := range test.setup {
-				tc.exec(t, ctx, dEnv)
+				exit := tc.exec(t, ctx, dEnv)
+				// allow merge to fail with conflicts
+				if _, ok := tc.cmd.(cmd.MergeCmd); !ok {
+					require.Equal(t, 0, exit)
+				}
 			}
 
 			root, err := dEnv.WorkingRoot(ctx)
 			require.NoError(t, err)
-			actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, test.query)
+			actRows, err := sqle.ExecuteSelect(dEnv, root, test.query)
 			require.NoError(t, err)
 
 			require.Equal(t, len(test.expected), len(actRows))
@@ -245,4 +272,146 @@ func TestMergeConflicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+const (
+	concurrentScale   = 10_000
+	concurrentIters   = 100
+	concurrentThreads = 8
+	concurrentTable   = "CREATE TABLE concurrent (" +
+		"  id int NOT NULL," +
+		"  c0 int NOT NULL," +
+		"  c1 int NOT NULL," +
+		"  PRIMARY KEY (id)," +
+		"  KEY `idx0` (c0)," +
+		"  KEY `idx1` (c1, c0)" +
+		");"
+)
+
+// TestMergeConcurrency runs current merges via
+// concurrent SQL transactions.
+func TestMergeConcurrency(t *testing.T) {
+	ctx := context.Background()
+	dEnv := setupConcurrencyTest(t, ctx)
+	defer dEnv.DoltDB.Close()
+	_, eng := engineFromEnvironment(ctx, dEnv)
+
+	eg, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < concurrentThreads; i++ {
+		seed := i
+		eg.Go(func() error {
+			return runConcurrentTxs(ctx, eng, seed)
+		})
+	}
+	assert.NoError(t, eg.Wait())
+}
+
+func runConcurrentTxs(ctx context.Context, eng *engine.SqlEngine, seed int) error {
+	sess, err := eng.NewDoltSession(ctx, sql.NewBaseSession())
+	if err != nil {
+		return err
+	}
+	sctx := sql.NewContext(ctx, sql.WithSession(sess))
+	sctx.SetCurrentDatabase("dolt")
+	sctx.Session.SetClient(sql.Client{User: "root", Address: "%"})
+
+	rnd := rand.New(rand.NewSource(int64(seed)))
+	zipf := rand.NewZipf(rnd, 1.1, 1.0, concurrentScale)
+
+	for i := 0; i < concurrentIters; i++ {
+		if err := executeQuery(sctx, eng, "BEGIN"); err != nil {
+			return err
+		}
+
+		id := zipf.Uint64()
+		sum := fmt.Sprintf("SELECT sum(c0), sum(c1) "+
+			"FROM concurrent WHERE id BETWEEN %d AND %d", id, id+10)
+		update := fmt.Sprintf("UPDATE concurrent "+
+			"SET c0 = c0 + %d, c1 = c1 + %d WHERE id = %d",
+			seed, seed, id)
+
+		if err := executeQuery(sctx, eng, sum); err != nil {
+			return err
+		}
+		if err := executeQuery(sctx, eng, update); err != nil {
+			return err
+		}
+		if err := executeQuery(sctx, eng, sum); err != nil {
+			return err
+		}
+		if err := executeQuery(sctx, eng, "COMMIT"); err != nil {
+			// allow serialization errors
+			if !sql.ErrLockDeadlock.Is(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func setupConcurrencyTest(t *testing.T, ctx context.Context) (dEnv *env.DoltEnv) {
+	dEnv = dtu.CreateTestEnv()
+
+	dbName, eng := engineFromEnvironment(ctx, dEnv)
+	sqlCtx, err := eng.NewLocalContext(ctx)
+	require.NoError(t, err)
+	sqlCtx.SetCurrentDatabase(dbName)
+
+	require.NoError(t, executeQuery(sqlCtx, eng, concurrentTable))
+	require.NoError(t, executeQuery(sqlCtx, eng, generateTestData()))
+	return
+}
+
+func engineFromEnvironment(ctx context.Context, dEnv *env.DoltEnv) (dbName string, eng *engine.SqlEngine) {
+	mrEnv, err := env.MultiEnvForDirectory(ctx, dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
+	if err != nil {
+		panic(err)
+	}
+
+	eng, err = engine.NewSqlEngine(ctx, mrEnv, &engine.SqlEngineConfig{
+		IsReadOnly: false,
+		ServerUser: "root",
+		ServerHost: "localhost",
+		Autocommit: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return mrEnv.GetFirstDatabase(), eng
+}
+
+func executeQuery(ctx *sql.Context, eng *engine.SqlEngine, query string) error {
+	_, iter, _, err := eng.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	for {
+		_, err = iter.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return iter.Close(ctx) // tx commit
+}
+
+func generateTestData() string {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO concurrent VALUES ")
+	sb.WriteString("(0, 0, 0")
+	for i := 1; i < concurrentScale; i++ {
+		c0 := rand.Intn(concurrentScale)
+		c1 := rand.Intn(concurrentScale)
+		sb.WriteString("), (")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString(", ")
+		sb.WriteString(strconv.Itoa(c0))
+		sb.WriteString(", ")
+		sb.WriteString(strconv.Itoa(c1))
+	}
+	sb.WriteString(");")
+	return sb.String()
 }

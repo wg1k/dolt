@@ -25,12 +25,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dolthub/dolt/go/libraries/utils/tracing"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/dolthub/dolt/go/store/d"
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
 var emptyKey = orderedKey{}
+
+var tracer = otel.Tracer("github.com/dolthub/dolt/go/store/types")
 
 func newMetaTuple(ref Ref, key orderedKey, numLeaves uint64) (metaTuple, error) {
 	d.PanicIfTrue(ref.buff == nil)
@@ -142,10 +147,10 @@ func orderedKeyFromUint64(n uint64, nbf *NomsBinFormat) (orderedKey, error) {
 	return newOrderedKey(Float(n), nbf)
 }
 
-func (key orderedKey) Less(nbf *NomsBinFormat, mk2 orderedKey) (bool, error) {
+func (key orderedKey) Less(ctx context.Context, nbf *NomsBinFormat, mk2 orderedKey) (bool, error) {
 	switch {
 	case key.isOrderedByValue && mk2.isOrderedByValue:
-		return key.v.Less(nbf, mk2.v)
+		return key.v.Less(ctx, nbf, mk2.v)
 	case key.isOrderedByValue:
 		return true, nil
 	case mk2.isOrderedByValue:
@@ -241,7 +246,7 @@ func (ms metaSequence) getKey(idx int) (orderedKey, error) {
 	return dec.readOrderedKey(ms.format())
 }
 
-func (ms metaSequence) search(key orderedKey) (int, error) {
+func (ms metaSequence) search(ctx context.Context, key orderedKey) (int, error) {
 	res, err := SearchWithErroringLess(int(ms.seqLen()), func(i int) (bool, error) {
 		ordKey, err := ms.getKey(i)
 
@@ -249,7 +254,7 @@ func (ms metaSequence) search(key orderedKey) (int, error) {
 			return false, err
 		}
 
-		isLess, err := ordKey.Less(ms.format(), key)
+		isLess, err := ordKey.Less(ctx, ms.format(), key)
 
 		if err != nil {
 			return false, err
@@ -416,10 +421,8 @@ func (ms metaSequence) isLeaf() bool {
 
 // metaSequence interface
 func (ms metaSequence) getChildSequence(ctx context.Context, idx int) (sequence, error) {
-	span, ctx := tracing.StartSpan(ctx, "metaSequence.getChildSequence")
-	defer func() {
-		span.Finish()
-	}()
+	ctx, span := tracer.Start(ctx, "metaSequence.getChildSequence")
+	span.End()
 
 	item, err := ms.getItem(idx)
 
@@ -438,11 +441,11 @@ func (ms metaSequence) getChildSequence(ctx context.Context, idx int) (sequence,
 // Returns the sequences pointed to by all items[i], s.t. start <= i < end, and returns the
 // concatentation as one long composite sequence
 func (ms metaSequence) getCompositeChildSequence(ctx context.Context, start uint64, length uint64) (sequence, error) {
-	span, ctx := tracing.StartSpan(ctx, "metaSequence.getChildSequence")
-	span.LogKV("level", ms.treeLevel(), "length", length)
-	defer func() {
-		span.Finish()
-	}()
+	ctx, span := tracer.Start(ctx, "metaSequence.getChildSequence", trace.WithAttributes(
+		attribute.Int64("level", int64(ms.treeLevel())),
+		attribute.Int64("length", int64(length)),
+	))
+	defer span.End()
 
 	level := ms.treeLevel()
 	d.PanicIfFalse(level > 0)
@@ -603,7 +606,7 @@ func (es emptySequence) getKey(idx int) (orderedKey, error) {
 	panic("empty sequence")
 }
 
-func (es emptySequence) search(key orderedKey) (int, error) {
+func (es emptySequence) search(ctx context.Context, key orderedKey) (int, error) {
 	panic("empty sequence")
 }
 
@@ -646,11 +649,11 @@ func (es emptySequence) Equals(other Value) bool {
 	panic("empty sequence")
 }
 
-func (es emptySequence) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (es emptySequence) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	panic("empty sequence")
 }
 
-func (es emptySequence) Compare(nbf *NomsBinFormat, other LesserValuable) (int, error) {
+func (es emptySequence) Compare(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (int, error) {
 	panic("empty sequence")
 }
 

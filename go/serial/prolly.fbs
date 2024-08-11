@@ -22,14 +22,16 @@ enum ItemType : uint8 {
 table ProllyTreeNode {
   // sorted array of key items
   key_items:[ubyte] (required);
-  // items offets for |key_items|, zeroth offset omitted
+  // items offets for |key_items|
+  // first offset is 0, last offset is len(key_items)
   key_offsets:[uint16] (required);
   // item type for |key_items|
   key_type:ItemType;
 
   // array of values items, ordered by paired key
   value_items:[ubyte];
-  // item offsets for |value_items|, zeroth offset omitted
+  // item offsets for |value_items|
+  // first offset is 0, last offset is len(value_items)
   value_offsets:[uint16];
   // item type for |value_items|
   value_type:ItemType;
@@ -37,32 +39,19 @@ table ProllyTreeNode {
   // (eg value tuples containing out-of-line BLOB addresses)
   value_address_offsets:[uint16];
 
-
   // array of chunk addresses
   //  - subtree addresses for internal prolly tree nodes
   //  - value addresses for AddressMap leaf nodes
   address_array:[ubyte];
 
-
-  // array of uvarint encoded subtree counts
+  // array of varint encoded subtree counts
+  // see: go/store/prolly/message/varint.go
   subtree_counts:[ubyte];
   // total count of prolly tree
   tree_count:uint64;
   // prolly tree level, 0 for leaf nodes
   tree_level:uint8;
 }
-
-table CommitClosure {
-  // array of commit ref hashes
-  ref_array:[ubyte] (required);
-
-  // subtree member count
-  tree_count:uint64;
-
-  // node tree level, 0 for leaf nodes
-  tree_level:uint8;
-}
-
 
 // KEEP THIS IN SYNC WITH fileidentifiers.go
 file_identifier "TUPM";

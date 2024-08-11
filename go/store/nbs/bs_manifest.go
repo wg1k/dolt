@@ -17,8 +17,11 @@ package nbs
 import (
 	"bytes"
 	"context"
+	"errors"
 
 	"github.com/dolthub/dolt/go/store/blobstore"
+	"github.com/dolthub/dolt/go/store/chunks"
+	"github.com/dolthub/dolt/go/store/hash"
 )
 
 const (
@@ -26,12 +29,11 @@ const (
 )
 
 type blobstoreManifest struct {
-	name string
-	bs   blobstore.Blobstore
+	bs blobstore.Blobstore
 }
 
 func (bsm blobstoreManifest) Name() string {
-	return bsm.name
+	return bsm.bs.Path()
 }
 
 func manifestVersionAndContents(ctx context.Context, bs blobstore.Blobstore) (string, manifestContents, error) {
@@ -73,14 +75,46 @@ func (bsm blobstoreManifest) ParseIfExists(ctx context.Context, stats *Stats, re
 }
 
 // Update updates the contents of the manifest in the blobstore
-func (bsm blobstoreManifest) Update(ctx context.Context, lastLock addr, newContents manifestContents, stats *Stats, writeHook func() error) (manifestContents, error) {
+func (bsm blobstoreManifest) Update(ctx context.Context, lastLock hash.Hash, newContents manifestContents, stats *Stats, writeHook func() error) (manifestContents, error) {
+	checker := func(upstream, contents manifestContents) error {
+		if contents.gcGen != upstream.gcGen {
+			return chunks.ErrGCGenerationExpired
+		}
+		return nil
+	}
+
+	return updateBSWithChecker(ctx, bsm.bs, checker, lastLock, newContents, writeHook)
+}
+
+func (bsm blobstoreManifest) UpdateGCGen(ctx context.Context, lastLock hash.Hash, newContents manifestContents, stats *Stats, writeHook func() error) (manifestContents, error) {
+	checker := func(upstream, contents manifestContents) error {
+		if contents.gcGen == upstream.gcGen {
+			return errors.New("UpdateGCGen() must update the garbage collection generation")
+		}
+
+		if contents.root != upstream.root {
+			return errors.New("UpdateGCGen() cannot update the root")
+		}
+		return nil
+	}
+
+	return updateBSWithChecker(ctx, bsm.bs, checker, lastLock, newContents, writeHook)
+}
+
+func updateBSWithChecker(ctx context.Context, bs blobstore.Blobstore, validate manifestChecker, lastLock hash.Hash, newContents manifestContents, writeHook func() error) (mc manifestContents, err error) {
 	if writeHook != nil {
 		panic("Write hooks not supported")
 	}
 
-	ver, contents, err := manifestVersionAndContents(ctx, bsm.bs)
+	ver, contents, err := manifestVersionAndContents(ctx, bs)
 
 	if err != nil && !blobstore.IsNotFoundError(err) {
+		return manifestContents{}, err
+	}
+
+	// this is where we assert that gcGen is correct
+	err = validate(contents, newContents)
+	if err != nil {
 		return manifestContents{}, err
 	}
 
@@ -92,7 +126,7 @@ func (bsm blobstoreManifest) Update(ctx context.Context, lastLock addr, newConte
 			return manifestContents{}, err
 		}
 
-		_, err = bsm.bs.CheckAndPut(ctx, ver, manifestFile, buffer)
+		_, err = bs.CheckAndPut(ctx, ver, manifestFile, int64(buffer.Len()), buffer)
 
 		if err != nil {
 			if !blobstore.IsCheckAndPutError(err) {

@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 }
 
 teardown() {
@@ -16,8 +15,7 @@ teardown() {
 CREATE TABLE test (pk BIGINT PRIMARY KEY, v1 BIGINT, UNIQUE INDEX(v1));
 INSERT INTO test VALUES (1, 1), (2, 2);
 SQL
-    dolt add -A
-    dolt commit -m "MC1"
+    dolt commit -Am "MC1"
     dolt branch other
     dolt sql -q "INSERT INTO test VALUES (3, 3)"
     dolt add -A
@@ -29,36 +27,36 @@ SQL
     dolt checkout main
 
     run dolt merge other
-    [ "$status" -eq "0" ]
+    log_status_eq "1"
     [[ "$output" =~ "Fix constraint violations" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
-    [[ "$output" =~ "test,1" ]] || false
+    [[ "$output" =~ "test,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
+
     run dolt status
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "fix constraint violations" ]] || false
     [[ "$output" =~ "test" ]] || false
     run dolt merge other
-    [ "$status" -eq "1" ]
-    [[ "$output" =~ "Merging is not possible because you have not committed an active merge" ]] || false
+    log_status_eq "1"
+    [[ "$output" =~ "merging is not possible because you have not committed an active merge" ]] || false
 
     # we can stage conflicts, but not commit them
     dolt add test
     run dolt commit -m "this should fail"
-    [ "$status" -eq "1" ]
+    log_status_eq "1"
     [[ "$output" =~ "constraint violation" ]] || false
 
     dolt sql -q "DELETE FROM dolt_constraint_violations_test"
     run dolt status
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "constraint violations fixed" ]] || false
     dolt add test
     dolt commit -m "this works"
     run dolt merge other
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "up to date" ]] || false
+    log_status_eq "0"
 }
 
 @test "constraint-violations: dolt_force_transaction_commit along with dolt_allow_commit_conflicts ignores constraint violations" {
@@ -80,16 +78,16 @@ SQL
 
     run dolt sql <<"SQL"
 SET dolt_allow_commit_conflicts = 0;
-SELECT DOLT_MERGE('other');
+call dolt_merge('other');
 SQL
-    [ "$status" -eq "1" ]
+    log_status_eq "1"
     [[ "$output" =~ "constraint violations" ]] || false
     run dolt sql <<"SQL"
 SET dolt_force_transaction_commit = 1;
-SELECT DOLT_MERGE('other');
-SELECT DOLT_COMMIT("-am", "msg", "--force");
+call dolt_merge('other');
+call dolt_commit("-am", "msg", "--force");
 SQL
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ ! "$output" =~ "constraint violations" ]] || false
 }
 
@@ -111,29 +109,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -158,29 +158,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -211,31 +213,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -264,30 +268,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -320,29 +326,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -371,30 +379,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -420,29 +430,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -467,29 +479,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -520,31 +534,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -573,30 +589,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -629,29 +647,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -680,30 +700,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -729,29 +751,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -776,29 +800,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -829,31 +855,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -882,30 +910,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -938,29 +968,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -989,30 +1021,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1038,28 +1072,28 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1084,28 +1118,28 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1133,29 +1167,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1183,29 +1219,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1237,31 +1275,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -1293,30 +1333,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1350,29 +1392,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -1402,30 +1446,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1454,29 +1500,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1504,29 +1552,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1558,31 +1608,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -1614,30 +1666,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1671,29 +1725,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -1723,30 +1779,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1775,29 +1833,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1825,29 +1885,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1879,31 +1941,33 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "30,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,2" ]] || false
@@ -1935,30 +1999,32 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -1992,29 +2058,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,3,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,3,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
     [[ "$output" =~ "3,3" ]] || false
@@ -2044,30 +2112,32 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
-    [[ "$output" =~ 'foreign key,3,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
+    [[ "$output" =~ 'foreign key,3,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2095,29 +2165,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2144,29 +2216,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2193,29 +2267,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2241,29 +2317,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2289,29 +2367,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2337,29 +2417,31 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""SET NULL"", ""OnUpdate"": ""SET NULL"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2389,29 +2471,31 @@ SQL
     dolt add -A
     dolt commit --force -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_name"", ""Table"": ""child"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2440,39 +2524,41 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,20,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_c1"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child1""}"' ]] || false
+    [[ "$output" =~ 'foreign key,20,2,"{""Index"": ""fk_c1"", ""Table"": ""child1"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_c1"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "100,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2500,39 +2586,41 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,20,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_c1"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child1""}"' ]] || false
+    [[ "$output" =~ 'foreign key,20,2,"{""Index"": ""fk_c1"", ""Table"": ""child1"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_c1"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "100,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2560,40 +2648,42 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,20,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_c1"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child1""}"' ]] || false
+    [[ "$output" =~ 'foreign key,20,2,"{""Index"": ""fk_c1"", ""Table"": ""child1"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_c1"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "100,1" ]] || false
     [[ "$output" =~ "200,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2621,40 +2711,42 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,20,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_c1"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""Table"": ""child1""}"' ]] || false
+    [[ "$output" =~ 'foreign key,20,2,"{""Index"": ""fk_c1"", ""Table"": ""child1"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_c1"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""parent"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM parent" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "100,1" ]] || false
     [[ "$output" =~ "200,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM child2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2662,6 +2754,7 @@ SQL
 }
 
 @test "constraint-violations: cyclic foreign keys, illegal deletion" {
+
     # We're deleting a reference in a cycle from each table to make sure it properly applies a violation in both instances
     dolt sql <<"SQL"
 CREATE TABLE t1 (pk BIGINT PRIMARY KEY, v1 BIGINT, INDEX(v1));
@@ -2698,29 +2791,30 @@ SQL
 
     # FF merge no longer checks constraints; forced commits require constraint reification
     run dolt constraints verify --all
-    [ "$status" -eq "1" ]
+    log_status_eq "1"
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "t2,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_t1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_t2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
+    echo $output
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,2,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_t2"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""t1"", ""Table"": ""t2""}"' ]] || false
+    [[ "$output" =~ 'foreign key,2,2,"{""Index"": ""fk_t2"", ""Table"": ""t2"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_t2"", ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""t1"", ""ReferencedColumns"": [""v1""]' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM t1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM t2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "$output" =~ "2,2" ]] || false
@@ -2732,30 +2826,32 @@ SQL
 
     # FF merge no longer checks constraints; forced commits require constraint reification
     run dolt constraints verify --all
-    [ "$status" -eq "1" ]
+    log_status_eq "1"
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "t1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_t1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
+    echo $output
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,20,2,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_t1"", ""Index"": ""v1"", ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ReferencedColumns"": [""v1""], ""ReferencedIndex"": ""v1"", ""ReferencedTable"": ""t2"", ""Table"": ""t1""}"' ]] || false
+    echo "OUTPUT: $output"
+    [[ "$output" =~ 'foreign key,20,2,"{""Index"": ""v1"", ""Table"": ""t1"", ""Columns"": [""v1""], ""OnDelete"": ""RESTRICT"", ""OnUpdate"": ""RESTRICT"", ""ForeignKey"": ""fk_t1"", ""ReferencedIndex"": ""fk_t2"", ""ReferencedTable"": ""t2"", ""ReferencedColumns"": [""v1""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_t2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
     [[ "${#lines[@]}" = "1" ]] || false
     run dolt sql -q "SELECT * FROM t1" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "10,1" ]] || false
     [[ "$output" =~ "20,2" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
     run dolt sql -q "SELECT * FROM t2" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
@@ -2777,20 +2873,22 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "test,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_test" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,4,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""pk""], ""ReferencedIndex"": ""pk"", ""ReferencedTable"": ""test"", ""Table"": ""test""}"' ]] || false
+    [[ "$output" =~ 'foreign key,4,3,"{""Index"": ""fk_name"", ""Table"": ""test"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": """", ""ReferencedTable"": ""test"", ""ReferencedColumns"": [""pk""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1," ]] || false
     [[ "$output" =~ "2,1" ]] || false
@@ -2814,137 +2912,120 @@ SQL
     dolt add -A
     dolt commit -m "OC1"
     dolt checkout main
-    dolt merge other
+    run dolt merge other
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
 
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "test,1" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations_test" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'foreign key,4,3,"{""Columns"": [""v1""], ""ForeignKey"": ""fk_name"", ""Index"": ""v1"", ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ReferencedColumns"": [""pk""], ""ReferencedIndex"": ""pk"", ""ReferencedTable"": ""test"", ""Table"": ""test""}"' ]] || false
+    [[ "$output" =~ 'foreign key,4,3,"{""Index"": ""fk_name"", ""Table"": ""test"", ""Columns"": [""v1""], ""OnDelete"": ""CASCADE"", ""OnUpdate"": ""CASCADE"", ""ForeignKey"": ""fk_name"", ""ReferencedIndex"": """", ""ReferencedTable"": ""test"", ""ReferencedColumns"": [""pk""]}"' ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
     run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
+    log_status_eq "0"
     [[ "$output" =~ "pk,v1" ]] || false
     [[ "$output" =~ "1," ]] || false
     [[ "$output" =~ "2,1" ]] || false
     [[ "$output" =~ "4,3" ]] || false
     [[ "${#lines[@]}" = "4" ]] || false
-    
 }
 
-@test "constraint-violations: unique keys, insert violation" {
-    dolt sql <<"SQL"
-CREATE TABLE test (pk BIGINT PRIMARY KEY, v1 BIGINT, UNIQUE INDEX(v1));
-INSERT INTO test VALUES (1, 1), (2, 2);
-SQL
-    dolt add -A
-    dolt commit -m "MC1"
-    dolt branch other
-    dolt sql -q "INSERT INTO test VALUES (3, 3), (4, 4)"
-    dolt add -A
-    dolt commit -m "MC2"
-    dolt checkout other
-    dolt sql -q "INSERT INTO test VALUES (5, 5), (6, 3)"
-    dolt add -A
-    dolt commit -m "OC1"
-    dolt checkout main
-    dolt merge other
+@test "constraint-violations: unique key violations create unmerged tables" {
+    dolt sql <<SQL
+CREATE TABLE t (
+  pk int PRIMARY KEY,
+  col1 int
+);
+CALL DOLT_ADD('.');
 
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "table,num_violations" ]] || false
-    [[ "$output" =~ "test,1" ]] || false
-    [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations_test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'unique index,6,3,"{""Columns"": [""v1""], ""Name"": ""v1""}"' ]] || false
-    [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "pk,v1" ]] || false
-    [[ "$output" =~ "1,1" ]] || false
-    [[ "$output" =~ "2,2" ]] || false
-    [[ "$output" =~ "3,3" ]] || false
-    [[ "$output" =~ "4,4" ]] || false
-    [[ "$output" =~ "5,5" ]] || false
-    [[ "${#lines[@]}" = "6" ]] || false
+CALL DOLT_COMMIT('-am', 'create table');
+CALL DOLT_BRANCH('right');
+ALTER TABLE t ADD UNIQUE uniq_col1 (col1);
+CALL DOLT_COMMIT('-am', 'add dada');
+
+CALL DOLT_CHECKOUT('right');
+INSERT INTO t VALUES (1, 1), (2, 1);
+CALL DOLT_COMMIT('-am', 'add unique key constraint');
+
+CALL DOLT_CHECKOUT('main');
+SQL
+    run dolt merge right
+    log_status_eq 1
+    [[ $output =~ "CONSTRAINT VIOLATION (content): Merge created constraint violation in t" ]] || false
+    [[ $output =~ "Automatic merge failed; 1 table(s) are unmerged." ]] || false
 }
 
-@test "constraint-violations: unique keys, update violation from ours" {
-    dolt sql <<"SQL"
-CREATE TABLE test (pk BIGINT PRIMARY KEY, v1 BIGINT, UNIQUE INDEX(v1));
-INSERT INTO test VALUES (1, 1), (2, 2);
+@test "constraint-violations: altering FKs over PKs does not create bad index" {
+    dolt sql <<SQL
+set foreign_key_checks=0;
+create table child (j int primary key, foreign key (j) references parent (i));
+create table parent (i int primary key);
+set foreign_key_checks=1;
+delete from parent where i = 0;
 SQL
-    dolt add -A
-    dolt commit -m "MC1"
-    dolt branch other
-    dolt sql -q "UPDATE test SET v1 = 3 WHERE pk = 2"
-    dolt add -A
-    dolt commit -m "MC2"
-    dolt checkout other
-    dolt sql -q "INSERT INTO test VALUES (3, 3)"
-    dolt add -A
-    dolt commit -m "OC1"
-    dolt checkout main
-    dolt merge other
 
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "table,num_violations" ]] || false
-    [[ "$output" =~ "test,1" ]] || false
-    [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations_test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'unique index,3,3,"{""Columns"": [""v1""], ""Name"": ""v1""}"' ]] || false
-    [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "pk,v1" ]] || false
-    [[ "$output" =~ "1,1" ]] || false
-    [[ "$output" =~ "2,3" ]] || false
+    run dolt index ls
+    [[ "$output" =~ "No indexes in the working set" ]] || false
+}
+
+@test "constraint-violations: keyless table constraint violations" {
+  dolt sql <<"SQL"
+CREATE TABLE aTable (aColumn INT NULL, bColumn INT NULL, UNIQUE INDEX aColumn_UNIQUE (aColumn ASC) VISIBLE, UNIQUE INDEX bColumn_UNIQUE (bColumn ASC) VISIBLE);
+
+CALL dolt_commit('-Am', 'add tables');
+CALL dolt_checkout('-b', 'side');
+INSERT INTO aTable VALUES (1,2);
+CALL dolt_commit('-am', 'add side data');
+
+CALL dolt_checkout('main');
+INSERT INTO aTable VALUES (1,3);
+CALL dolt_commit('-am', 'add main data');
+SET @@dolt_force_transaction_commit=1;
+CALL dolt_checkout('side');
+CALL DOLT_CHERRY_PICK(hashof('main'));
+SQL
+
+    # check the contents of our table
+    dolt checkout side
+    run dolt sql -q "SELECT * FROM aTable" -r=csv
+    log_status_eq "0"
+    [[ "$output" =~ "aColumn,bColumn" ]] || false
+    [[ "$output" =~ "1,2" ]] || false
+    [[ "$output" =~ "1,3" ]] || false
     [[ "${#lines[@]}" = "3" ]] || false
-}
 
-@test "constraint-violations: unique keys, update violation from theirs" {
-    dolt sql <<"SQL"
-CREATE TABLE test (pk BIGINT PRIMARY KEY, v1 BIGINT, UNIQUE INDEX(v1));
-INSERT INTO test VALUES (1, 1), (2, 2);
-SQL
-    dolt add -A
-    dolt commit -m "MC1"
-    dolt branch other
-    dolt sql -q "INSERT INTO test VALUES (3, 3)"
-    dolt add -A
-    dolt commit -m "MC2"
-    dolt checkout other
-    dolt sql -q "UPDATE test SET v1 = 3 WHERE pk = 2"
-    dolt add -A
-    dolt commit -m "OC1"
-    dolt checkout main
-    dolt merge other
-
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
-    [ "$status" -eq "0" ]
+    # check the contents of the dolt constraint violation tables
+    run dolt sql -q "SELECT * from dolt_constraint_violations" -r=csv
+    log_status_eq "0"
     [[ "$output" =~ "table,num_violations" ]] || false
-    [[ "$output" =~ "test,1" ]] || false
+    [[ "$output" =~ "aTable,2" ]] || false
     [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM dolt_constraint_violations_test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "violation_type,pk,v1,violation_info" ]] || false
-    [[ "$output" =~ 'unique index,2,3,"{""Columns"": [""v1""], ""Name"": ""v1""}"' ]] || false
-    [[ "${#lines[@]}" = "2" ]] || false
-    run dolt sql -q "SELECT * FROM test" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "pk,v1" ]] || false
-    [[ "$output" =~ "1,1" ]] || false
-    [[ "$output" =~ "2,2" ]] || false
-    [[ "$output" =~ "3,3" ]] || false
-    [[ "${#lines[@]}" = "4" ]] || false
-}
 
+    run dolt sql -q "SELECT * from dolt_status" -r=csv
+    log_status_eq "0"
+    [[ "$output" =~ "table_name,staged,status" ]] || false
+    [[ "$output" =~ "aTable,false,constraint violation" ]] || false
+    [[ "${#lines[@]}" = "2" ]] || false
+
+    run dolt sql -q "SELECT from_root_ish,violation_type,hex(dolt_row_hash) as dolt_row_hash,aColumn,bColumn,violation_info from dolt_constraint_violations_aTable" -r=csv
+    log_status_eq "0"
+    [[ "$output" =~ "from_root_ish,violation_type,dolt_row_hash,aColumn,bColumn,violation_info" ]] || false
+    [[ "$output" =~ ',unique index,5A1ED8633E1842FCA8EE529E4F1C5944,1,2,"{""Name"": ""aColumn_UNIQUE"", ""Columns"": [""aColumn""]}"' ]] || false
+    [[ "$output" =~ ',unique index,A922BFBF4E5489501A3808BC5CD702C0,1,3,"{""Name"": ""aColumn_UNIQUE"", ""Columns"": [""aColumn""]}"' ]] || false
+    [[ "${#lines[@]}" = "3" ]] || false
+
+    # Fix the violations and clear out the constraint violations artifacts
+    dolt sql -q "SET @@dolt_force_transaction_commit=1; UPDATE aTable SET aColumn = 2 WHERE bColumn = 3;"
+    dolt sql -q "DELETE FROM dolt_constraint_violations_aTable;"
+
+    run dolt sql -q "SELECT count(*) as count from dolt_constraint_violations_aTable"
+    log_status_eq "0"
+    [[ "$output" =~ "| count |" ]] || false
+    [[ "$output" =~ "| 0     |" ]] || false
+    [[ "${#lines[@]}" = "5" ]] || false
+}

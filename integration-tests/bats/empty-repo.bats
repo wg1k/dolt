@@ -22,7 +22,7 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "On branch main" ]] || false
     [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
-    [[ ! "$output" =~ "Untracked files:" ]] || false
+    [[ ! "$output" =~ "Untracked tables:" ]] || false
     [[ ! "$output" =~ "LICENSE.md" ]] || false
     [[ ! "$output" =~ "README.md" ]] || false
 }
@@ -61,7 +61,6 @@ teardown() {
 }
 
 @test "empty-repo: dolt diff in new repository" {
-    skip_nbf_dolt_1
     run dolt diff
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
@@ -133,7 +132,7 @@ teardown() {
     [ "$output" = "Already on branch 'main'" ]
 }
 
-@test "empty-repo: dolt checkout non-existant branch" {
+@test "empty-repo: dolt checkout non-existent branch" {
     run dolt checkout foo
     [ "$status" -ne 0 ]
     [ "$output" = "error: could not find foo" ]
@@ -195,8 +194,10 @@ teardown() {
     [ "$output" = "" ]
 }
 
-@test "empty-repo: branch names do not support ." {
-    run dolt branch "dots.are.not.supported"
-    [ "$status" -eq 1 ]
-    [ "$output" = "fatal: 'dots.are.not.supported' is an invalid branch name." ]
+@test "empty-repo: branch names support ." {
+    dolt branch "dots.are.supported"
+
+    run dolt branch
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "dots.are.supported" ]] || false
 }

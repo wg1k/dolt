@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -39,10 +40,10 @@ type enumType struct {
 var _ TypeInfo = (*enumType)(nil)
 
 func CreateEnumTypeFromParams(params map[string]string) (TypeInfo, error) {
-	var collation sql.Collation
+	var collation sql.CollationID
 	var err error
 	if collationStr, ok := params[enumTypeParam_Collation]; ok {
-		collation, err = sql.ParseCollation(nil, &collationStr, false)
+		collation, err = sql.ParseCollation("", collationStr, false)
 		if err != nil {
 			return nil, err
 		}
@@ -59,11 +60,15 @@ func CreateEnumTypeFromParams(params map[string]string) (TypeInfo, error) {
 	} else {
 		return nil, fmt.Errorf(`create enum type info is missing param "%v"`, enumTypeParam_Values)
 	}
-	sqlEnumType, err := sql.CreateEnumType(values, collation)
+	sqlEnumType, err := gmstypes.CreateEnumType(values, collation)
 	if err != nil {
 		return nil, err
 	}
-	return &enumType{sqlEnumType}, nil
+	return CreateEnumTypeFromSqlEnumType(sqlEnumType), nil
+}
+
+func CreateEnumTypeFromSqlEnumType(sqlEnumType sql.EnumType) TypeInfo {
+	return &enumType{sqlEnumType}
 }
 
 // ConvertNomsValueToValue implements TypeInfo interface.
@@ -95,7 +100,7 @@ func (ti *enumType) ConvertValueToNomsValue(ctx context.Context, vrw types.Value
 	if v == nil {
 		return types.NullValue, nil
 	}
-	val, err := ti.sqlEnumType.Convert(v)
+	val, _, err := ti.sqlEnumType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
@@ -217,13 +222,15 @@ func enumTypeConverter(ctx context.Context, src *enumType, destTi TypeInfo) (tc 
 			if !ok {
 				return nil, fmt.Errorf("%s does not contain an equivalent value of %d", src.sqlEnumType.String(), val)
 			}
-			newVal, err := dest.sqlEnumType.Convert(valStr)
+			newVal, _, err := dest.sqlEnumType.Convert(valStr)
 			if err != nil {
 				return nil, err
 			}
 			return types.Uint(newVal.(uint16)), nil
 		}, true, nil
 	case *floatType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
@@ -234,6 +241,12 @@ func enumTypeConverter(ctx context.Context, src *enumType, destTi TypeInfo) (tc 
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

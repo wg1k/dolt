@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/prolly/message"
@@ -46,7 +47,7 @@ func TestRoundTripInts(t *testing.T) {
 	assert.Equal(t, len(keys), int(nd.count))
 	for i := range keys {
 		assert.Equal(t, keys[i], val.Tuple(nd.GetKey(i)))
-		assert.Equal(t, values[i], val.Tuple(nd.getValue(i)))
+		assert.Equal(t, values[i], val.Tuple(nd.GetValue(i)))
 	}
 }
 
@@ -60,32 +61,78 @@ func TestRoundTripNodeItems(t *testing.T) {
 		assert.Equal(t, len(keys), int(nd.count))
 		for i := range keys {
 			assert.Equal(t, keys[i], nd.GetKey(i))
-			assert.Equal(t, values[i], nd.getValue(i))
+			assert.Equal(t, values[i], nd.GetValue(i))
 		}
 	}
 }
 
 func TestNodeSize(t *testing.T) {
 	sz := unsafe.Sizeof(Node{})
-	assert.Equal(t, 128, int(sz))
+	assert.Equal(t, 56, int(sz))
+}
+
+func BenchmarkNodeGet(b *testing.B) {
+	const (
+		count int = 128
+		mask  int = 0x7f
+	)
+	tuples, _ := AscendingUintTuples(count)
+	assert.Len(b, tuples, count)
+	keys := make([]Item, count)
+	vals := make([]Item, count)
+	for i := range tuples {
+		keys[i] = Item(tuples[i][0])
+		vals[i] = Item(tuples[i][1])
+	}
+	nd := newLeafNode(keys, vals)
+
+	var pm serial.ProllyTreeNode
+	err := serial.InitProllyTreeNodeRoot(&pm, nd.msg, serial.MessagePrefixSz)
+	require.NoError(b, err)
+	b.ResetTimer()
+
+	b.Run("ItemAccess Get", func(b *testing.B) {
+		var k Item
+		for i := 0; i < b.N; i++ {
+			k = nd.GetKey(i & mask)
+		}
+		assert.NotNil(b, k)
+	})
+	b.Run("Flatbuffers Get", func(b *testing.B) {
+		var k Item
+		for i := 0; i < b.N; i++ {
+			k = flatbuffersGetKey(i&mask, pm)
+		}
+		assert.NotNil(b, k)
+	})
+}
+
+// Node.Get() without cached offset metadata
+func flatbuffersGetKey(i int, pm serial.ProllyTreeNode) (key []byte) {
+	buf := pm.KeyItemsBytes()
+	start := pm.KeyOffsets(i)
+	stop := pm.KeyOffsets(i + 1)
+	key = buf[start:stop]
+	return
 }
 
 func TestNodeHashValueCompatibility(t *testing.T) {
 	keys, values := randomNodeItemPairs(t, (rand.Int()%101)+50)
 	nd := newLeafNode(keys, values)
-	nbf := types.Format_DOLT_1
+	nbf := types.Format_DOLT
 	th, err := ValueFromNode(nd).Hash(nbf)
 	require.NoError(t, err)
 	assert.Equal(t, nd.HashOf(), th)
 
 	h1 := hash.Parse("kvup5vdur99ush7c18g0kjc6rhdkfdgo")
 	h2 := hash.Parse("7e54ill10nji9oao1ja88buh9itaj7k9")
-	msg := message.AddressMapSerializer{Pool: sharedPool}.Serialize(
+	msg := message.NewAddressMapSerializer(sharedPool).Serialize(
 		[][]byte{[]byte("chopin"), []byte("listz")},
 		[][]byte{h1[:], h2[:]},
 		[]uint64{},
 		0)
-	nd = NodeFromBytes(msg)
+	nd, err = NodeFromBytes(msg)
+	require.NoError(t, err)
 	th, err = ValueFromNode(nd).Hash(nbf)
 	require.NoError(t, err)
 	assert.Equal(t, nd.HashOf(), th)
@@ -104,7 +151,7 @@ func TestNodeDecodeValueCompatibility(t *testing.T) {
 
 	v, err := vs.ReadValue(context.Background(), h)
 	require.NoError(t, err)
-	assert.Equal(t, nd.bytes(), []byte(v.(types.TupleRowStorage)))
+	assert.Equal(t, nd.bytes(), []byte(v.(types.SerialMessage)))
 }
 
 func randomNodeItemPairs(t *testing.T, count int) (keys, values []Item) {

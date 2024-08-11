@@ -18,8 +18,12 @@ import (
 	"context"
 	"net/url"
 
-	"github.com/dolthub/dolt/go/store/chunks"
+	"github.com/google/uuid"
+
+	"github.com/dolthub/dolt/go/store/blobstore"
 	"github.com/dolthub/dolt/go/store/datas"
+	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -27,13 +31,24 @@ import (
 type MemFactory struct {
 }
 
-// CreateDB creates an in memory backed database
-func (fact MemFactory) CreateDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) (datas.Database, types.ValueReadWriter, error) {
-	var db datas.Database
-	storage := &chunks.MemoryStorage{}
-	cs := storage.NewViewWithDefaultFormat()
-	vrw := types.NewValueStore(cs)
-	db = datas.NewTypesDatabase(vrw)
+func (fact MemFactory) PrepareDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) error {
+	// nothing to prepare
+	return nil
+}
 
-	return db, vrw, nil
+// CreateDB creates an in memory backed database
+func (fact MemFactory) CreateDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) (datas.Database, types.ValueReadWriter, tree.NodeStore, error) {
+	var db datas.Database
+
+	bs := blobstore.NewInMemoryBlobstore(uuid.New().String())
+	q := nbs.NewUnlimitedMemQuotaProvider()
+	cs, err := nbs.NewBSStore(ctx, nbf.VersionString(), bs, defaultMemTableSize, q)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	vrw := types.NewValueStore(cs)
+	ns := tree.NewNodeStore(cs)
+	db = datas.NewTypesDatabase(vrw, ns)
+	return db, vrw, ns, nil
 }

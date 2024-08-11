@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
@@ -32,6 +33,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/test"
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/hash"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -62,15 +64,15 @@ func createTestSchema(t *testing.T) schema.Schema {
 	)
 	sch, err := schema.SchemaFromCols(colColl)
 	require.NoError(t, err)
-	_, err = sch.Indexes().AddIndexByColTags(testSchemaIndexName, []uint64{firstTag, lastTag}, schema.IndexProperties{IsUnique: false, Comment: ""})
+	_, err = sch.Indexes().AddIndexByColTags(testSchemaIndexName, []uint64{firstTag, lastTag}, nil, schema.IndexProperties{IsUnique: false, Comment: ""})
 	require.NoError(t, err)
-	_, err = sch.Indexes().AddIndexByColTags(testSchemaIndexAge, []uint64{ageTag}, schema.IndexProperties{IsUnique: false, Comment: ""})
+	_, err = sch.Indexes().AddIndexByColTags(testSchemaIndexAge, []uint64{ageTag}, nil, schema.IndexProperties{IsUnique: false, Comment: ""})
 	require.NoError(t, err)
 	return sch
 }
 
-func CreateTestTable(vrw types.ValueReadWriter, tSchema schema.Schema, rowData types.Map) (*Table, error) {
-	tbl, err := NewNomsTable(context.Background(), vrw, tSchema, rowData, nil, nil)
+func CreateTestTable(vrw types.ValueReadWriter, ns tree.NodeStore, tSchema schema.Schema, rowData durable.Index) (*Table, error) {
+	tbl, err := NewTable(context.Background(), vrw, ns, tSchema, rowData, nil, nil)
 
 	if err != nil {
 		return nil, err
@@ -79,20 +81,20 @@ func CreateTestTable(vrw types.ValueReadWriter, tSchema schema.Schema, rowData t
 	return tbl, nil
 }
 
-func createTestRowData(t *testing.T, vrw types.ValueReadWriter, sch schema.Schema) (types.Map, []row.Row) {
-	return createTestRowDataFromTaggedValues(t, vrw, sch,
-		row.TaggedValues{
-			idTag: types.UUID(id0), firstTag: types.String("bill"), lastTag: types.String("billerson"), ageTag: types.Uint(53)},
-		row.TaggedValues{
-			idTag: types.UUID(id1), firstTag: types.String("eric"), lastTag: types.String("ericson"), isMarriedTag: types.Bool(true), ageTag: types.Uint(21)},
-		row.TaggedValues{
-			idTag: types.UUID(id2), firstTag: types.String("john"), lastTag: types.String("johnson"), isMarriedTag: types.Bool(false), ageTag: types.Uint(53)},
-		row.TaggedValues{
-			idTag: types.UUID(id3), firstTag: types.String("robert"), lastTag: types.String("robertson"), ageTag: types.Uint(36)},
-	)
-}
+func createTestRowData(t *testing.T, vrw types.ValueReadWriter, ns tree.NodeStore, sch schema.Schema) durable.Index {
+	if types.Format_Default == types.Format_DOLT {
+		idx, err := durable.NewEmptyIndex(context.Background(), vrw, ns, sch)
+		require.NoError(t, err)
+		return idx
+	}
 
-func createTestRowDataFromTaggedValues(t *testing.T, vrw types.ValueReadWriter, sch schema.Schema, vals ...row.TaggedValues) (types.Map, []row.Row) {
+	vals := []row.TaggedValues{
+		{idTag: types.UUID(id0), firstTag: types.String("bill"), lastTag: types.String("billerson"), ageTag: types.Uint(53)},
+		{idTag: types.UUID(id1), firstTag: types.String("eric"), lastTag: types.String("ericson"), isMarriedTag: types.Bool(true), ageTag: types.Uint(21)},
+		{idTag: types.UUID(id2), firstTag: types.String("john"), lastTag: types.String("johnson"), isMarriedTag: types.Bool(false), ageTag: types.Uint(53)},
+		{idTag: types.UUID(id3), firstTag: types.String("robert"), lastTag: types.String("robertson"), ageTag: types.Uint(36)},
+	}
+
 	var err error
 	rows := make([]row.Row, len(vals))
 
@@ -109,8 +111,7 @@ func createTestRowDataFromTaggedValues(t *testing.T, vrw types.ValueReadWriter, 
 
 	m, err = ed.Map(context.Background())
 	assert.NoError(t, err)
-
-	return m, rows
+	return durable.IndexFromNomsMap(m, vrw, ns)
 }
 
 func TestIsValidTableName(t *testing.T) {
@@ -119,12 +120,20 @@ func TestIsValidTableName(t *testing.T) {
 	assert.True(t, IsValidTableName("_a1"))
 	assert.True(t, IsValidTableName("a1_b_c------1"))
 	assert.True(t, IsValidTableName("Add-098234_lkjasdf0p98"))
-	assert.False(t, IsValidTableName("1"))
-	assert.False(t, IsValidTableName("-"))
-	assert.False(t, IsValidTableName("-a"))
+	assert.True(t, IsValidTableName("1"))
+	assert.True(t, IsValidTableName("-"))
+	assert.True(t, IsValidTableName("-a"))
+	assert.True(t, IsValidTableName("a1-"))
+	assert.True(t, IsValidTableName("ab!!c"))
+	assert.True(t, IsValidTableName("           space"))
+	assert.True(t, IsValidTableName("this     is     ok"))
+	assert.True(t, IsValidTableName(" ~!@#$%^&*()_+`-=[]{}|;':\",./<>?"))
+	assert.True(t, IsValidTableName("あえいおう"))
+	assert.True(t, IsValidTableName("might/be/problematic"))
 	assert.False(t, IsValidTableName(""))
-	assert.False(t, IsValidTableName("a1-"))
-	assert.False(t, IsValidTableName("ab!!c"))
+	assert.False(t, IsValidTableName(string(rune(0))))
+	assert.False(t, IsValidTableName("𐌃𐌏𐌋𐌕"))
+	assert.False(t, IsValidTableName("space            "))
 }
 
 // DO NOT CHANGE THIS TEST
@@ -167,6 +176,14 @@ func TestSystemTableTags(t *testing.T) {
 		assert.Equal(t, doltSchemasMin+3, schema.DoltSchemasFragmentTag)
 		assert.Equal(t, doltSchemasMin+4, schema.DoltSchemasExtraTag)
 	})
+	t.Run("dolt_conflicts_ tags", func(t *testing.T) {
+		doltConflictsMin := sysTableMin + uint64(7000)
+		assert.Equal(t, doltConflictsMin+0, schema.DoltConflictsOurDiffTypeTag)
+		assert.Equal(t, doltConflictsMin+1, schema.DoltConflictsTheirDiffTypeTag)
+		assert.Equal(t, doltConflictsMin+2, schema.DoltConflictsBaseCardinalityTag)
+		assert.Equal(t, doltConflictsMin+3, schema.DoltConflictsOurCardinalityTag)
+		assert.Equal(t, doltConflictsMin+4, schema.DoltConflictsTheirCardinalityTag)
+	})
 }
 
 func TestEmptyInMemoryRepoCreation(t *testing.T) {
@@ -175,6 +192,7 @@ func TestEmptyInMemoryRepoCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to load db")
 	}
+	defer ddb.Close()
 
 	err = ddb.WriteEmptyRepo(context.Background(), "master", "Bill Billerson", "bigbillieb@fake.horse")
 
@@ -183,11 +201,12 @@ func TestEmptyInMemoryRepoCreation(t *testing.T) {
 	}
 
 	cs, _ := NewCommitSpec("master")
-	commit, err := ddb.Resolve(context.Background(), cs, nil)
-
+	optCmt, err := ddb.Resolve(context.Background(), cs, nil)
 	if err != nil {
 		t.Fatal("Could not find commit")
 	}
+	commit, ok := optCmt.ToCommit()
+	assert.True(t, ok)
 
 	h, err := commit.HashOf()
 	assert.NoError(t, err)
@@ -258,11 +277,12 @@ func TestLDNoms(t *testing.T) {
 	{
 		ddb, _ := LoadDoltDB(context.Background(), types.Format_Default, LocalDirDoltDB, filesys.LocalFS)
 		cs, _ := NewCommitSpec("master")
-		commit, err := ddb.Resolve(context.Background(), cs, nil)
-
+		optCmt, err := ddb.Resolve(context.Background(), cs, nil)
 		if err != nil {
 			t.Fatal("Couldn't find commit")
 		}
+		commit, ok := optCmt.ToCommit()
+		assert.True(t, ok)
 
 		meta, err := commit.GetCommitMeta(context.Background())
 		assert.NoError(t, err)
@@ -275,21 +295,25 @@ func TestLDNoms(t *testing.T) {
 
 		assert.NoError(t, err)
 
-		names, err := root.GetTableNames(context.Background())
+		names, err := root.GetTableNames(context.Background(), DefaultSchemaName)
 		assert.NoError(t, err)
 		if len(names) != 0 {
 			t.Fatal("There should be no tables in empty db")
 		}
 
+		ctx := context.Background()
 		tSchema := createTestSchema(t)
-		rowData, _ := createTestRowData(t, ddb.vrw, tSchema)
-		tbl, err = CreateTestTable(ddb.vrw, tSchema, rowData)
+		rowData, err := durable.NewEmptyIndex(ctx, ddb.vrw, ddb.ns, tSchema)
+		if err != nil {
+			t.Fatal("Failed to create new empty index")
+		}
 
+		tbl, err = CreateTestTable(ddb.vrw, ddb.ns, tSchema, rowData)
 		if err != nil {
 			t.Fatal("Failed to create test table with data")
 		}
 
-		root, err = root.PutTable(context.Background(), "test", tbl)
+		root, err = root.PutTable(context.Background(), TableName{Name: "test"}, tbl)
 		assert.NoError(t, err)
 
 		root, valHash, err = ddb.WriteRootValue(context.Background(), root)
@@ -305,7 +329,18 @@ func TestLDNoms(t *testing.T) {
 			t.Error("Failed to commit")
 		}
 
-		numParents, err := commit.NumParents()
+		rootHash, err := ddb.NomsRoot(context.Background())
+		if err != nil {
+			t.Error("Failed to get root hash")
+		}
+		branches, err := ddb.GetBranchesByRootHash(context.Background(), rootHash)
+		if err != nil {
+			t.Error("Failed to get branches by root hash")
+		}
+		assert.Equal(t, len(branches), 1)
+		assert.Equal(t, branches[0].Ref.GetPath(), "master")
+
+		numParents := commit.NumParents()
 		assert.NoError(t, err)
 
 		if numParents != 1 {
@@ -315,7 +350,7 @@ func TestLDNoms(t *testing.T) {
 		root, err = commit.GetRootValue(context.Background())
 		assert.NoError(t, err)
 
-		readTable, ok, err := root.GetTable(context.Background(), "test")
+		readTable, ok, err := root.GetTable(context.Background(), TableName{Name: "test"})
 		assert.NoError(t, err)
 
 		if !ok {

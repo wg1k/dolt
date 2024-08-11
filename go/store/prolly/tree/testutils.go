@@ -15,11 +15,13 @@
 package tree
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
 	"math/rand"
 	"sort"
+	"sync"
 
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
@@ -43,14 +45,14 @@ func NewTupleLeafNode(keys, values []val.Tuple) Node {
 	return newLeafNode(ks, vs)
 }
 
-func RandomTuplePairs(count int, keyDesc, valDesc val.TupleDesc) (items [][2]val.Tuple) {
+func RandomTuplePairs(count int, keyDesc, valDesc val.TupleDesc, ns NodeStore) (items [][2]val.Tuple) {
 	keyBuilder := val.NewTupleBuilder(keyDesc)
 	valBuilder := val.NewTupleBuilder(valDesc)
 
 	items = make([][2]val.Tuple, count)
 	for i := range items {
-		items[i][0] = RandomTuple(keyBuilder)
-		items[i][1] = RandomTuple(valBuilder)
+		items[i][0] = RandomTuple(keyBuilder, ns)
+		items[i][1] = RandomTuple(valBuilder, ns)
 	}
 
 	dupes := make([]int, 0, count)
@@ -70,14 +72,14 @@ func RandomTuplePairs(count int, keyDesc, valDesc val.TupleDesc) (items [][2]val
 
 		// replace duplicates and validate again
 		for _, d := range dupes {
-			items[d][0] = RandomTuple(keyBuilder)
+			items[d][0] = RandomTuple(keyBuilder, ns)
 		}
 		dupes = dupes[:0]
 	}
 	return items
 }
 
-func RandomCompositeTuplePairs(count int, keyDesc, valDesc val.TupleDesc) (items [][2]val.Tuple) {
+func RandomCompositeTuplePairs(count int, keyDesc, valDesc val.TupleDesc, ns NodeStore) (items [][2]val.Tuple) {
 	// preconditions
 	if count%5 != 0 {
 		panic("expected empty divisible by 5")
@@ -86,7 +88,7 @@ func RandomCompositeTuplePairs(count int, keyDesc, valDesc val.TupleDesc) (items
 		panic("expected composite key")
 	}
 
-	tt := RandomTuplePairs(count, keyDesc, valDesc)
+	tt := RandomTuplePairs(count, keyDesc, valDesc, ns)
 
 	tuples := make([][2]val.Tuple, len(tt)*3)
 	for i := range tuples {
@@ -125,9 +127,9 @@ func AscendingUintTuples(count int) (tuples [][2]val.Tuple, desc val.TupleDesc) 
 	return
 }
 
-func RandomTuple(tb *val.TupleBuilder) (tup val.Tuple) {
+func RandomTuple(tb *val.TupleBuilder, ns NodeStore) (tup val.Tuple) {
 	for i, typ := range tb.Desc.Types {
-		randomField(tb, i, typ)
+		randomField(tb, i, typ, ns)
 	}
 	return tb.Build(sharedPool)
 }
@@ -152,6 +154,10 @@ func ShuffleTuplePairs(items [][2]val.Tuple) {
 	})
 }
 
+func NewEmptyTestNode() Node {
+	return newLeafNode(nil, nil)
+}
+
 func newLeafNode(keys, values []Item) Node {
 	kk := make([][]byte, len(keys))
 	for i := range keys {
@@ -162,9 +168,13 @@ func newLeafNode(keys, values []Item) Node {
 		vv[i] = values[i]
 	}
 
-	s := message.ProllyMapSerializer{Pool: sharedPool}
+	s := message.NewProllyMapSerializer(val.TupleDesc{}, sharedPool)
 	msg := s.Serialize(kk, vv, nil, 0)
-	return NodeFromBytes(msg)
+	n, err := NodeFromBytes(msg)
+	if err != nil {
+		panic(err)
+	}
+	return n
 }
 
 // assumes a sorted list
@@ -181,7 +191,7 @@ func deduplicateTuples(desc val.TupleDesc, tups [][2]val.Tuple) (uniq [][2]val.T
 	return
 }
 
-func randomField(tb *val.TupleBuilder, idx int, typ val.Type) {
+func randomField(tb *val.TupleBuilder, idx int, typ val.Type, ns NodeStore) {
 	// todo(andy): add NULLs
 
 	neg := -1
@@ -203,16 +213,16 @@ func randomField(tb *val.TupleBuilder, idx int, typ val.Type) {
 		v := uint16(testRand.Intn(math.MaxUint16))
 		tb.PutUint16(idx, v)
 	case val.Int32Enc:
-		v := int32(testRand.Intn(math.MaxInt32) * neg)
+		v := testRand.Int31() * int32(neg)
 		tb.PutInt32(idx, v)
 	case val.Uint32Enc:
-		v := uint32(testRand.Intn(math.MaxUint32))
+		v := testRand.Uint32()
 		tb.PutUint32(idx, v)
 	case val.Int64Enc:
-		v := int64(testRand.Intn(math.MaxInt64) * neg)
+		v := testRand.Int63() * int64(neg)
 		tb.PutInt64(idx, v)
 	case val.Uint64Enc:
-		v := uint64(testRand.Uint64())
+		v := testRand.Uint64()
 		tb.PutUint64(idx, v)
 	case val.Float32Enc:
 		tb.PutFloat32(idx, testRand.Float32())
@@ -230,10 +240,21 @@ func randomField(tb *val.TupleBuilder, idx int, typ val.Type) {
 		buf := make([]byte, 16)
 		testRand.Read(buf)
 		tb.PutHash128(idx, buf)
-	case val.AddressEnc:
+	case val.CommitAddrEnc:
 		buf := make([]byte, 20)
 		testRand.Read(buf)
-		tb.PutAddress(idx, buf)
+		tb.PutCommitAddr(idx, hash.New(buf))
+	case val.BytesAddrEnc, val.StringAddrEnc, val.JSONAddrEnc:
+		len := (testRand.Int63() % 40) + 10
+		buf := make([]byte, len)
+		testRand.Read(buf)
+		bb := ns.BlobBuilder()
+		bb.Init(int(len))
+		_, addr, err := bb.Chunk(context.Background(), bytes.NewReader(buf))
+		if err != nil {
+			panic("failed to write bytes tree")
+		}
+		tb.PutBytesAddr(idx, addr)
 	default:
 		panic("unknown encoding")
 	}
@@ -241,12 +262,14 @@ func randomField(tb *val.TupleBuilder, idx int, typ val.Type) {
 
 func NewTestNodeStore() NodeStore {
 	ts := &chunks.TestStorage{}
-	ns := NewNodeStore(ts.NewView())
-	return nodeStoreValidator{ns: ns}
+	ns := NewNodeStore(ts.NewViewWithFormat(types.Format_DOLT.VersionString()))
+	bb := &blobBuilderPool
+	return nodeStoreValidator{ns: ns, bbp: bb}
 }
 
 type nodeStoreValidator struct {
-	ns NodeStore
+	ns  NodeStore
+	bbp *sync.Pool
 }
 
 func (v nodeStoreValidator) Read(ctx context.Context, ref hash.Hash) (Node, error) {
@@ -261,6 +284,21 @@ func (v nodeStoreValidator) Read(ctx context.Context, ref hash.Hash) (Node, erro
 		return Node{}, err
 	}
 	return nd, nil
+}
+
+func (v nodeStoreValidator) ReadMany(ctx context.Context, refs hash.HashSlice) ([]Node, error) {
+	nodes, err := v.ns.ReadMany(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range nodes {
+		actual := hash.Of(nodes[i].msg)
+		if refs[i] != actual {
+			err = fmt.Errorf("incorrect node hash (%s != %s)", refs[i], actual)
+			return nil, err
+		}
+	}
+	return nodes, nil
 }
 
 func (v nodeStoreValidator) Write(ctx context.Context, nd Node) (hash.Hash, error) {
@@ -279,6 +317,20 @@ func (v nodeStoreValidator) Write(ctx context.Context, nd Node) (hash.Hash, erro
 
 func (v nodeStoreValidator) Pool() pool.BuffPool {
 	return v.ns.Pool()
+}
+
+func (v nodeStoreValidator) BlobBuilder() *BlobBuilder {
+	bb := v.bbp.Get().(*BlobBuilder)
+	if bb.ns == nil {
+		bb.SetNodeStore(v)
+	}
+	return bb
+}
+
+// PutBlobBuilder implements NodeStore.
+func (v nodeStoreValidator) PutBlobBuilder(bb *BlobBuilder) {
+	bb.Reset()
+	v.bbp.Put(bb)
 }
 
 func (v nodeStoreValidator) Format() *types.NomsBinFormat {

@@ -15,115 +15,32 @@
 package globalstate
 
 import (
-	"context"
-	"math"
-	"sync"
-
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
-	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 )
 
-// CoerceAutoIncrementValue converts |val| into an AUTO_INCREMENT sequence value
-func CoerceAutoIncrementValue(val interface{}) (uint64, error) {
-	switch typ := val.(type) {
-	case float32:
-		val = math.Round(float64(typ))
-	case float64:
-		val = math.Round(typ)
-	}
+// AutoIncrementTracker knows how to get and set the current auto increment value for a table. It's defined as an
+// interface here because implementations need to reach into session state, requiring a dependency on this package.
+type AutoIncrementTracker interface {
+	// Current returns the current auto increment value for the given table.
+	Current(tableName string) uint64
+	// Next returns the next auto increment value for the given table, and increments the current value.
+	Next(tbl string, insertVal interface{}) (uint64, error)
+	// AddNewTable adds a new table to the tracker, initializing the auto increment value to 1.
+	AddNewTable(tableName string)
+	// DropTable removes a table from the tracker.
+	DropTable(ctx *sql.Context, tableName string, wses ...*doltdb.WorkingSet) error
+	// CoerceAutoIncrementValue coerces the given value to a uint64, returning an error if it can't be done.
+	CoerceAutoIncrementValue(val interface{}) (uint64, error)
+	// Set sets the auto increment value for the given table. This operation may silently do nothing if this value is
+	// below the current value for this table. The table in the provided working set is assumed to already have the value
+	// given, so the new global maximum is computed without regard for its value in that working set.
+	Set(ctx *sql.Context, tableName string, table *doltdb.Table, ws ref.WorkingSetRef, newAutoIncVal uint64) (*doltdb.Table, error)
 
-	var err error
-	val, err = sql.Uint64.Convert(val)
-	if err != nil {
-		return 0, err
-	}
-	if val == nil || val == uint64(0) {
-		return 0, nil
-	}
-	return val.(uint64), nil
-}
-
-// NewAutoIncrementTracker returns a new autoincrement tracker for the working set given
-func NewAutoIncrementTracker(ctx context.Context, ws *doltdb.WorkingSet) (AutoIncrementTracker, error) {
-	ait := AutoIncrementTracker{
-		wsRef:     ws.Ref(),
-		sequences: make(map[string]uint64),
-		mu:        &sync.Mutex{},
-	}
-
-	// collect auto increment values
-	err := ws.WorkingRoot().IterTables(ctx, func(name string, table *doltdb.Table, sch schema.Schema) (bool, error) {
-		ok := schema.HasAutoIncrement(sch)
-		if !ok {
-			return false, nil
-		}
-		seq, err := table.GetAutoIncrementValue(ctx)
-		if err != nil {
-			return true, err
-		}
-		ait.sequences[name] = seq
-		return false, nil
-	})
-
-	return ait, err
-}
-
-type AutoIncrementTracker struct {
-	wsRef     ref.WorkingSetRef
-	sequences map[string]uint64
-	mu        *sync.Mutex
-}
-
-func (a AutoIncrementTracker) Current(tableName string) uint64 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.sequences[tableName]
-}
-
-func (a AutoIncrementTracker) Next(tbl string, insertVal interface{}) (uint64, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	given, err := CoerceAutoIncrementValue(insertVal)
-	if err != nil {
-		return 0, err
-	}
-
-	curr := a.sequences[tbl]
-
-	if given == 0 {
-		// |given| is 0 or NULL
-		a.sequences[tbl]++
-		return curr, nil
-	}
-
-	if given >= curr {
-		a.sequences[tbl] = given
-		a.sequences[tbl]++
-		return given, nil
-	}
-
-	// |given| < curr
-	return given, nil
-}
-
-func (a AutoIncrementTracker) Set(tableName string, val uint64) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sequences[tableName] = val
-}
-
-func (a AutoIncrementTracker) AddNewTable(tableName string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sequences[tableName] = uint64(1)
-}
-
-func (a AutoIncrementTracker) DropTable(tableName string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	delete(a.sequences, tableName)
+	// AcquireTableLock acquires the auto increment lock on a table, and reutrns a callback function to release the lock.
+	// Depending on the value of the `innodb_autoinc_lock_mode` system variable, the engine may need to acquire and hold
+	// the lock for the duration of an insert statement.
+	AcquireTableLock(ctx *sql.Context, tableName string) (func(), error)
 }

@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 }
 
 teardown() {
@@ -15,7 +14,8 @@ teardown() {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_add('.');
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -41,8 +41,9 @@ SQL
 @test "drop-create: same schema and data, commit after drop" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -78,8 +79,9 @@ SQL
 @test "drop-create: added column" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -103,17 +105,38 @@ SQL
 
     dolt diff
     run dolt diff
+
+    EXPECTED=$(cat <<'EOF'
+ CREATE TABLE `test` (
+   `a` int NOT NULL,
+   `b` int,
++  `c` int,
+   PRIMARY KEY (`a`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+EOF
+)
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "+  \`c\` int," ]] || false
-    [[ "$output" =~ "|  <  | a | b |   |" ]] || false
-    [[ "$output" =~ "|  >  | a | b | c |" ]] || false
+    [[ "$output" =~ "$EXPECTED" ]] || false
+
+    # No data diff
+    skip_nbf_dolt "Adding a column necessarily rewrites row values in new format"
+    [ "${#lines[@]}" -eq 9 ]
+
+    run dolt sql -r csv -q "select * from test as of 'HEAD'"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "1,1" ]] || false
+    [[ "$output" =~ "2,2" ]] || false
+    [[ ! "$output" =~ "1,1," ]] || false
+    [[ ! "$output" =~ "2,2," ]] || false
 }
+
 
 @test "drop-create: added column with data modifications" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -139,21 +162,19 @@ SQL
     run dolt diff
     [ "$status" -eq 0 ]
     [[ "$output" =~ "+  \`c\` int," ]] || false
-    [[ "$output" =~ "|  <  | a | b |      |" ]] || false
-    [[ "$output" =~ "|  >  | a | b | c    |" ]] || false
-    [[ "$output" =~ "|  <  | 1 | 1 | NULL |" ]] || false
-    [[ "$output" =~ "|  <  | 2 | 2 | NULL |" ]] || false
-    [[ "$output" =~ "|  >  | 1 | 2 | 1    |" ]] || false
-    [[ "$output" =~ "|  >  | 2 | 3 | 2    |" ]] || false
-    [[ "$output" =~ "|  +  | 3 | 3 | 3    |" ]] || false
+    [[ "$output" =~ "| < | 1 | 1 | NULL |" ]] || false
+    [[ "$output" =~ "| < | 2 | 2 | NULL |" ]] || false
+    [[ "$output" =~ "| > | 1 | 2 | 1    |" ]] || false
+    [[ "$output" =~ "| > | 2 | 3 | 2    |" ]] || false
+    [[ "$output" =~ "| + | 3 | 3 | 3    |" ]] || false
 }
-
 
 @test "drop-create: dropped column" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null, c int null);
+call dolt_add('.');
 insert into test values (1,2,3), (4,5,6);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -179,19 +200,18 @@ SQL
     run dolt diff
     [ "$status" -eq 0 ]
     [[ "$output" =~ "-  \`c\` int," ]] || false
-    [[ "$output" =~ "|  <  | a | b | c    |" ]] || false
-    [[ "$output" =~ "|  >  | a | b |      |" ]] || false
-    [[ "$output" =~ "|  <  | 1 | 2 | 3    |" ]] || false
-    [[ "$output" =~ "|  >  | 1 | 2 | NULL |" ]] || false
-    [[ "$output" =~ "|  <  | 4 | 5 | 6    |" ]] || false
-    [[ "$output" =~ "|  >  | 4 | 5 | NULL |" ]] || false
+    [[ "$output" =~ "| < | 1 | 2 | 3    |" ]] || false
+    [[ "$output" =~ "| > | 1 | 2 | NULL |" ]] || false
+    [[ "$output" =~ "| < | 4 | 5 | 6    |" ]] || false
+    [[ "$output" =~ "| > | 4 | 5 | NULL |" ]] || false
 }
 
 @test "drop-create: dropped column with data modifications" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null, c int null);
+call dolt_add('.');
 insert into test values (1,2,3), (4,5,6);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -217,20 +237,19 @@ SQL
     run dolt diff
     [ "$status" -eq 0 ]
     [[ "$output" =~ "-  \`c\` int," ]] || false
-    [[ "$output" =~ "|  <  | a | b  | c    |" ]] || false
-    [[ "$output" =~ "|  >  | a | b  |      |" ]] || false
-    [[ "$output" =~ "|  <  | 1 | 2  | 3    |" ]] || false
-    [[ "$output" =~ "|  >  | 1 | 7  | NULL |" ]] || false
-    [[ "$output" =~ "|  <  | 4 | 5  | 6    |" ]] || false
-    [[ "$output" =~ "|  >  | 4 | 8  | NULL |" ]] || false
-    [[ "$output" =~ "|  +  | 9 | 10 | NULL |" ]] || false
+    [[ "$output" =~ "| < | 1 | 2  | 3    |" ]] || false
+    [[ "$output" =~ "| > | 1 | 7  | NULL |" ]] || false
+    [[ "$output" =~ "| < | 4 | 5  | 6    |" ]] || false
+    [[ "$output" =~ "| > | 4 | 8  | NULL |" ]] || false
+    [[ "$output" =~ "| + | 9 | 10 | NULL |" ]] || false
 }
 
 @test "drop-create: added column, modified column" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -255,20 +274,32 @@ SQL
     dolt diff
     run dolt diff
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "-  \`a\` int NOT NULL," ]] || false
-    [[ "$output" =~ "-  \`b\` int," ]] || false
-    [[ "$output" =~ "+  \`a\` bigint NOT NULL," ]] || false
-    [[ "$output" =~ "+  \`b\` tinyint," ]] || false
-    [[ "$output" =~ "+  \`c\` int," ]] || false
-    [[ "$output" =~ "|  <  | a | b |   |" ]] || false
-    [[ "$output" =~ "|  >  | a | b | c |" ]] || false
+
+    EXPECTED=$(cat <<'EOF'
+ CREATE TABLE `test` (
+-  `a` int NOT NULL,
+-  `b` int,
++  `a` bigint NOT NULL,
++  `b` tinyint,
++  `c` int,
+   PRIMARY KEY (`a`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+EOF
+)
+
+    [[ "$output" =~ "$EXPECTED" ]] || false
+
+    # no data diff
+    skip_nbf_dolt "Adding a column necessarily rewrites row values in new format"
+    [ "${#lines[@]}" -eq 11 ]
 }
 
 @test "drop-create: constraint changes" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -301,16 +332,15 @@ SQL
     [[ "$output" =~ "+  \`b\` tinyint NOT NULL," ]] || false
     [[ "$output" =~ "+  \`c\` varchar(10)," ]] || false
     [[ "$output" =~ "+  PRIMARY KEY (\`a\`)," ]] || false
-    [[ "$output" =~ "+  CONSTRAINT \`chk_vk8cbuqc\` CHECK ((\`b\` > 0))" ]] || false
-    [[ "$output" =~ "|  <  | a | b |   |" ]] || false
-    [[ "$output" =~ "|  >  | a | b | c |" ]] || false
+    [[ "$output" =~ "+  CONSTRAINT \`test_chk_vk8cbuqc\` CHECK ((\`b\` > 0))" ]] || false
 }
 
 @test "drop-create: default changes" {
     dolt sql  <<SQL
 create table test(a int primary key, b int null default 10);
+call dolt_add('.');
 insert into test values (1,1), (2,2);
-select dolt_commit("-am", "table with two rows");
+call dolt_commit("-am", "table with two rows");
 SQL
 
     dolt sql -q "drop table test"
@@ -337,12 +367,10 @@ SQL
     [ "$status" -eq 0 ]
 
     [[ "$output" =~ "-  \`a\` int NOT NULL," ]] || false
-    [[ "$output" =~ "-  \`b\` int DEFAULT 10," ]] || false
+    [[ "$output" =~ "-  \`b\` int DEFAULT '10'," ]] || false
     [[ "$output" =~ "+  \`a\` bigint NOT NULL," ]] || false
-    [[ "$output" =~ "+  \`b\` tinyint NOT NULL DEFAULT 50," ]] || false
+    [[ "$output" =~ "+  \`b\` tinyint NOT NULL DEFAULT '50'," ]] || false
     [[ "$output" =~ "+  \`c\` varchar(10)" ]] || false
-    [[ "$output" =~ "|  <  | a | b |   |" ]] || false
-    [[ "$output" =~ "|  >  | a | b | c |" ]] || false
 }
 
 @test "drop-create: drop table from different database" {
@@ -368,4 +396,37 @@ SQL
     run dolt sql -q "select * from common.test"
     [ "$status" -eq 1 ]
     [[ "$output" =~ "table not found: test" ]] || false
+}
+
+@test "drop-create: regression test for 0 value tags" {
+    dolt sql -q "CREATE TABLE clan_home_level (level INTEGER NOT NULL, price_teleport JSON NOT NULL);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "clan_home_level | price_teleport | 0" ]] || false
+
+    dolt commit -Am "add table"
+
+    dolt sql -q "DROP TABLE clan_home_level;"
+    dolt sql -q "CREATE TABLE clan_home_level (level INTEGER NOT NULL, price_teleport JSON NOT NULL);"
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "clan_home_level | price_teleport | 0" ]] || false
+}
+
+@test "drop-create: ensure no tag collisions" {
+    dolt sql -q "CREATE TABLE my_table (pk int primary key)"
+    dolt commit -Am "added my_table"
+
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "my_table | pk     | 2803" ]] || false
+
+    dolt sql -q "DROP TABLE my_table"
+    dolt sql -q "CREATE TABLE mytable (pk int primary key)"
+    dolt sql -q "CREATE TABLE my_table (pk int primary key)"
+
+    run dolt schema tags
+    [ $status -eq 0 ]
+    [[ $output =~ "my_table | pk     | 2803" ]] || false
+    [[ $output =~ "mytable  | pk     | 11671" ]] || false
 }

@@ -18,134 +18,255 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/go-mysql-server/sql"
 
+	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
+	"github.com/dolthub/dolt/go/libraries/doltcore/diff"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/utils/set"
 )
 
-//  FmtCol converts a column to a string with a given indent space count, name width, and type width.  If nameWidth or
-// typeWidth are 0 or less than the length of the name or type, then the length of the name or type will be used
-func FmtCol(indent, nameWidth, typeWidth int, col schema.Column) string {
-	sqlType := col.TypeInfo.ToSqlType()
-	return FmtColWithNameAndType(indent, nameWidth, typeWidth, col.Name, sqlType.String(), col)
+// GenerateDataDiffStatement returns any data diff in SQL statements for given table including INSERT, UPDATE and DELETE row statements.
+func GenerateDataDiffStatement(tableName string, sch schema.Schema, row sql.Row, rowDiffType diff.ChangeType, colDiffTypes []diff.ChangeType) (string, error) {
+	if len(row) != len(colDiffTypes) {
+		return "", fmt.Errorf("expected the same size for columns and diff types, got %d and %d", len(row), len(colDiffTypes))
+	}
+
+	switch rowDiffType {
+	case diff.Added:
+		return SqlRowAsInsertStmt(row, tableName, sch)
+	case diff.Removed:
+		return SqlRowAsDeleteStmt(row, tableName, sch, 0)
+	case diff.ModifiedNew:
+		updatedCols := set.NewEmptyStrSet()
+		for i, diffType := range colDiffTypes {
+			if diffType != diff.None {
+				updatedCols.Add(sch.GetAllCols().GetByIndex(i).Name)
+			}
+		}
+		if updatedCols.Size() == 0 {
+			return "", nil
+		}
+		return SqlRowAsUpdateStmt(row, tableName, sch, updatedCols)
+	case diff.ModifiedOld:
+		// do nothing, we only issue UPDATE for ModifiedNew
+		return "", nil
+	default:
+		return "", fmt.Errorf("unexpected row diff type: %v", rowDiffType)
+	}
 }
 
-// FmtColWithNameAndType creates a string representing a column within a sql create table statement with a given indent
-// space count, name width, and type width.  If nameWidth or typeWidth are 0 or less than the length of the name or
-// type, then the length of the name or type will be used.
-func FmtColWithNameAndType(indent, nameWidth, typeWidth int, colName, typeStr string, col schema.Column) string {
-	colName = QuoteIdentifier(colName)
-	fmtStr := fmt.Sprintf("%%%ds%%%ds %%%ds", indent, nameWidth, typeWidth)
-	colStr := fmt.Sprintf(fmtStr, "", colName, typeStr)
+// GenerateSqlPatchSchemaStatements examines the table schema changes in the specified TableDelta |td| and returns
+// a slice of SQL path statements that represent the equivalent SQL DDL statements for those schema changes. The
+// specified RootValue, |toRoot|, must be the RootValue that was used as the "To" root when computing the specified
+// TableDelta.
+func GenerateSqlPatchSchemaStatements(ctx *sql.Context, toRoot doltdb.RootValue, td diff.TableDelta) ([]string, error) {
+	toSchemas, err := doltdb.GetAllSchemas(ctx, toRoot)
+	if err != nil {
+		return nil, fmt.Errorf("could not read schemas from toRoot, cause: %s", err.Error())
+	}
 
-	for _, cnst := range col.Constraints {
-		switch cnst.GetConstraintType() {
-		case schema.NotNullConstraintType:
-			colStr += " NOT NULL"
-		default:
-			panic("FmtColWithNameAndType doesn't know how to format constraint type: " + cnst.GetConstraintType())
+	fromSch, toSch, err := td.GetSchemas(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot retrieve schema for table %s, cause: %s", td.ToName, err.Error())
+	}
+
+	var ddlStatements []string
+	if td.IsDrop() {
+		ddlStatements = append(ddlStatements, DropTableStmt(td.FromName.Name))
+	} else if td.IsAdd() {
+		stmt, err := GenerateCreateTableStatement(td.ToName.Name, td.ToSch, td.ToFks, nameMapFromTableNameMap(td.ToFksParentSch))
+		if err != nil {
+			return nil, errhand.VerboseErrorFromError(err)
+		}
+		ddlStatements = append(ddlStatements, stmt)
+	} else {
+		stmts, err := generateNonCreateNonDropTableSqlSchemaDiff(td, toSchemas, fromSch, toSch)
+		if err != nil {
+			return nil, err
+		}
+		ddlStatements = append(ddlStatements, stmts...)
+	}
+
+	return ddlStatements, nil
+}
+
+func nameMapFromTableNameMap(tableNameMap map[doltdb.TableName]schema.Schema) map[string]schema.Schema {
+	nameMap := make(map[string]schema.Schema)
+	for name := range tableNameMap {
+		nameMap[name.Name] = tableNameMap[name]
+	}
+	return nameMap
+}
+
+// generateNonCreateNonDropTableSqlSchemaDiff returns any schema diff in SQL statements that is NEITHER 'CREATE TABLE' NOR 'DROP TABLE' statements.
+// TODO: schema names
+func generateNonCreateNonDropTableSqlSchemaDiff(td diff.TableDelta, toSchemas map[string]schema.Schema, fromSch, toSch schema.Schema) ([]string, error) {
+	if td.IsAdd() || td.IsDrop() {
+		// use add and drop specific methods
+		return nil, nil
+	}
+
+	var ddlStatements []string
+	if td.FromName != td.ToName {
+		ddlStatements = append(ddlStatements, RenameTableStmt(td.FromName.Name, td.ToName.Name))
+	}
+
+	eq := schema.SchemasAreEqual(fromSch, toSch)
+	if eq && !td.HasFKChanges() {
+		return ddlStatements, nil
+	}
+
+	colDiffs, unionTags := diff.DiffSchColumns(fromSch, toSch)
+	for _, tag := range unionTags {
+		cd := colDiffs[tag]
+		switch cd.DiffType {
+		case diff.SchDiffNone:
+		case diff.SchDiffAdded:
+			ddlStatements = append(ddlStatements, AlterTableAddColStmt(td.ToName.Name, GenerateCreateTableColumnDefinition(*cd.New, sql.CollationID(td.ToSch.GetCollation()))))
+		case diff.SchDiffRemoved:
+			ddlStatements = append(ddlStatements, AlterTableDropColStmt(td.ToName.Name, cd.Old.Name))
+		case diff.SchDiffModified:
+			// Ignore any primary key set changes here
+			if cd.Old.IsPartOfPK != cd.New.IsPartOfPK {
+				continue
+			}
+			if cd.Old.Name != cd.New.Name {
+				ddlStatements = append(ddlStatements, AlterTableRenameColStmt(td.ToName.Name, cd.Old.Name, cd.New.Name))
+			}
+			if !cd.Old.TypeInfo.Equals(cd.New.TypeInfo) {
+				ddlStatements = append(ddlStatements, AlterTableModifyColStmt(td.ToName.Name,
+					GenerateCreateTableColumnDefinition(*cd.New, sql.CollationID(td.ToSch.GetCollation()))))
+			}
 		}
 	}
 
-	if col.AutoIncrement {
-		colStr += " AUTO_INCREMENT"
+	// Print changes between a primary key set change. It contains an ALTER TABLE DROP and an ALTER TABLE ADD
+	if !schema.ColCollsAreEqual(fromSch.GetPKCols(), toSch.GetPKCols()) {
+		ddlStatements = append(ddlStatements, AlterTableDropPks(td.ToName.Name))
+		if toSch.GetPKCols().Size() > 0 {
+			ddlStatements = append(ddlStatements, AlterTableAddPrimaryKeys(td.ToName.Name, toSch.GetPKCols().GetColumnNames()))
+		}
 	}
 
+	for _, idxDiff := range diff.DiffSchIndexes(fromSch, toSch) {
+		switch idxDiff.DiffType {
+		case diff.SchDiffNone:
+		case diff.SchDiffAdded:
+			ddlStatements = append(ddlStatements, AlterTableAddIndexStmt(td.ToName.Name, idxDiff.To))
+		case diff.SchDiffRemoved:
+			ddlStatements = append(ddlStatements, AlterTableDropIndexStmt(td.FromName.Name, idxDiff.From))
+		case diff.SchDiffModified:
+			ddlStatements = append(ddlStatements, AlterTableDropIndexStmt(td.FromName.Name, idxDiff.From))
+			ddlStatements = append(ddlStatements, AlterTableAddIndexStmt(td.ToName.Name, idxDiff.To))
+		}
+	}
+
+	for _, fkDiff := range diff.DiffForeignKeys(td.FromFks, td.ToFks) {
+		switch fkDiff.DiffType {
+		case diff.SchDiffNone:
+		case diff.SchDiffAdded:
+			parentSch := toSchemas[fkDiff.To.ReferencedTableName]
+			ddlStatements = append(ddlStatements, AlterTableAddForeignKeyStmt(fkDiff.To, toSch, parentSch))
+		case diff.SchDiffRemoved:
+			from := fkDiff.From
+			ddlStatements = append(ddlStatements, AlterTableDropForeignKeyStmt(from.TableName, from.Name))
+		case diff.SchDiffModified:
+			from := fkDiff.From
+			ddlStatements = append(ddlStatements, AlterTableDropForeignKeyStmt(from.TableName, from.Name))
+
+			parentSch := toSchemas[fkDiff.To.ReferencedTableName]
+			ddlStatements = append(ddlStatements, AlterTableAddForeignKeyStmt(fkDiff.To, toSch, parentSch))
+		}
+	}
+
+	// Handle charset/collation changes
+	toCollation := toSch.GetCollation()
+	fromCollation := fromSch.GetCollation()
+	if toCollation != fromCollation {
+		ddlStatements = append(ddlStatements, AlterTableCollateStmt(td.ToName.Name, fromCollation, toCollation))
+	}
+
+	return ddlStatements, nil
+}
+
+// GenerateCreateTableColumnDefinition returns column definition for CREATE TABLE statement with no indentation
+func GenerateCreateTableColumnDefinition(col schema.Column, tableCollation sql.CollationID) string {
+	colStr := GenerateCreateTableIndentedColumnDefinition(col, tableCollation)
+	return strings.TrimPrefix(colStr, "  ")
+}
+
+// GenerateCreateTableIndentedColumnDefinition returns column definition for CREATE TABLE statement with no indentation
+func GenerateCreateTableIndentedColumnDefinition(col schema.Column, tableCollation sql.CollationID) string {
+	var defaultVal, genVal, onUpdateVal *sql.ColumnDefaultValue
 	if col.Default != "" {
-		colStr += " DEFAULT " + col.Default
+		defaultVal = sql.NewUnresolvedColumnDefaultValue(col.Default)
+	}
+	if col.Generated != "" {
+		genVal = sql.NewUnresolvedColumnDefaultValue(col.Generated)
+	}
+	if col.OnUpdate != "" {
+		onUpdateVal = sql.NewUnresolvedColumnDefaultValue(col.OnUpdate)
 	}
 
-	if col.Comment != "" {
-		colStr += " COMMENT " + QuoteComment(col.Comment)
-	}
-
-	return colStr
+	return sql.GenerateCreateTableColumnDefinition(
+		&sql.Column{
+			Name:          col.Name,
+			Type:          col.TypeInfo.ToSqlType(),
+			Default:       defaultVal,
+			AutoIncrement: col.AutoIncrement,
+			Nullable:      col.IsNullable(),
+			Comment:       col.Comment,
+			Generated:     genVal,
+			Virtual:       col.Virtual,
+			OnUpdate:      onUpdateVal,
+		}, col.Default, col.OnUpdate, tableCollation)
 }
 
-// FmtColPrimaryKey creates a string representing a primary key constraint within a sql create table statement with a
-// given indent.
-func FmtColPrimaryKey(indent int, colStr string, newline bool) string {
-	st := "%%%ds PRIMARY KEY (%s)"
-	if newline {
-		st += "\n"
-	}
-
-	fmtStr := fmt.Sprintf(st, indent, colStr)
-	return fmt.Sprintf(fmtStr, "")
+// GenerateCreateTableIndexDefinition returns index definition for CREATE TABLE statement with indentation of 2 spaces
+func GenerateCreateTableIndexDefinition(index schema.Index) string {
+	return sql.GenerateCreateTableIndexDefinition(index.IsUnique(), index.IsSpatial(), index.IsFullText(), index.Name(),
+		sql.QuoteIdentifiers(index.ColumnNames()), index.Comment())
 }
 
-func FmtIndex(index schema.Index) string {
-	sb := strings.Builder{}
-	if index.IsUnique() {
-		sb.WriteString("UNIQUE ")
-	}
-	sb.WriteString("INDEX ")
-	sb.WriteString(QuoteIdentifier(index.Name()))
-	sb.WriteString(" (")
-	for i, indexColName := range index.ColumnNames() {
-		if i != 0 {
-			sb.WriteRune(',')
-		}
-		sb.WriteString(QuoteIdentifier(indexColName))
-	}
-	sb.WriteRune(')')
-	if len(index.Comment()) > 0 {
-		sb.WriteString(" COMMENT ")
-		sb.WriteString(QuoteComment(index.Comment()))
-	}
-	return sb.String()
-}
-
-func FmtForeignKey(fk doltdb.ForeignKey, sch, parentSch schema.Schema) string {
-	sb := strings.Builder{}
-	sb.WriteString("CONSTRAINT ")
-	sb.WriteString(QuoteIdentifier(fk.Name))
-	sb.WriteString(" FOREIGN KEY (")
+// GenerateCreateTableForeignKeyDefinition returns foreign key definition for CREATE TABLE statement with indentation of 2 spaces
+func GenerateCreateTableForeignKeyDefinition(fk doltdb.ForeignKey, sch, parentSch schema.Schema) string {
+	var fkCols []string
 	if fk.IsResolved() {
-		for i, tag := range fk.TableColumns {
-			if i != 0 {
-				sb.WriteRune(',')
-			}
+		for _, tag := range fk.TableColumns {
 			c, _ := sch.GetAllCols().GetByTag(tag)
-			sb.WriteString(QuoteIdentifier(c.Name))
+			fkCols = append(fkCols, c.Name)
 		}
 	} else {
-		for i, col := range fk.UnresolvedFKDetails.TableColumns {
-			if i != 0 {
-				sb.WriteRune(',')
-			}
-			sb.WriteString(QuoteIdentifier(col))
-		}
+		fkCols = append(fkCols, fk.UnresolvedFKDetails.TableColumns...)
 	}
-	sb.WriteString(")\n    REFERENCES ")
-	sb.WriteString(QuoteIdentifier(fk.ReferencedTableName))
-	sb.WriteString(" (")
-	if fk.IsResolved() {
-		for i, tag := range fk.ReferencedTableColumns {
-			if i != 0 {
-				sb.WriteRune(',')
-			}
+
+	var parentCols []string
+	if parentSch != nil && fk.IsResolved() {
+		for _, tag := range fk.ReferencedTableColumns {
 			c, _ := parentSch.GetAllCols().GetByTag(tag)
-			sb.WriteString(QuoteIdentifier(c.Name))
+			parentCols = append(parentCols, c.Name)
 		}
 	} else {
-		for i, col := range fk.UnresolvedFKDetails.ReferencedTableColumns {
-			if i != 0 {
-				sb.WriteRune(',')
-			}
-			sb.WriteString(QuoteIdentifier(col))
-		}
+		// the referenced table is dropped, so the schema is nil or the foreign key is not resolved
+		parentCols = append(parentCols, fk.UnresolvedFKDetails.ReferencedTableColumns...)
 	}
-	sb.WriteRune(')')
+
+	onDelete := ""
 	if fk.OnDelete != doltdb.ForeignKeyReferentialAction_DefaultAction {
-		sb.WriteString("\n    ON DELETE ")
-		sb.WriteString(fk.OnDelete.String())
+		onDelete = fk.OnDelete.String()
 	}
+	onUpdate := ""
 	if fk.OnUpdate != doltdb.ForeignKeyReferentialAction_DefaultAction {
-		sb.WriteString("\n    ON UPDATE ")
-		sb.WriteString(fk.OnUpdate.String())
+		onUpdate = fk.OnUpdate.String()
 	}
-	return sb.String()
+	return sql.GenerateCreateTableForiegnKeyDefinition(fk.Name, fkCols, fk.ReferencedTableName, parentCols, onDelete, onUpdate)
+}
+
+// GenerateCreateTableCheckConstraintClause returns check constraint clause definition for CREATE TABLE statement with indentation of 2 spaces
+func GenerateCreateTableCheckConstraintClause(check schema.Check) string {
+	return sql.GenerateCreateTableCheckConstraintClause(check.Name(), check.Expression(), check.Enforced())
 }
 
 func DropTableStmt(tableName string) string {
@@ -215,17 +336,17 @@ func AlterTableDropPks(tableName string) string {
 	return b.String()
 }
 
-func AlterTableAddPrimaryKeys(tableName string, pks *schema.ColCollection) string {
+func AlterTableAddPrimaryKeys(tableName string, pkColNames []string) string {
 	var b strings.Builder
 	b.WriteString("ALTER TABLE ")
 	b.WriteString(QuoteIdentifier(tableName))
 	b.WriteString(" ADD PRIMARY KEY (")
 
-	for i := 0; i < pks.Size(); i++ {
+	for i := 0; i < len(pkColNames); i++ {
 		if i == 0 {
-			b.WriteString(pks.GetAtIndex(i).Name)
+			b.WriteString(pkColNames[i])
 		} else {
-			b.WriteString("," + pks.GetAtIndex(i).Name)
+			b.WriteString("," + pkColNames[i])
 		}
 	}
 	b.WriteRune(')')
@@ -268,6 +389,24 @@ func AlterTableDropIndexStmt(tableName string, idx schema.Index) string {
 	return b.String()
 }
 
+func AlterTableCollateStmt(tableName string, fromCollation, toCollation schema.Collation) string {
+	var b strings.Builder
+	b.WriteString("ALTER TABLE ")
+	b.WriteString(QuoteIdentifier(tableName))
+	toCollationId := sql.CollationID(toCollation)
+	b.WriteString(" COLLATE=" + QuoteComment(toCollationId.Name()) + ";")
+	return b.String()
+}
+
+func AlterDatabaseCollateStmt(dbName string, fromCollation, toCollation schema.Collation) string {
+	var b strings.Builder
+	b.WriteString("ALTER DATABASE ")
+	b.WriteString(QuoteIdentifier(dbName))
+	toCollationId := sql.CollationID(toCollation)
+	b.WriteString(" COLLATE=" + QuoteComment(toCollationId.Name()) + ";")
+	return b.String()
+}
+
 func AlterTableAddForeignKeyStmt(fk doltdb.ForeignKey, sch, parentSch schema.Schema) string {
 	var b strings.Builder
 	b.WriteString("ALTER TABLE ")
@@ -292,12 +431,79 @@ func AlterTableAddForeignKeyStmt(fk doltdb.ForeignKey, sch, parentSch schema.Sch
 	return b.String()
 }
 
-func AlterTableDropForeignKeyStmt(fk doltdb.ForeignKey) string {
+func AlterTableDropForeignKeyStmt(tableName, fkName string) string {
 	var b strings.Builder
 	b.WriteString("ALTER TABLE ")
-	b.WriteString(QuoteIdentifier(fk.TableName))
+	b.WriteString(QuoteIdentifier(tableName))
 	b.WriteString(" DROP FOREIGN KEY ")
-	b.WriteString(QuoteIdentifier(fk.Name))
+	b.WriteString(QuoteIdentifier(fkName))
 	b.WriteRune(';')
 	return b.String()
+}
+
+// GenerateCreateTableStatement returns a CREATE TABLE statement for given table. This is a reasonable approximation of
+// `SHOW CREATE TABLE` in the engine, but may have some differences. Callers are advised to use the engine when
+// possible.
+// TODO: schema names
+func GenerateCreateTableStatement(
+	tblName string,
+	sch schema.Schema,
+	fks []doltdb.ForeignKey,
+	fksParentSch map[string]schema.Schema,
+) (string, error) {
+	colStmts := make([]string, sch.GetAllCols().Size())
+
+	// Statement creation parts for each column
+	for i, col := range sch.GetAllCols().GetColumns() {
+		colStmts[i] = GenerateCreateTableIndentedColumnDefinition(col, sql.CollationID(sch.GetCollation()))
+	}
+
+	primaryKeyCols := sch.GetPKCols().GetColumnNames()
+	if len(primaryKeyCols) > 0 {
+		primaryKey := sql.GenerateCreateTablePrimaryKeyDefinition(primaryKeyCols)
+		colStmts = append(colStmts, primaryKey)
+	}
+
+	indexes := sch.Indexes().AllIndexes()
+	for _, index := range indexes {
+		// The primary key may or may not be declared as an index by the table. Don't print it twice if it's here.
+		if isPrimaryKeyIndex(index, sch) {
+			continue
+		}
+		colStmts = append(colStmts, GenerateCreateTableIndexDefinition(index))
+	}
+
+	for _, fk := range fks {
+		colStmts = append(colStmts, GenerateCreateTableForeignKeyDefinition(fk, sch, fksParentSch[fk.ReferencedTableName]))
+	}
+
+	for _, check := range sch.Checks().AllChecks() {
+		colStmts = append(colStmts, GenerateCreateTableCheckConstraintClause(check))
+	}
+
+	coll := sql.CollationID(sch.GetCollation())
+	createTableStmt := sql.GenerateCreateTableStatement(tblName, colStmts, "", coll.CharacterSet().Name(), coll.Name(), sch.GetComment())
+	return fmt.Sprintf("%s;", createTableStmt), nil
+}
+
+// isPrimaryKeyIndex returns whether the index given matches the table's primary key columns. Order is not considered.
+func isPrimaryKeyIndex(index schema.Index, sch schema.Schema) bool {
+	var pks = sch.GetPKCols().GetColumns()
+	var pkMap = make(map[string]struct{})
+	for _, c := range pks {
+		pkMap[c.Name] = struct{}{}
+	}
+
+	indexCols := index.ColumnNames()
+	if len(indexCols) != len(pks) {
+		return false
+	}
+
+	for _, c := range index.ColumnNames() {
+		if _, ok := pkMap[c]; !ok {
+			return false
+		}
+	}
+
+	return true
 }

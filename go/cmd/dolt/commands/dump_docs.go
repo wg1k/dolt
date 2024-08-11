@@ -19,8 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-
-	"github.com/dolthub/dolt/go/store/types"
+	"sort"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
@@ -34,11 +33,13 @@ const (
 		"---\n" +
 		"title: CLI\n" +
 		"---\n\n" +
-		"# CLI\n\n"
+		"# Command Line Interface Reference\n\n"
 )
 
 type DumpDocsCmd struct {
-	DoltCommand cli.SubCommandHandler
+	DoltCommand      cli.SubCommandHandler
+	GlobalDocs       *cli.CommandDocumentation
+	GlobalSpecialMsg string
 }
 
 // Name returns the name of the Dolt cli command. This is what is used on the command line to invoke the command
@@ -49,10 +50,6 @@ func (cmd *DumpDocsCmd) Name() string {
 // Description returns a description of the command
 func (cmd *DumpDocsCmd) Description() string {
 	return "dumps all documentation in md format to a directory"
-}
-
-func (cmd *DumpDocsCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
 }
 
 // Hidden should return true if this command should be hidden from the help text
@@ -66,22 +63,21 @@ func (cmd *DumpDocsCmd) RequiresRepo() bool {
 	return false
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd *DumpDocsCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd *DumpDocsCmd) Docs() *cli.CommandDocumentation {
 	return nil
 }
 
 func (cmd *DumpDocsCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	ap.SupportsString(fileParamName, "", "file", "The file to write CLI docs to")
 	return ap
 }
 
 // Exec executes the command
-func (cmd *DumpDocsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd *DumpDocsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, cli.CommandDocumentationContent{}, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cli.CommandDocumentationContent{}, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	fileStr := apr.GetValueOrDefault(fileParamName, "cli.md")
@@ -105,19 +101,35 @@ func (cmd *DumpDocsCmd) Exec(ctx context.Context, commandStr string, args []stri
 		return 1
 	}
 
-	err = cmd.dumpDocs(wr, cmd.DoltCommand.Name(), cmd.DoltCommand.Subcommands)
-
+	doltUsage := cmd.DoltCommand.GetUsage("dolt")
+	doltUsageMarkdown := fmt.Sprintf("```\n$ dolt\n%s```\n\n", doltUsage)
+	_, err = wr.Write([]byte(doltUsageMarkdown))
 	if err != nil {
-		verr := errhand.BuildDError("error: Failed to dump docs.").AddCause(err).Build()
-		cli.PrintErrln(verr.Verbose())
+		cli.PrintErrln(err.Error())
+		return 1
+	}
 
+	err = cmd.writeGlobalArgumentsSection(wr)
+	if err != nil {
+		cli.PrintErrln(err.Error())
+		return 1
+	}
+
+	verr := cmd.dumpDocs(wr, cmd.DoltCommand.Name(), cmd.DoltCommand.Subcommands)
+
+	if verr != nil {
+		cli.PrintErrln(verr.Verbose())
 		return 1
 	}
 
 	return 0
 }
 
-func (cmd *DumpDocsCmd) dumpDocs(wr io.Writer, cmdStr string, subCommands []cli.Command) error {
+func (cmd *DumpDocsCmd) dumpDocs(wr io.Writer, cmdStr string, subCommands []cli.Command) errhand.VerboseError {
+	sort.Slice(subCommands, func(i, j int) bool {
+		return subCommands[i].Name() < subCommands[j].Name()
+	})
+
 	for _, curr := range subCommands {
 		var hidden bool
 		if hidCmd, ok := curr.(cli.HiddenCommand); ok {
@@ -126,17 +138,26 @@ func (cmd *DumpDocsCmd) dumpDocs(wr io.Writer, cmdStr string, subCommands []cli.
 
 		if !hidden {
 			if subCmdHandler, ok := curr.(cli.SubCommandHandler); ok {
-				err := cmd.dumpDocs(wr, cmdStr+" "+subCmdHandler.Name(), subCmdHandler.Subcommands)
-
-				if err != nil {
-					return err
+				var verr errhand.VerboseError
+				if subCmdHandler.Unspecified != nil {
+					verr = cmd.dumpDocs(wr, cmdStr, []cli.Command{subCmdHandler.Unspecified})
+					if verr != nil {
+						return verr
+					}
+				}
+				verr = cmd.dumpDocs(wr, cmdStr+" "+subCmdHandler.Name(), subCmdHandler.Subcommands)
+				if verr != nil {
+					return verr
 				}
 			} else {
-				currCmdStr := fmt.Sprintf("%s %s", cmdStr, curr.Name())
-				err := curr.CreateMarkdown(wr, currCmdStr)
+				docs := curr.Docs()
 
-				if err != nil {
-					return err
+				if docs != nil {
+					docs.CommandStr = fmt.Sprintf("%s %s", cmdStr, curr.Name())
+					err := CreateMarkdown(wr, docs)
+					if err != nil {
+						return errhand.BuildDError(fmt.Sprintf("error: Failed to create markdown for command: %s %s.", cmdStr, curr.Name())).AddCause(err).Build()
+					}
 				}
 			}
 		}
@@ -145,11 +166,22 @@ func (cmd *DumpDocsCmd) dumpDocs(wr io.Writer, cmdStr string, subCommands []cli.
 	return nil
 }
 
-func CreateMarkdown(wr io.Writer, cmdDoc cli.CommandDocumentation) error {
+func CreateMarkdown(wr io.Writer, cmdDoc *cli.CommandDocumentation) error {
 	markdownDoc, err := cmdDoc.CmdDocToMd()
 	if err != nil {
 		return err
 	}
+	_, err = wr.Write([]byte(markdownDoc))
+	return err
+}
+
+func (cmd *DumpDocsCmd) writeGlobalArgumentsSection(wr io.Writer) error {
+	cmd.GlobalDocs.ShortDesc = cmd.GlobalSpecialMsg
+	markdownDoc, err := cmd.GlobalDocs.GlobalCmdDocToMd()
+	if err != nil {
+		return err
+	}
+
 	_, err = wr.Write([]byte(markdownDoc))
 	return err
 }

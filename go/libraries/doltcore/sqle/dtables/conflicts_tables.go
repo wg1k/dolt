@@ -16,6 +16,7 @@ package dtables
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
 
@@ -27,29 +28,33 @@ import (
 )
 
 // NewConflictsTable returns a new ConflictsTable instance
-func NewConflictsTable(ctx *sql.Context, tblName string, root *doltdb.RootValue, rs RootSetter) (sql.Table, error) {
-	tbl, tblName, ok, err := root.GetTableInsensitive(ctx, tblName)
+func NewConflictsTable(ctx *sql.Context, tblName string, srcTbl sql.Table, root doltdb.RootValue, rs RootSetter) (sql.Table, error) {
+	tbl, tblName, ok, err := doltdb.GetTableInsensitive(ctx, root, doltdb.TableName{Name: tblName})
 	if err != nil {
 		return nil, err
 	} else if !ok {
 		return nil, sql.ErrTableNotFound.New(tblName)
 	}
 
-	if tbl.Format() == types.Format_DOLT_1 {
-		return newProllyConflictsTable(ctx, tbl, tblName, root, rs)
+	if types.IsFormat_DOLT(tbl.Format()) {
+		upd, ok := srcTbl.(sql.UpdatableTable)
+		if !ok {
+			return nil, fmt.Errorf("%s can not have conflicts because it is not updateable", tblName)
+		}
+		return newProllyConflictsTable(ctx, tbl, upd, tblName, root, rs)
 	}
 
 	return newNomsConflictsTable(ctx, tbl, tblName, root, rs)
 }
 
-func newNomsConflictsTable(ctx *sql.Context, tbl *doltdb.Table, tblName string, root *doltdb.RootValue, rs RootSetter) (sql.Table, error) {
-	rd, err := merge.NewConflictReader(ctx, tbl)
+func newNomsConflictsTable(ctx *sql.Context, tbl *doltdb.Table, tblName string, root doltdb.RootValue, rs RootSetter) (sql.Table, error) {
+	rd, err := merge.NewConflictReader(ctx, tbl, tblName)
 	if err != nil {
 		return nil, err
 	}
 	confSch := rd.GetSchema()
 
-	sqlSch, err := sqlutil.FromDoltSchema(doltdb.DoltConfTablePrefix+tblName, confSch)
+	sqlSch, err := sqlutil.FromDoltSchema("", doltdb.DoltConfTablePrefix+tblName, confSch)
 	if err != nil {
 		return nil, err
 	}
@@ -65,19 +70,20 @@ func newNomsConflictsTable(ctx *sql.Context, tbl *doltdb.Table, tblName string, 
 }
 
 var _ sql.Table = ConflictsTable{}
+var _ sql.DeletableTable = ConflictsTable{}
 
 // ConflictsTable is a sql.Table implementation that provides access to the conflicts that exist for a user table
 type ConflictsTable struct {
 	tblName string
 	sqlSch  sql.PrimaryKeySchema
-	root    *doltdb.RootValue
+	root    doltdb.RootValue
 	tbl     *doltdb.Table
 	rd      *merge.ConflictReader
 	rs      RootSetter
 }
 
 type RootSetter interface {
-	SetRoot(ctx *sql.Context, root *doltdb.RootValue) error
+	SetRoot(ctx *sql.Context, root doltdb.RootValue) error
 }
 
 // Name returns the name of the table
@@ -95,6 +101,11 @@ func (ct ConflictsTable) Schema() sql.Schema {
 	return ct.sqlSch.Schema
 }
 
+// Collation implements the sql.Table interface.
+func (ct ConflictsTable) Collation() sql.CollationID {
+	return sql.Collation_Default
+}
+
 // Partitions returns a PartitionIter which can be used to get all the data partitions
 func (ct ConflictsTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
 	return index.SinglePartitionIterFromNomsMap(nil), nil
@@ -102,7 +113,12 @@ func (ct ConflictsTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error)
 
 // PartitionRows returns a RowIter for the given partition
 func (ct ConflictsTable) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter, error) {
-	return conflictRowIter{ct.rd}, nil
+	// conflict reader must be reset each time partitionRows is called.
+	rd, err := merge.NewConflictReader(ctx, ct.tbl, ct.tblName)
+	if err != nil {
+		return nil, err
+	}
+	return conflictRowIter{rd}, nil
 }
 
 // Deleter returns a RowDeleter for this table. The RowDeleter will get one call to Delete for each row to be deleted,
@@ -118,7 +134,7 @@ type conflictRowIter struct {
 // Next retrieves the next row. It will return io.EOF if it's the last row.
 // After retrieving the last row, Close will be automatically closed.
 func (itr conflictRowIter) Next(ctx *sql.Context) (sql.Row, error) {
-	cnf, _, err := itr.rd.NextConflict(ctx)
+	cnf, err := itr.rd.NextConflict(ctx)
 
 	if err != nil {
 		return nil, err
@@ -187,7 +203,7 @@ func (cd *conflictDeleter) Close(ctx *sql.Context) error {
 		return err
 	}
 
-	updatedRoot, err := cd.ct.root.PutTable(ctx, cd.ct.tblName, updatedTbl)
+	updatedRoot, err := cd.ct.root.PutTable(ctx, doltdb.TableName{Name: cd.ct.tblName}, updatedTbl)
 
 	if err != nil {
 		return err

@@ -25,6 +25,7 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 	"github.com/dolthub/dolt/go/store/types"
@@ -43,9 +44,84 @@ const (
 	ProceduresTableModifiedAtCol = "modified_at"
 )
 
+type ProceduresTable struct {
+	backingTable *WritableDoltTable
+}
+
+func (pt *ProceduresTable) Name() string {
+	return ProceduresTableName
+}
+
+func (pt *ProceduresTable) String() string {
+	return ProceduresTableName
+}
+
+func (pt *ProceduresTable) Schema() sql.Schema {
+	return ProceduresTableSqlSchema().Schema
+}
+
+func (pt *ProceduresTable) Collation() sql.CollationID {
+	return sql.Collation_Default
+}
+
+func (pt *ProceduresTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
+	if pt.backingTable == nil {
+		// no backing table; return an empty iter.
+		return index.SinglePartitionIterFromNomsMap(nil), nil
+	}
+	return pt.backingTable.Partitions(ctx)
+}
+
+func (pt *ProceduresTable) PartitionRows(ctx *sql.Context, partition sql.Partition) (sql.RowIter, error) {
+	if pt.backingTable == nil {
+		// no backing table; return an empty iter.
+		return sql.RowsToRowIter(), nil
+	}
+
+	return pt.backingTable.PartitionRows(ctx, partition)
+}
+
+func (pt *ProceduresTable) LockedToRoot(ctx *sql.Context, root doltdb.RootValue) (sql.IndexAddressableTable, error) {
+	if pt.backingTable == nil {
+		return pt, nil
+
+	}
+	return pt.backingTable.LockedToRoot(ctx, root)
+}
+
+func (pt *ProceduresTable) IndexedAccess(lookup sql.IndexLookup) sql.IndexedTable {
+	// Never reached. Interface required for LockedToRoot to be implemented.
+	panic("Unreachable")
+}
+
+func (pt *ProceduresTable) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
+	return nil, nil
+}
+
+func (pt *ProceduresTable) PreciseMatch() bool {
+	return true
+}
+
+func (pt *ProceduresTable) UnWrap() *WritableDoltTable {
+	return pt.backingTable
+}
+
+func NewProceduresTable(backing *WritableDoltTable) sql.Table {
+	return &ProceduresTable{backingTable: backing}
+}
+
+func NewEmptyProceduresTable() sql.Table {
+	return &ProceduresTable{}
+}
+
+var _ sql.Table = (*ProceduresTable)(nil)
+var _ dtables.VersionableTable = (*ProceduresTable)(nil)
+var _ sql.IndexAddressableTable = (*ProceduresTable)(nil)
+var _ WritableDoltTableWrapper = (*ProceduresTable)(nil)
+
 // The fixed SQL schema for the `dolt_procedures` table.
 func ProceduresTableSqlSchema() sql.PrimaryKeySchema {
-	sqlSchema, err := sqlutil.FromDoltSchema(doltdb.ProceduresTableName, ProceduresTableSchema())
+	sqlSchema, err := sqlutil.FromDoltSchema("", doltdb.ProceduresTableName, ProceduresTableSchema())
 	if err != nil {
 		panic(err) // should never happen
 	}
@@ -59,62 +135,168 @@ func ProceduresTableSchema() schema.Schema {
 		schema.NewColumn(doltdb.ProceduresTableCreateStmtCol, schema.DoltProceduresCreateStmtTag, types.StringKind, false),
 		schema.NewColumn(doltdb.ProceduresTableCreatedAtCol, schema.DoltProceduresCreatedAtTag, types.TimestampKind, false),
 		schema.NewColumn(doltdb.ProceduresTableModifiedAtCol, schema.DoltProceduresModifiedAtTag, types.TimestampKind, false),
+		schema.NewColumn(doltdb.ProceduresTableSqlModeCol, schema.DoltProceduresSqlModeTag, types.StringKind, false),
 	)
 	return schema.MustSchemaFromCols(colColl)
 }
 
 // DoltProceduresGetOrCreateTable returns the `dolt_procedures` table from the given db, creating it in the db's
-// current root if it doesn't exist
+// current root if it doesn't exist.
 func DoltProceduresGetOrCreateTable(ctx *sql.Context, db Database) (*WritableDoltTable, error) {
+	tbl, found, err := db.GetTableInsensitive(ctx, doltdb.ProceduresTableName)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		// Should never happen.
+		panic("runtime error. dolt_procedures table not found")
+	}
+
+	wrapper, ok := tbl.(*ProceduresTable)
+	if !ok {
+		return nil, fmt.Errorf("expected a ProceduresTable, but got %T", tbl)
+	}
+
+	if wrapper.backingTable == nil {
+		// We haven't materialized the table yet. Go ahead and do so.
+		root, err := db.GetRoot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		err = db.createDoltTable(ctx, doltdb.ProceduresTableName, doltdb.DefaultSchemaName, root, ProceduresTableSchema())
+		if err != nil {
+			return nil, err
+		}
+		tbl, _, err = db.GetTableInsensitive(ctx, doltdb.ProceduresTableName)
+		if err != nil {
+			return nil, err
+		}
+		wrapper, ok = tbl.(*ProceduresTable)
+		if !ok {
+			return nil, fmt.Errorf("expected a ProceduresTable, but got %T", tbl)
+		}
+		if wrapper.backingTable == nil {
+			return nil, sql.ErrTableNotFound.New(ProceduresTableName)
+		}
+		return wrapper.backingTable, nil
+	} else {
+		return migrateDoltProceduresSchema(ctx, db, wrapper.backingTable)
+	}
+}
+
+// migrateDoltProceduresSchema migrates the dolt_procedures system table from a previous schema version to the current
+// schema version by adding any columns that do not exist.
+func migrateDoltProceduresSchema(ctx *sql.Context, db Database, oldTable *WritableDoltTable) (newTable *WritableDoltTable, rerr error) {
+	// Check whether the table needs to be migrated
+	targetSchema := ProceduresTableSqlSchema().Schema
+	if len(oldTable.Schema()) == len(targetSchema) {
+		return oldTable, nil
+	}
+
+	// Copy all the old data
+	iter, err := SqlTableToRowIter(ctx, oldTable.DoltTable, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	nameIdx := oldTable.sqlSchema().IndexOfColName(doltdb.ProceduresTableNameCol)
+	createStatementIdx := oldTable.sqlSchema().IndexOfColName(doltdb.ProceduresTableCreateStmtCol)
+	createdAtIdx := oldTable.sqlSchema().IndexOfColName(doltdb.ProceduresTableCreatedAtCol)
+	modifiedAtIdx := oldTable.sqlSchema().IndexOfColName(doltdb.ProceduresTableModifiedAtCol)
+	sqlModeIdx := oldTable.sqlSchema().IndexOfColName(doltdb.ProceduresTableSqlModeCol)
+
+	defer func(iter sql.RowIter, ctx *sql.Context) {
+		err := iter.Close(ctx)
+		if err != nil && rerr == nil {
+			rerr = err
+		}
+	}(iter, ctx)
+
+	var newRows []sql.Row
+	for {
+		sqlRow, err := iter.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		newRow := make(sql.Row, ProceduresTableSchema().GetAllCols().Size())
+		newRow[0] = sqlRow[nameIdx]
+		newRow[1] = sqlRow[createStatementIdx]
+		newRow[2] = sqlRow[createdAtIdx]
+		newRow[3] = sqlRow[modifiedAtIdx]
+		if sqlModeIdx >= 0 {
+			newRow[4] = sqlRow[sqlModeIdx]
+		}
+		newRows = append(newRows, newRow)
+	}
+
+	err = db.dropTable(ctx, doltdb.ProceduresTableName)
+	if err != nil {
+		return nil, err
+	}
+
 	root, err := db.GetRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tbl, found, err := db.GetTableInsensitiveWithRoot(ctx, root, doltdb.ProceduresTableName)
+
+	err = db.createDoltTable(ctx, doltdb.ProceduresTableName, doltdb.DefaultSchemaName, root, ProceduresTableSchema())
 	if err != nil {
 		return nil, err
-	}
-	if found {
-		return tbl.(*WritableDoltTable), nil
 	}
 
-	err = db.createDoltTable(ctx, doltdb.ProceduresTableName, root, ProceduresTableSchema())
+	tbl, _, err := db.GetTableInsensitive(ctx, doltdb.ProceduresTableName)
 	if err != nil {
 		return nil, err
 	}
-	root, err = db.GetRoot(ctx)
+
+	wrapper, ok := tbl.(*ProceduresTable)
+	if !ok {
+		return nil, fmt.Errorf("expected a ProceduresTable, but got %T", tbl)
+	}
+	if wrapper.backingTable == nil {
+		return nil, sql.ErrTableNotFound.New(doltdb.ProceduresTableName)
+	}
+
+	inserter := wrapper.backingTable.Inserter(ctx)
+	for _, row := range newRows {
+		err = inserter.Insert(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = inserter.Close(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tbl, found, err = db.GetTableInsensitiveWithRoot(ctx, root, doltdb.ProceduresTableName)
-	if err != nil {
-		return nil, err
-	}
-	// Verify it was created successfully
-	if !found {
-		return nil, sql.ErrTableNotFound.New(ProceduresTableName)
-	}
-	return tbl.(*WritableDoltTable), nil
+
+	return wrapper.backingTable, nil
 }
 
 // DoltProceduresGetTable returns the `dolt_procedures` table from the given db, or nil if the table doesn't exist
 func DoltProceduresGetTable(ctx *sql.Context, db Database) (*WritableDoltTable, error) {
-	root, err := db.GetRoot(ctx)
+	tbl, _, err := db.GetTableInsensitive(ctx, doltdb.ProceduresTableName)
 	if err != nil {
 		return nil, err
 	}
-	tbl, found, err := db.GetTableInsensitiveWithRoot(ctx, root, doltdb.ProceduresTableName)
-	if err != nil {
-		return nil, err
+
+	wrapper, ok := tbl.(*ProceduresTable)
+	if !ok {
+		return nil, fmt.Errorf("expected a ProceduresTable, but got %T", tbl)
 	}
-	if found {
-		return tbl.(*WritableDoltTable), nil
-	} else {
-		return nil, nil
+	if wrapper.backingTable != nil {
+		return migrateDoltProceduresSchema(ctx, db, wrapper.backingTable)
 	}
+	return nil, nil
 }
 
-func DoltProceduresGetAll(ctx *sql.Context, db Database) ([]sql.StoredProcedureDetails, error) {
+// DoltProceduresGetAll returns all stored procedures for the database if the procedureName is blank (and empty string),
+// or it returns only the procedure with the matching name if one is given. The name is not case-sensitive.
+func DoltProceduresGetAll(ctx *sql.Context, db Database, procedureName string) ([]sql.StoredProcedureDetails, error) {
 	tbl, err := DoltProceduresGetTable(ctx, db)
 	if err != nil {
 		return nil, err
@@ -136,17 +318,17 @@ func DoltProceduresGetAll(ctx *sql.Context, db Database) ([]sql.StoredProcedureD
 	}
 	nameExpr := idx.Expressions()[0]
 
-	lookup, err := sql.NewIndexBuilder(ctx, idx).IsNotNull(ctx, nameExpr).Build(ctx)
+	var lookup sql.IndexLookup
+	if procedureName == "" {
+		lookup, err = sql.NewIndexBuilder(idx).IsNotNull(ctx, nameExpr).Build(ctx)
+	} else {
+		lookup, err = sql.NewIndexBuilder(idx).Equals(ctx, nameExpr, procedureName).Build(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	dt, err := tbl.doltTable(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	iter, err := index.RowIterForIndexLookup(ctx, dt, lookup, tbl.sqlSch, nil)
+	iter, err := index.RowIterForIndexLookup(ctx, tbl.DoltTable, lookup, tbl.sqlSch, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +366,15 @@ func DoltProceduresGetAll(ctx *sql.Context, db Database) ([]sql.StoredProcedureD
 		if d.ModifiedAt, ok = sqlRow[3].(time.Time); !ok {
 			return nil, missingValue.New(doltdb.ProceduresTableModifiedAtCol, sqlRow)
 		}
+		if s, ok := sqlRow[4].(string); ok {
+			d.SqlMode = s
+		} else {
+			defaultSqlMode, err := loadDefaultSqlMode()
+			if err != nil {
+				return nil, err
+			}
+			d.SqlMode = defaultSqlMode
+		}
 		details = append(details, d)
 	}
 	return details, nil
@@ -215,13 +406,14 @@ func DoltProceduresAddProcedure(ctx *sql.Context, db Database, spd sql.StoredPro
 		spd.CreateStatement,
 		spd.CreatedAt.UTC(),
 		spd.ModifiedAt.UTC(),
+		spd.SqlMode,
 	})
 }
 
 // DoltProceduresDropProcedure removes the stored procedure from the `dolt_procedures` table. The procedure named must
 // exist.
 func DoltProceduresDropProcedure(ctx *sql.Context, db Database, name string) (retErr error) {
-	strings.ToLower(name)
+	name = strings.ToLower(name)
 	tbl, err := DoltProceduresGetTable(ctx, db)
 	if err != nil {
 		return err
@@ -261,21 +453,15 @@ func DoltProceduresGetDetails(ctx *sql.Context, tbl *WritableDoltTable, name str
 		}
 	}
 	if fragNameIndex == nil {
-		return sql.StoredProcedureDetails{}, false, fmt.Errorf("could not find primary key index on system table `%s`",
-			doltdb.SchemasTableName)
+		return sql.StoredProcedureDetails{}, false, fmt.Errorf("could not find primary key index on system table `%s`", doltdb.ProceduresTableName)
 	}
 
-	indexLookup, err := sql.NewIndexBuilder(ctx, fragNameIndex).Equals(ctx, fragNameIndex.Expressions()[0], name).Build(ctx)
+	indexLookup, err := sql.NewIndexBuilder(fragNameIndex).Equals(ctx, fragNameIndex.Expressions()[0], name).Build(ctx)
 	if err != nil {
 		return sql.StoredProcedureDetails{}, false, err
 	}
 
-	dt, err := tbl.doltTable(ctx)
-	if err != nil {
-		return sql.StoredProcedureDetails{}, false, err
-	}
-
-	rowIter, err := index.RowIterForIndexLookup(ctx, dt, indexLookup, tbl.sqlSch, nil)
+	rowIter, err := index.RowIterForIndexLookup(ctx, tbl.DoltTable, indexLookup, tbl.sqlSch, nil)
 	if err != nil {
 		return sql.StoredProcedureDetails{}, false, err
 	}
@@ -287,7 +473,7 @@ func DoltProceduresGetDetails(ctx *sql.Context, tbl *WritableDoltTable, name str
 
 	sqlRow, err := rowIter.Next(ctx)
 	if err == nil {
-		if len(sqlRow) != 4 {
+		if len(sqlRow) != 5 {
 			return sql.StoredProcedureDetails{}, false, fmt.Errorf("unexpected row in dolt_procedures:\n%v", sqlRow)
 		}
 		return sql.StoredProcedureDetails{

@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,30 +17,35 @@
 package serial
 
 import (
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type Commit struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsCommit(buf []byte, offset flatbuffers.UOffsetT) *Commit {
+func InitCommitRoot(o *Commit, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &Commit{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsCommit(buf []byte, offset flatbuffers.UOffsetT) *Commit {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsCommit(buf []byte, offset flatbuffers.UOffsetT) (*Commit, error) {
 	x := &Commit{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitCommitRoot(x, buf, offset)
 }
 
-func (rcv *Commit) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsCommit(buf []byte, offset flatbuffers.UOffsetT) (*Commit, error) {
+	x := &Commit{}
+	return x, InitCommitRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *Commit) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if CommitNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *Commit) Table() flatbuffers.Table {
@@ -209,8 +214,10 @@ func (rcv *Commit) MutateUserTimestampMillis(n int64) bool {
 	return rcv._tab.MutateInt64Slot(20, n)
 }
 
+const CommitNumFields = 9
+
 func CommitStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(CommitNumFields)
 }
 func CommitAddRoot(builder *flatbuffers.Builder, root flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(root), 0)
