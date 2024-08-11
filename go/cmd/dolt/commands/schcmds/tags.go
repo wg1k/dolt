@@ -18,11 +18,13 @@ import (
 	"context"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands/engine"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
@@ -57,13 +59,13 @@ func (cmd TagsCmd) Docs() *cli.CommandDocumentation {
 }
 
 func (cmd TagsCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithVariableArgs(cmd.Name())
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"table", "table(s) whose tags will be displayed."})
 	ap.SupportsString(commands.FormatFlag, "r", "result output format", "How to format result output. Valid values are tabular, csv, json. Defaults to tabular.")
 	return ap
 }
 
-func (cmd TagsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd TagsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, tblTagsDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
@@ -77,7 +79,7 @@ func (cmd TagsCmd) Exec(ctx context.Context, commandStr string, args []string, d
 
 	if len(tables) == 0 {
 		var err error
-		tables, err = root.GetTableNames(ctx)
+		tables, err = root.GetTableNames(ctx, doltdb.DefaultSchemaName)
 
 		if err != nil {
 			return commands.HandleVErrAndExitCode(errhand.BuildDError("unable to get table names.").AddCause(err).Build(), usage)
@@ -91,15 +93,15 @@ func (cmd TagsCmd) Exec(ctx context.Context, commandStr string, args []string, d
 	}
 
 	var headerSchema = sql.Schema{
-		{Name: "table", Type: sql.Text, Default: nil},
-		{Name: "column", Type: sql.Text, Default: nil},
-		{Name: "tag", Type: sql.Uint64, Default: nil},
+		{Name: "table", Type: types.Text, Default: nil},
+		{Name: "column", Type: types.Text, Default: nil},
+		{Name: "tag", Type: types.Uint64, Default: nil},
 	}
 
 	rows := make([]sql.Row, 0)
 
 	for _, tableName := range tables {
-		table, foundTableKey, ok, err := root.GetTableInsensitive(ctx, tableName)
+		table, foundTableKey, ok, err := doltdb.GetTableInsensitive(ctx, root, doltdb.TableName{Name: tableName})
 
 		// Return an error if table is not found
 		if !ok {
@@ -138,7 +140,7 @@ func (cmd TagsCmd) Exec(ctx context.Context, commandStr string, args []string, d
 	}
 
 	sqlCtx := sql.NewContext(ctx)
-	err = engine.PrettyPrintResults(sqlCtx, outputFmt, headerSchema, sql.RowsToRowIter(rows...), false)
+	err = engine.PrettyPrintResults(sqlCtx, outputFmt, headerSchema, sql.RowsToRowIter(rows...))
 
 	return commands.HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
 }

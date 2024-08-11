@@ -53,7 +53,7 @@ var levelSalt = [...]uint64{
 	saltFromLevel(15),
 }
 
-//  splitterFactory makes a nodeSplitter.
+// splitterFactory makes a nodeSplitter.
 type splitterFactory func(level uint8) nodeSplitter
 
 var defaultSplitterFactory splitterFactory = newKeySplitter
@@ -164,11 +164,7 @@ func rollingHashPattern(offset uint32) uint32 {
 }
 
 // keySplitter is a nodeSplitter that makes chunk boundary decisions on the hash of
-// the key of a Item pair. In contrast to the rollingHashSplitter, keySplitter
-// tries to create chunks that have an average number of Item pairs, rather than
-// an average number of bytes. However, because the target number of Item pairs
-// is computed directly from the chunk size and count, the practical difference in
-// the distribution of chunk sizes is minimal.
+// the key of an Item pair.
 //
 // keySplitter uses a dynamic threshold modeled on a weibull distribution
 // (https://en.wikipedia.org/wiki/Weibull_distribution). As the size of the current
@@ -190,7 +186,6 @@ func newKeySplitter(level uint8) nodeSplitter {
 var _ splitterFactory = newKeySplitter
 
 func (ks *keySplitter) Append(key, value Item) error {
-	// todo(andy): account for key/value offsets, vtable, etc.
 	thisSize := uint32(len(key) + len(value))
 	ks.size += thisSize
 

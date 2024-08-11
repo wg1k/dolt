@@ -1134,6 +1134,8 @@ func TestListDiffLargeWithSameMiddle(t *testing.T) {
 
 	cs1 := storage.NewView()
 	vs1 := NewValueStore(cs1)
+	vs1.skipWriteCaching = true
+
 	nums1 := generateNumbersAsValues(vs1.Format(), 4000)
 	l1, err := NewList(context.Background(), vs1, nums1...)
 	require.NoError(t, err)
@@ -1151,6 +1153,8 @@ func TestListDiffLargeWithSameMiddle(t *testing.T) {
 
 	cs2 := storage.NewView()
 	vs2 := NewValueStore(cs2)
+	vs2.skipWriteCaching = true
+
 	nums2 := generateNumbersAsValuesFromToBy(vs2.Format(), 5, 3550, 1)
 	l2, err := NewList(context.Background(), vs2, nums2...)
 	require.NoError(t, err)
@@ -1177,9 +1181,9 @@ func TestListDiffLargeWithSameMiddle(t *testing.T) {
 	assert.Equal(diff1, diff2)
 
 	// should only read/write a "small & reasonably sized portion of the total"
-	assert.Equal(9, cs1.Writes())
+	assert.Equal(7, cs1.Writes())
 	assert.Equal(3, cs1.Reads())
-	assert.Equal(9, cs2.Writes())
+	assert.Equal(6, cs2.Writes())
 	assert.Equal(3, cs2.Reads())
 }
 

@@ -49,7 +49,7 @@ func NewInMemTableWithDataAndValidationType(sch schema.Schema, rows []row.Row) *
 }
 
 // AppendRow appends a row.  Appended rows must be valid for the table's schema. Sorts rows as they are inserted.
-func (imt *InMemTable) AppendRow(r row.Row) error {
+func (imt *InMemTable) AppendRow(ctx context.Context, vr types.ValueReader, r row.Row) error {
 	if isv, err := row.IsValid(r, imt.sch); err != nil {
 		return err
 	} else if !isv {
@@ -87,7 +87,7 @@ func (imt *InMemTable) AppendRow(r row.Row) error {
 		jRow := imt.rows[j]
 
 		isLess := false
-		isLess, err = iRow.NomsMapKey(imt.sch).Less(r.Format(), jRow.NomsMapKey(imt.sch))
+		isLess, err = iRow.NomsMapKey(imt.sch).Less(ctx, vr.Format(), jRow.NomsMapKey(imt.sch))
 
 		return isLess
 	})
@@ -161,29 +161,4 @@ func (rd *InMemTableReader) GetSchema() schema.Schema {
 // VerifySchema checks that the incoming schema matches the schema from the existing table
 func (rd *InMemTableReader) VerifySchema(outSch schema.Schema) (bool, error) {
 	return schema.VerifyInSchema(rd.tt.sch, outSch)
-}
-
-// InMemTableWriter is an implementation of a TableWriter for an InMemTable
-type InMemTableWriter struct {
-	tt *InMemTable
-}
-
-// NewInMemTableWriter creates an instance of a TableWriter from an InMemTable
-func NewInMemTableWriter(imt *InMemTable) *InMemTableWriter {
-	return &InMemTableWriter{imt}
-}
-
-// WriteRow will write a row to a table
-func (w *InMemTableWriter) WriteRow(ctx context.Context, r row.Row) error {
-	return w.tt.AppendRow(r)
-}
-
-// Close should flush all writes, release resources being held
-func (w *InMemTableWriter) Close(ctx context.Context) error {
-	return nil
-}
-
-// GetSchema gets the schema of the rows that this writer writes
-func (w *InMemTableWriter) GetSchema() schema.Schema {
-	return w.tt.sch
 }

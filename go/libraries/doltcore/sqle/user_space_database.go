@@ -17,22 +17,23 @@ package sqle
 import (
 	"github.com/dolthub/go-mysql-server/sql"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
-
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
+	"github.com/dolthub/dolt/go/libraries/utils/concurrentmap"
 )
 
 // UserSpaceDatabase in an implementation of sql.Database for root values. Does not expose any of the internal dolt tables.
 type UserSpaceDatabase struct {
-	*doltdb.RootValue
+	doltdb.RootValue
 
 	editOpts editor.Options
 }
 
-var _ SqlDatabase = (*UserSpaceDatabase)(nil)
+var _ dsess.SqlDatabase = (*UserSpaceDatabase)(nil)
 
-func NewUserSpaceDatabase(root *doltdb.RootValue, editOpts editor.Options) *UserSpaceDatabase {
+func NewUserSpaceDatabase(root doltdb.RootValue, editOpts editor.Options) *UserSpaceDatabase {
 	return &UserSpaceDatabase{RootValue: root, editOpts: editOpts}
 }
 
@@ -40,11 +41,15 @@ func (db *UserSpaceDatabase) Name() string {
 	return "dolt"
 }
 
+func (db *UserSpaceDatabase) Schema() string {
+	return ""
+}
+
 func (db *UserSpaceDatabase) GetTableInsensitive(ctx *sql.Context, tableName string) (sql.Table, bool, error) {
 	if doltdb.IsReadOnlySystemTable(tableName) {
 		return nil, false, nil
 	}
-	table, tableName, ok, err := db.RootValue.GetTableInsensitive(ctx, tableName)
+	table, tableName, ok, err := doltdb.GetTableInsensitive(ctx, db.RootValue, doltdb.TableName{Name: tableName})
 	if err != nil {
 		return nil, false, err
 	}
@@ -63,7 +68,7 @@ func (db *UserSpaceDatabase) GetTableInsensitive(ctx *sql.Context, tableName str
 }
 
 func (db *UserSpaceDatabase) GetTableNames(ctx *sql.Context) ([]string, error) {
-	tableNames, err := db.RootValue.GetTableNames(ctx)
+	tableNames, err := db.RootValue.GetTableNames(ctx, doltdb.DefaultSchemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -76,26 +81,59 @@ func (db *UserSpaceDatabase) GetTableNames(ctx *sql.Context) ([]string, error) {
 	return resultingTblNames, nil
 }
 
-func (db *UserSpaceDatabase) GetRoot(*sql.Context) (*doltdb.RootValue, error) {
+func (db *UserSpaceDatabase) InitialDBState(ctx *sql.Context) (dsess.InitialDbState, error) {
+	return dsess.InitialDbState{
+		Db:       db,
+		ReadOnly: true,
+		HeadRoot: db.RootValue,
+		DbData: env.DbData{
+			Rsw: noopRepoStateWriter{},
+		},
+		Remotes: concurrentmap.New[string, env.Remote](),
+	}, nil
+}
+
+func (db *UserSpaceDatabase) WithBranchRevision(requestedName string, branchSpec dsess.SessionDatabaseBranchSpec) (dsess.SqlDatabase, error) {
+	// Nothing to do here, we don't support changing branch revisions
+	return db, nil
+}
+
+func (db *UserSpaceDatabase) DoltDatabases() []*doltdb.DoltDB {
+	return nil
+}
+
+func (db *UserSpaceDatabase) GetRoot(*sql.Context) (doltdb.RootValue, error) {
 	return db.RootValue, nil
 }
 
-func (db *UserSpaceDatabase) GetTemporaryTablesRoot(*sql.Context) (*doltdb.RootValue, bool) {
+func (db *UserSpaceDatabase) GetTemporaryTablesRoot(*sql.Context) (doltdb.RootValue, bool) {
 	panic("UserSpaceDatabase should not contain any temporary tables")
 }
 
 func (db *UserSpaceDatabase) DbData() env.DbData {
-	panic("UserSpaceDatabase does not have dbdata")
-}
-
-func (db *UserSpaceDatabase) StartTransaction(ctx *sql.Context, tCharacteristic sql.TransactionCharacteristic) (sql.Transaction, error) {
-	panic("UserSpaceDatabase does not support transactions")
-}
-
-func (db *UserSpaceDatabase) Flush(ctx *sql.Context) error {
-	panic("UserSpaceDatabase cannot flush")
+	return env.DbData{}
 }
 
 func (db *UserSpaceDatabase) EditOptions() editor.Options {
-	panic("UserSpaceDatabase does not have edit options")
+	return db.editOpts
+}
+
+func (db *UserSpaceDatabase) Revision() string {
+	return ""
+}
+
+func (db *UserSpaceDatabase) Versioned() bool {
+	return false
+}
+
+func (db *UserSpaceDatabase) RevisionType() dsess.RevisionType {
+	return dsess.RevisionTypeNone
+}
+
+func (db *UserSpaceDatabase) RevisionQualifiedName() string {
+	return db.Name()
+}
+
+func (db *UserSpaceDatabase) RequestedName() string {
+	return db.Name()
 }

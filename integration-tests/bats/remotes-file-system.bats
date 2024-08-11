@@ -6,7 +6,6 @@ setup() {
     cd $BATS_TMPDIR
     cd dolt-repo-$$
     mkdir "dolt-repo-clones"
-    skip_nbf_dolt_1
 }
 
 teardown() {
@@ -24,9 +23,10 @@ teardown() {
 }
 
 @test "remotes-file-system: Add a file system remote with a bad path" {
+    skiponwindows "this is being interpreted as valid"
     run dolt remote add origin file:///poop/
     [ $status -ne 0 ]
-    [[ "$output" =~ "'file:///poop/' is not valid" ]] || false
+    [[ "$output" =~ "failed to create directory '/poop'" ]] || false
 }
 
 @test "remotes-file-system: push, pull, and clone file based remotes" {
@@ -48,7 +48,7 @@ SQL
     # push to a file based remote
     mkdir remotedir
     dolt remote add origin file://remotedir
-    dolt push origin main
+    dolt push --set-upstream origin main
 
     # clone from a directory
     cd dolt-repo-clones
@@ -105,7 +105,7 @@ SQL
 
     #add origin push and fetch
     dolt remote add origin file://remote1
-    dolt push main:notmain
+    dolt push origin main:notmain
 
     #fetch should now work without a specified remote because origin exists
     dolt fetch

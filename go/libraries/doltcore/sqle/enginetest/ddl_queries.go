@@ -17,6 +17,7 @@ package enginetest
 import (
 	"github.com/dolthub/go-mysql-server/enginetest/queries"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 )
@@ -85,7 +86,7 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people modify column first_name varchar(16383) not null after last_name",
+				Query:            "alter table people modify column first_name varchar(163) not null after last_name",
 				SkipResultsCheck: true,
 			},
 			{
@@ -93,7 +94,7 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
 					"  `id` int NOT NULL,\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
-					"  `first_name` varchar(16383) NOT NULL,\n" +
+					"  `first_name` varchar(163) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
 					"  `age` int,\n" +
 					"  `rating` float,\n" +
@@ -120,13 +121,13 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people modify column first_name varchar(16383) not null first",
+				Query:            "alter table people modify column first_name varchar(163) not null first",
 				SkipResultsCheck: true,
 			},
 			{
 				Query: "show create table people",
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
-					"  `first_name` varchar(16383) NOT NULL,\n" +
+					"  `first_name` varchar(163) NOT NULL,\n" +
 					"  `id` int NOT NULL,\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
@@ -155,14 +156,14 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people modify column first_name varchar(16383) null",
+				Query:            "alter table people modify column first_name varchar(163) null",
 				SkipResultsCheck: true,
 			},
 			{
 				Query: "show create table people",
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
 					"  `id` int NOT NULL,\n" +
-					"  `first_name` varchar(16383),\n" +
+					"  `first_name` varchar(163),\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
 					"  `age` int,\n" +
@@ -183,7 +184,7 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people change first_name christian_name varchar(16383) not null after last_name",
+				Query:            "alter table people change first_name christian_name varchar(163) not null after last_name",
 				SkipResultsCheck: true,
 			},
 			{
@@ -191,7 +192,7 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
 					"  `id` int NOT NULL,\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
-					"  `christian_name` varchar(16383) NOT NULL,\n" +
+					"  `christian_name` varchar(163) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
 					"  `age` int,\n" +
 					"  `rating` float,\n" +
@@ -218,13 +219,13 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people change column first_name christian_name varchar(16383) not null first",
+				Query:            "alter table people change column first_name christian_name varchar(163) not null first",
 				SkipResultsCheck: true,
 			},
 			{
 				Query: "show create table people",
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
-					"  `christian_name` varchar(16383) NOT NULL,\n" +
+					"  `christian_name` varchar(163) NOT NULL,\n" +
 					"  `id` int NOT NULL,\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
@@ -253,14 +254,14 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		SetUpScript: SimpsonsSetup,
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table people change column first_name first_name varchar(16383) null",
+				Query:            "alter table people change column first_name first_name varchar(163) null",
 				SkipResultsCheck: true,
 			},
 			{
 				Query: "show create table people",
 				Expected: []sql.Row{sql.Row{"people", "CREATE TABLE `people` (\n" +
 					"  `id` int NOT NULL,\n" +
-					"  `first_name` varchar(16383),\n" +
+					"  `first_name` varchar(163),\n" +
 					"  `last_name` varchar(100) NOT NULL,\n" +
 					"  `is_married` tinyint,\n" +
 					"  `age` int,\n" +
@@ -282,7 +283,7 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 		Assertions: []queries.ScriptTestAssertion{
 			{
 				Query:          "alter table people modify rating double default 'not a number'",
-				ExpectedErrStr: "incompatible type for default value",
+				ExpectedErrStr: "incompatible type for default value: error: 'not a number' is not a valid value for 'double'",
 			},
 		},
 	},
@@ -293,6 +294,19 @@ var ModifyAndChangeColumnScripts = []queries.ScriptTest{
 			{
 				Query:       "alter table people modify num_episodes bigint unsigned not null",
 				ExpectedErr: sql.ErrInsertIntoNonNullableProvidedNull,
+			},
+		},
+	},
+	{
+		Name: "alter, rename primary key column",
+		SetUpScript: []string{
+			"create table t (pk1 varchar(100), pk2 varchar(50), PRIMARY KEY (pk1, pk2))",
+			"alter table t change column pk2 pkTwo varchar(20)",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:    "show create table t",
+				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `pk1` varchar(100) NOT NULL,\n  `pkTwo` varchar(20) NOT NULL,\n  PRIMARY KEY (`pk1`,`pkTwo`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
 			},
 		},
 	},
@@ -426,13 +440,13 @@ var ModifyColumnTypeScripts = []queries.ScriptTest{
 		},
 		Assertions: []queries.ScriptTestAssertion{
 			{
-				Query:            "alter table test modify column pk datetime",
+				Query:            "alter table test modify column pk datetime(6)",
 				SkipResultsCheck: true,
 			},
 			{
 				Query: "show create table test",
 				Expected: []sql.Row{{"test", "CREATE TABLE `test` (\n" +
-					"  `pk` datetime NOT NULL,\n" +
+					"  `pk` datetime(6) NOT NULL,\n" +
 					"  `v1` bit(20),\n" +
 					"  PRIMARY KEY (`pk`),\n" +
 					"  KEY `v1` (`v1`)\n" +
@@ -453,7 +467,7 @@ var ModifyColumnTypeScripts = []queries.ScriptTest{
 		Assertions: []queries.ScriptTestAssertion{
 			{
 				Query:       "alter table test modify column pk datetime",
-				ExpectedErr: sql.ErrConvertingToTime,
+				ExpectedErr: types.ErrConvertingToTime,
 			},
 		},
 	},
@@ -668,6 +682,87 @@ var BrokenDDLScripts = []queries.ScriptTest{
 			{
 				Query:       "alter table t3 modify v1 timestamp",
 				ExpectedErr: sql.ErrInvalidValue, // not sure of the type of error, but it should give one
+			},
+		},
+	},
+	{
+		// This actually "works", incorrectly
+		// We need to disambiguate the column names when they collide with generated ones
+		// https://github.com/dolthub/dolt/issues/3395
+		Name: "table with commit column should maintain its data in diff",
+		SetUpScript: []string{
+			"CREATE TABLE t (pk int PRIMARY KEY, commit text);",
+			"CALL DOLT_ADD('.');",
+			"set @Commit1 = dolt_commit('-am', 'creating table t');",
+			"INSERT INTO t VALUES (1, 'hi');",
+			"set @Commit2 = dolt_commit('-am', 'insert data');",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:    "SELECT to_pk, to_commit, from_pk, from_commit, diff_type from dolt_diff(@Commit1, @Commit2, 't');",
+				Expected: []sql.Row{{1, "hi", nil, nil, "added"}},
+			},
+		},
+	},
+}
+
+var AddIndexScripts = []queries.ScriptTest{
+	{
+		Name: "add unique constraint on keyless table",
+		SetUpScript: []string{
+			"CREATE TABLE test (uk int);",
+			"insert into test values (0), (0)",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:       "create unique index m on test (uk);",
+				ExpectedErr: sql.ErrUniqueKeyViolation,
+			},
+		},
+	},
+}
+
+var AddDropPrimaryKeysScripts = []queries.ScriptTest{
+	{
+		Name: "drop primary key blocked when foreign key present",
+		SetUpScript: []string{
+			"create table parent (a int primary key )",
+			"create table child (b int primary key, c int, key (c))",
+			"alter table child add constraint fk1 foreign key (c) references parent (a)",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:       "alter table parent drop primary key",
+				ExpectedErr: sql.ErrCantDropIndex,
+			},
+		},
+	},
+	{
+		Name: "drop primary key succeeds when foreign key present on other column",
+		SetUpScript: []string{
+			"create table parent (a int primary key, d int, key (d))",
+			"create table child (b int primary key, c int, key (c))",
+			"alter table child add constraint fk1 foreign key (c) references parent (d)",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:    "alter table parent drop primary key",
+				Expected: []sql.Row{{types.OkResult{RowsAffected: 0x0, InsertID: 0x0}}},
+			},
+		},
+	},
+	{
+		Name: "drop primary key succeeds when foreign key present on other table",
+		SetUpScript: []string{
+			"create table unrelated (a int primary key, d int)",
+			"create table parent (a int primary key)",
+			"create table child (b int primary key, c int, key (c))",
+			"alter table child add constraint fk1 foreign key (c) references parent (a)",
+		},
+		Assertions: []queries.ScriptTestAssertion{
+			{
+				Query:    "alter table unrelated drop primary key",
+				Expected: []sql.Row{{types.OkResult{RowsAffected: 0x0, InsertID: 0x0}}},
 			},
 		},
 	},

@@ -59,7 +59,7 @@ func (cmd InspectCmd) Description() string {
 }
 
 func (cmd InspectCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
+	return types.IsFormat_DOLT(nbf)
 }
 
 func (cmd InspectCmd) Docs() *cli.CommandDocumentation {
@@ -67,13 +67,13 @@ func (cmd InspectCmd) Docs() *cli.CommandDocumentation {
 }
 
 func (cmd InspectCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	ap.SupportsFlag(tableFileIndexFlag, "i", "Measure distribution error in table file chunk indexes.")
 	return ap
 }
 
 // Exec executes the command
-func (cmd InspectCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd InspectCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cli.CommandDocumentationContent{}, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
@@ -87,7 +87,11 @@ func (cmd InspectCmd) Exec(ctx context.Context, commandStr string, args []string
 }
 
 func (cmd InspectCmd) measureChunkIndexDistribution(ctx context.Context, dEnv *env.DoltEnv) errhand.VerboseError {
-	newGen := filepath.Join(dEnv.GetDoltDir(), dbfactory.DataDir)
+	doltDir := dEnv.GetDoltDir()
+	if doltDir == "" {
+		return errhand.VerboseErrorFromError(fmt.Errorf("can no longer find a database on disk"))
+	}
+	newGen := filepath.Join(doltDir, dbfactory.DataDir)
 	oldGen := filepath.Join(newGen, "oldgen")
 
 	itr, err := NewTableFileIter([]string{newGen, oldGen}, dEnv.FS)
@@ -102,7 +106,7 @@ func (cmd InspectCmd) measureChunkIndexDistribution(ctx context.Context, dEnv *e
 			break
 		}
 
-		summary, err := cmd.processTableFile(path, dEnv.FS)
+		summary, err := cmd.processTableFile(ctx, path, dEnv.FS)
 		if err != nil {
 			return errhand.VerboseErrorFromError(err)
 		}
@@ -116,7 +120,7 @@ func (cmd InspectCmd) measureChunkIndexDistribution(ctx context.Context, dEnv *e
 	return nil
 }
 
-func (cmd InspectCmd) processTableFile(path string, fs filesys.Filesys) (sum *chunkIndexSummary, err error) {
+func (cmd InspectCmd) processTableFile(ctx context.Context, path string, fs filesys.Filesys) (sum *chunkIndexSummary, err error) {
 	var rdr io.ReadCloser
 	rdr, err = fs.OpenForRead(path)
 	if err != nil {
@@ -130,7 +134,7 @@ func (cmd InspectCmd) processTableFile(path string, fs filesys.Filesys) (sum *ch
 	}()
 
 	var prefixes []uint64
-	prefixes, err = nbs.GetTableIndexPrefixes(rdr.(io.ReadSeeker))
+	prefixes, err = nbs.GetTableIndexPrefixes(ctx, rdr.(io.ReadSeeker))
 	if err != nil {
 		return sum, err
 	}

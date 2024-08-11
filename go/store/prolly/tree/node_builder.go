@@ -31,7 +31,11 @@ type novelNode struct {
 }
 
 func writeNewNode[S message.Serializer](ctx context.Context, ns NodeStore, bld *nodeBuilder[S]) (novelNode, error) {
-	node := bld.build()
+
+	node, err := bld.build()
+	if err != nil {
+		return novelNode{}, err
+	}
 
 	addr, err := ns.Write(ctx, node)
 	if err != nil {
@@ -40,18 +44,21 @@ func writeNewNode[S message.Serializer](ctx context.Context, ns NodeStore, bld *
 
 	var lastKey Item
 	if node.count > 0 {
-		k := node.GetKey(int(node.count) - 1)
+		k := getLastKey(node)
 		lastKey = ns.Pool().Get(uint64(len(k)))
 		copy(lastKey, k)
 	}
 
-	treeCount := uint64(node.TreeCount())
+	cnt, err := node.TreeCount()
+	if err != nil {
+		return novelNode{}, err
+	}
 
 	return novelNode{
 		addr:      addr,
 		node:      node,
 		lastKey:   lastKey,
-		treeCount: treeCount,
+		treeCount: uint64(cnt),
 	}, nil
 }
 
@@ -66,7 +73,7 @@ func newNodeBuilder[S message.Serializer](serializer S, level int) (nb *nodeBuil
 type nodeBuilder[S message.Serializer] struct {
 	keys, values [][]byte
 	size, level  int
-	subtrees     SubtreeCounts
+	subtrees     subtreeCounts
 	serializer   S
 }
 
@@ -91,7 +98,7 @@ func (nb *nodeBuilder[S]) count() int {
 	return len(nb.keys)
 }
 
-func (nb *nodeBuilder[S]) build() (node Node) {
+func (nb *nodeBuilder[S]) build() (node Node, err error) {
 	msg := nb.serializer.Serialize(nb.keys, nb.values, nb.subtrees, nb.level)
 	nb.recycleBuffers()
 	nb.size = 0

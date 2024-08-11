@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package serial
 import (
 	"strconv"
 
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type ItemType byte
@@ -50,23 +50,28 @@ type ProllyTreeNode struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) *ProllyTreeNode {
+func InitProllyTreeNodeRoot(o *ProllyTreeNode, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &ProllyTreeNode{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) *ProllyTreeNode {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) (*ProllyTreeNode, error) {
 	x := &ProllyTreeNode{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitProllyTreeNodeRoot(x, buf, offset)
 }
 
-func (rcv *ProllyTreeNode) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsProllyTreeNode(buf []byte, offset flatbuffers.UOffsetT) (*ProllyTreeNode, error) {
+	x := &ProllyTreeNode{}
+	return x, InitProllyTreeNodeRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *ProllyTreeNode) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if ProllyTreeNodeNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *ProllyTreeNode) Table() flatbuffers.Table {
@@ -335,8 +340,10 @@ func (rcv *ProllyTreeNode) MutateTreeLevel(n byte) bool {
 	return rcv._tab.MutateByteSlot(24, n)
 }
 
+const ProllyTreeNodeNumFields = 11
+
 func ProllyTreeNodeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(ProllyTreeNodeNumFields)
 }
 func ProllyTreeNodeAddKeyItems(builder *flatbuffers.Builder, keyItems flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(keyItems), 0)

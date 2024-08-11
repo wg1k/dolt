@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     dolt sql <<SQL
 CREATE TABLE one_pk (
@@ -72,6 +71,25 @@ teardown() {
     [ "${#lines[@]}" -eq 2 ]
 }
 
+@test "query-catalog: empty directory" {
+    mkdir empty && cd empty
+
+    run dolt sql -q "show databases" --save name
+    [ "$status" -ne 0 ]
+    [[ ! "$output" =~ panic ]] || false
+    [[ "$output" =~ "--save must be used in a dolt database directory" ]] || false
+
+    run dolt sql --list-saved
+    [ "$status" -ne 0 ]
+    [[ ! "$output" =~ panic ]] || false
+    [[ "$output" =~ "--list-saved must be used in a dolt database directory" ]] || false
+
+    run dolt sql --execute name
+    [ "$status" -ne 0 ]
+    [[ ! "$output" =~ panic ]] || false
+    [[ "$output" =~ "--execute must be used in a dolt database directory" ]] || false
+}
+
 @test "query-catalog: conflict" {
     dolt sql -q "select pk,pk1,pk2 from one_pk,two_pk where one_pk.c1=two_pk.c1" -s "name1" -m "my message"
     dolt add .
@@ -89,9 +107,9 @@ teardown() {
     dolt commit -m 'Changed name to edit_b'
 
     dolt checkout main
-    dolt merge edit_a
-    run dolt merge edit_b
-    [ "$status" -eq 0 ]
+    dolt merge edit_a -m "merge edit_a"
+    run dolt merge edit_b -m "merge edit_b"
+    [ "$status" -eq 1 ]
     [[ "$output" =~ "Merge conflict in dolt_query_catalog" ]] || false
 
     run dolt conflicts cat .

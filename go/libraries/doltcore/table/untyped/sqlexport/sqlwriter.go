@@ -23,7 +23,6 @@ import (
 
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	dsqle "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlfmt"
@@ -39,7 +38,7 @@ type SqlExportWriter struct {
 	parentSchs           map[string]schema.Schema
 	foreignKeys          []doltdb.ForeignKey
 	wr                   io.WriteCloser
-	root                 *doltdb.RootValue
+	root                 doltdb.RootValue
 	writtenFirstRow      bool
 	writtenAutocommitOff bool
 	editOpts             editor.Options
@@ -47,9 +46,8 @@ type SqlExportWriter struct {
 }
 
 // OpenSQLExportWriter returns a new SqlWriter for the table with the writer given.
-func OpenSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *doltdb.RootValue, tableName string, autocommitOff bool, sch schema.Schema, editOpts editor.Options) (*SqlExportWriter, error) {
-
-	allSchemas, err := root.GetAllSchemas(ctx)
+func OpenSQLExportWriter(ctx context.Context, wr io.WriteCloser, root doltdb.RootValue, tableName string, autocommitOff bool, sch schema.Schema, editOpts editor.Options) (*SqlExportWriter, error) {
+	allSchemas, err := doltdb.GetAllSchemas(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +57,7 @@ func OpenSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *doltdb.Ro
 		return nil, errhand.BuildDError("error: failed to read foreign key struct").AddCause(err).Build()
 	}
 
-	foreignKeys, _ := fkc.KeysForTable(tableName)
+	foreignKeys, _ := fkc.KeysForTable(doltdb.TableName{Name: tableName})
 
 	return &SqlExportWriter{
 		tableName:     tableName,
@@ -76,21 +74,6 @@ func OpenSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *doltdb.Ro
 // GetSchema returns the schema of this TableWriter.
 func (w *SqlExportWriter) GetSchema() schema.Schema {
 	return w.sch
-}
-
-// WriteRow will write a row to a table
-func (w *SqlExportWriter) WriteRow(ctx context.Context, r row.Row) error {
-	if err := w.maybeWriteDropCreate(ctx); err != nil {
-		return err
-	}
-
-	stmt, err := sqlfmt.RowAsInsertStmt(r, w.tableName, w.sch)
-
-	if err != nil {
-		return err
-	}
-
-	return iohelp.WriteLine(w.wr, stmt)
 }
 
 func (w *SqlExportWriter) WriteSqlRow(ctx context.Context, r sql.Row) error {
@@ -124,7 +107,7 @@ func (w *SqlExportWriter) WriteSqlRow(ctx context.Context, r sql.Row) error {
 		return err
 	}
 
-	stmt, err := sqlfmt.SqlRowAsInsertStmt(ctx, r, w.tableName, w.sch)
+	stmt, err := sqlfmt.SqlRowAsInsertStmt(r, w.tableName, w.sch)
 	if err != nil {
 		return err
 	}
@@ -157,6 +140,10 @@ func (w *SqlExportWriter) maybeWriteDropCreate(ctx context.Context) error {
 	w.writtenFirstRow = true
 
 	return nil
+}
+
+func (w *SqlExportWriter) WriteDropCreateOnly(ctx context.Context) error {
+	return w.maybeWriteDropCreate(ctx)
 }
 
 func (w *SqlExportWriter) maybeWriteAutocommitoff() error {

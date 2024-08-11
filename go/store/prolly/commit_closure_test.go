@@ -17,13 +17,13 @@ package prolly
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/prolly/message"
 	"github.com/dolthub/dolt/go/store/prolly/tree"
@@ -51,10 +51,13 @@ func TestCommitClosure(t *testing.T) {
 	})
 
 	t.Run("Empty", func(t *testing.T) {
-		cc := NewEmptyCommitClosure(ns)
+		cc, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
 		assert.NotNil(t, cc)
-		assert.Equal(t, 0, cc.Count())
-		assert.Equal(t, 0, cc.closure.root.Count())
+		c, err := cc.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 0, c)
+		assert.Equal(t, 0, cc.closure.Root.Count())
 		assert.Equal(t, 1, cc.Height())
 
 		i, err := cc.IterAllReverse(ctx)
@@ -64,15 +67,20 @@ func TestCommitClosure(t *testing.T) {
 	})
 
 	t.Run("Insert", func(t *testing.T) {
-		cc := NewEmptyCommitClosure(ns)
+		cc, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
+		addr, err := ns.Write(ctx, tree.NewEmptyTestNode())
+		require.NoError(t, err)
 		e := cc.Editor()
-		err := e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, addr))
 		assert.NoError(t, err)
 		cc, err = e.Flush(ctx)
 		assert.NoError(t, err)
-		assert.Equal(t, 2, cc.Count())
+		ccc, err := cc.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 2, ccc)
 
 		i, err := cc.IterAllReverse(ctx)
 		assert.NoError(t, err)
@@ -87,39 +95,49 @@ func TestCommitClosure(t *testing.T) {
 		assert.True(t, errors.Is(err, io.EOF))
 
 		e = cc.Editor()
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, addr))
 		assert.NoError(t, err)
 		cc, err = e.Flush(ctx)
 		assert.NoError(t, err)
-		assert.Equal(t, 2, cc.Count())
+		ccc, err = cc.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 2, ccc)
 	})
 
 	t.Run("Diff", func(t *testing.T) {
-		ccl := NewEmptyCommitClosure(ns)
+		ccl, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
+		addr, err := ns.Write(ctx, tree.NewEmptyTestNode())
+		require.NoError(t, err)
 		e := ccl.Editor()
-		err := e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, addr))
 		assert.NoError(t, err)
 		ccl, err = e.Flush(ctx)
 		assert.NoError(t, err)
-		assert.Equal(t, 2, ccl.Count())
+		cclc, err := ccl.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 2, cclc)
 
-		ccr := NewEmptyCommitClosure(ns)
+		ccr, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
 		e = ccr.Editor()
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 0, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, hash.Parse("00000000000000000000000000000001")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 1, addr))
 		assert.NoError(t, err)
-		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 2, hash.Parse("00000000000000000000000000000000")))
+		err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), 2, addr))
 		assert.NoError(t, err)
 		ccr, err = e.Flush(ctx)
 		assert.NoError(t, err)
-		assert.Equal(t, 4, ccr.Count())
+		ccrc, err := ccr.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 3, ccrc)
 
 		var numadds, numdels int
 		err = DiffCommitClosures(ctx, ccl, ccr, func(ctx context.Context, d tree.Diff) error {
@@ -132,23 +150,28 @@ func TestCommitClosure(t *testing.T) {
 		})
 		assert.Error(t, err)
 		assert.True(t, errors.Is(err, io.EOF))
-		assert.Equal(t, 2, numadds)
+		assert.Equal(t, 1, numadds)
 		assert.Equal(t, 0, numdels)
 	})
 
 	t.Run("WalkAddresses", func(t *testing.T) {
-		cc := NewEmptyCommitClosure(ns)
+		cc, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
 		e := cc.Editor()
 		for i := 0; i < 4096; i++ {
-			err := e.Add(ctx, NewCommitClosureKey(ns.Pool(), uint64(i), hash.Parse(fmt.Sprintf("%0.32d", i))))
+			addr, err := ns.Write(ctx, tree.NewEmptyTestNode())
+			require.NoError(t, err)
+			err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), uint64(i), addr))
 			require.NoError(t, err)
 		}
-		cc, err := e.Flush(ctx)
+		cc, err = e.Flush(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 4096, cc.Count())
+		ccc, err := cc.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 4096, ccc)
 
-		// Walk the addresses in the root.
-		msg := message.Message(tree.ValueFromNode(cc.closure.root).(types.TupleRowStorage))
+		// Walk the addresses in the Root.
+		msg := serial.Message(tree.ValueFromNode(cc.closure.Root).(types.SerialMessage))
 		numaddresses := 0
 		err = message.WalkAddresses(ctx, msg, func(ctx context.Context, addr hash.Hash) error {
 			numaddresses++
@@ -157,9 +180,9 @@ func TestCommitClosure(t *testing.T) {
 		require.NoError(t, err)
 		assert.Less(t, numaddresses, 4096)
 
-		// Walk all addresses in the tree.
+		// Walk all addresses in the Tree.
 		numaddresses = 0
-		err = tree.WalkAddresses(ctx, cc.closure.root, ns, func(ctx context.Context, addr hash.Hash) error {
+		err = tree.WalkAddresses(ctx, cc.closure.Root, ns, func(ctx context.Context, addr hash.Hash) error {
 			numaddresses++
 			return nil
 		})
@@ -168,25 +191,30 @@ func TestCommitClosure(t *testing.T) {
 	})
 
 	t.Run("WalkNodes", func(t *testing.T) {
-		cc := NewEmptyCommitClosure(ns)
+		cc, err := NewEmptyCommitClosure(ns)
+		require.NoError(t, err)
 		e := cc.Editor()
 		for i := 0; i < 4096; i++ {
-			err := e.Add(ctx, NewCommitClosureKey(ns.Pool(), uint64(i), hash.Parse(fmt.Sprintf("%0.32d", i))))
+			addr, err := ns.Write(ctx, tree.NewEmptyTestNode())
+			require.NoError(t, err)
+			err = e.Add(ctx, NewCommitClosureKey(ns.Pool(), uint64(i), addr))
 			require.NoError(t, err)
 		}
-		cc, err := e.Flush(ctx)
+		cc, err = e.Flush(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 4096, cc.Count())
+		ccc, err := cc.Count()
+		require.NoError(t, err)
+		assert.Equal(t, 4096, ccc)
 
 		numnodes := 0
 		totalentries := 0
-		err = tree.WalkNodes(ctx, cc.closure.root, ns, func(ctx context.Context, node tree.Node) error {
+		err = tree.WalkNodes(ctx, cc.closure.Root, ns, func(ctx context.Context, node tree.Node) error {
 			numnodes++
 			totalentries += node.Count()
 			return nil
 		})
 		require.NoError(t, err)
-		assert.Less(t, cc.closure.root.Count(), numnodes)
+		assert.Less(t, cc.closure.Root.Count(), numnodes)
 		assert.Less(t, 4096, totalentries)
 	})
 }

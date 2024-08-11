@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     dolt sql <<SQL
 CREATE TABLE parent (
@@ -130,6 +129,27 @@ SQL
     dolt sql -q 'select * from objects'
     dolt add .
     dolt commit -m 'update 1'
+
+    # check information_schema.CHECK_CONSTRAINTS table
+    run dolt sql -q "select constraint_name, table_name, column_name, ordinal_position, position_in_unique_constraint, referenced_table_name, referenced_column_name from information_schema.KEY_COLUMN_USAGE;" -r csv
+    [[ "$output" =~ "PRIMARY,colors,id,1,,," ]] || false
+    [[ "$output" =~ "PRIMARY,materials,id,1,,," ]] || false
+    [[ "$output" =~ "materials_ibfk_1,materials,color,1,1,colors,color" ]] || false
+    [[ "$output" =~ "PRIMARY,objects,id,1,,," ]] || false
+    [[ "$output" =~ "objects_ibfk_1,objects,color,1,1,materials,color" ]] || false
+    [[ "$output" =~ "objects_ibfk_1,objects,material,2,2,materials,material" ]] || false
+    [[ "$output" =~ "PRIMARY,child,id,1,,," ]] || false
+    [[ "$output" =~ "PRIMARY,parent,id,1,,," ]] || false
+
+    # check information_schema.TABLE_CONSTRAINTS table
+    run dolt sql -q "select * from information_schema.TABLE_CONSTRAINTS where table_name = 'materials';" -r csv
+    [[ "$output" =~ "def,dolt-repo-$$,PRIMARY,dolt-repo-$$,materials,PRIMARY KEY,YES" ]] || false
+    [[ "$output" =~ "def,dolt-repo-$$,materials_ibfk_1,dolt-repo-$$,materials,FOREIGN KEY,YES" ]] || false
+
+    # check information_schema.TABLE_CONSTRAINTS_EXTENSIONS table
+    run dolt sql -q "select constraint_name from information_schema.TABLE_CONSTRAINTS_EXTENSIONS where table_name = 'materials';" -r csv
+    [[ "$output" =~ "PRIMARY" ]] || false
+    [[ "$output" =~ "color_mat_index" ]] || false
 }
 
 @test "foreign-keys: ALTER TABLE Single Named FOREIGN KEY" {
@@ -733,6 +753,10 @@ SQL
     run dolt sql -q "DELETE FROM one;"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "violation" ]] || false
+
+    # check information_schema.REFERENTIAL_CONSTRAINTS table
+    run dolt sql -q "select constraint_name, unique_constraint_name, match_option, update_rule, delete_rule, table_name, referenced_table_name from information_schema.REFERENTIAL_CONSTRAINTS;" -r csv
+    [[ "$output" =~ "fk_name_1,,NONE,RESTRICT,RESTRICT,two,one" ]] || false
 }
 
 @test "foreign-keys: SQL no reference options" {
@@ -929,6 +953,7 @@ SQL
     dolt sql <<SQL
 ALTER TABLE parent ADD INDEX v1v2 (v1,v2);
 ALTER TABLE child DROP FOREIGN KEY fk_name;
+ALTER TABLE child DROP KEY fk_name;
 ALTER TABLE child ADD CONSTRAINT fk_name FOREIGN KEY (v1,v2) REFERENCES parent(v1,v2)
 SQL
     run dolt schema show child
@@ -1053,7 +1078,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated parent"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1097,7 +1122,9 @@ SQL
     dolt add -A
     dolt commit --force -m "updated parent"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge other"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
@@ -1129,7 +1156,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated child"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1173,7 +1200,9 @@ SQL
     dolt add -A
     dolt commit --force -m "updated child"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge other"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
@@ -1206,7 +1235,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated both"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1252,11 +1281,52 @@ SQL
     dolt add -A
     dolt commit --force -m "updated both"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge other"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
     [[ "$output" =~ "child,1" ]] || false
+}
+
+@test "foreign-keys: different foreign keys with same name is schema conflict" {
+    dolt commit -Am "initial commit"
+
+    dolt checkout -b other
+    dolt sql -q "alter table child add foreign key (id) references parent (v1)"
+    dolt commit -Am "other"
+
+    dolt checkout main
+    dolt sql -q "alter table child add foreign key (id) references parent (v2)"
+    dolt commit -Am "main"
+
+    run dolt merge other
+    [ "$status" -eq "1" ]
+    [[ "$output" =~ "duplicate foreign key constraint name" ]] || false
+
+    run dolt sql -q "alter table child rename constraint foreign key child_ibfk_1 to child_ibfk_2"
+    [ "$status" -eq "0" ]
+
+    dolt commit -Am "rename"
+
+    run dolt merge other
+    [ "$status" -eq "0" ]
+}
+
+@test "foreign-keys: same foreign keys with same name is ok" {
+    dolt commit -Am "initial commit"
+
+    dolt checkout -b other
+    dolt sql -q "alter table child add foreign key (id) references parent (id)"
+    dolt commit -Am "other"
+
+    dolt checkout main
+    dolt sql -q "alter table child add foreign key (id) references parent (id)"
+    dolt commit -Am "main"
+
+    run dolt merge other
+    [ "$status" -eq "0" ]
 }
 
 @test "foreign-keys: Resolve catches violations" {
@@ -1282,7 +1352,9 @@ SQL
     dolt add -A
     dolt commit -m "added 2s"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge other"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
     run dolt conflicts resolve --theirs parent
     [ "$status" -eq "1" ]
     [[ "$output" =~ "violation" ]] || false
@@ -1291,17 +1363,177 @@ SQL
     [[ "$output" =~ "violation" ]] || false
 }
 
+@test "foreign-keys: Resolve catches violations with stored procedure" {
+    dolt sql <<SQL
+ALTER TABLE child ADD CONSTRAINT fk_v1 FOREIGN KEY (v1) REFERENCES parent(v1);
+INSERT INTO parent VALUES (0,0,0);
+INSERT INTO child VALUES (0,0,0);
+SQL
+    dolt add -A
+    dolt commit -m "added tables"
+    dolt branch other
+    dolt sql <<SQL
+INSERT INTO parent VALUES (1,1,1);
+INSERT INTO child VALUES (1,1,1);
+SQL
+    dolt add -A
+    dolt commit -m "added 1s"
+    dolt checkout other
+    dolt sql <<SQL
+INSERT INTO parent VALUES (1,2,2);
+INSERT INTO child VALUES (1,2,2);
+SQL
+    dolt add -A
+    dolt commit -m "added 2s"
+    dolt checkout main
+    run dolt merge other -m "merge other"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
+    run dolt sql <<SQL
+set @@dolt_allow_commit_conflicts = 1;
+call dolt_conflicts_resolve('--theirs', 'parent');
+SQL
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "violation" ]] || false
+    run dolt sql <<SQL
+set @@dolt_allow_commit_conflicts = 1;
+call dolt_conflicts_resolve('--theirs', 'child');
+SQL
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "violation" ]] || false
+}
+
 @test "foreign-keys: FKs move with the working set on checkout" {
     dolt add . && dolt commit -m "added parent and child tables"
     dolt branch other
     dolt sql -q "ALTER TABLE child ADD CONSTRAINT fk_v1 FOREIGN KEY (v1) REFERENCES parent(v1);"
 
-    run dolt checkout other
-    [ "$status" -eq "0" ]
+    dolt checkout other
 
     run dolt schema show child
     [ "$status" -eq "0" ]
-    skip "foreign keys don't travel with the working set when checking out a new branch"
+    [[ "$output" =~ "fk_v1" ]] || false
+
+    dolt checkout main
+    
+    run dolt schema show child
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "fk_v1" ]] || false
+
+    # Same test, but a table not found on the other branch
+    dolt sql <<SQL
+CREATE TABLE parent2 (
+    id int PRIMARY KEY,
+    v1 int,
+    v2 int,
+    INDEX v1 (v1),
+    INDEX v2 (v2)
+);
+CREATE TABLE child2 (
+    id int primary key,
+    v1 int,
+    v2 int
+);
+SQL
+
+    dolt add . && dolt commit -m "new tables"
+    dolt sql -q "ALTER TABLE child2 ADD CONSTRAINT fk_v2 FOREIGN KEY (v1) REFERENCES parent2(v1);"
+
+    # this is an error: modifying a table that isn't tracked on another branch prevents checkout
+    run dolt checkout other
+    [ "$status" -ne "0" ]
+    [[ "$output" =~ "Your local changes to the following tables would be overwritten by checkout" ]] || false
+    [[ "$output" =~ "child" ]] || false
+    
+    # Removing a foreign key constraint
+    dolt reset --hard HEAD~
+    dolt sql -q "ALTER TABLE child ADD CONSTRAINT fk_v1 FOREIGN KEY (v1) REFERENCES parent(v1);"
+    dolt commit -am "added fk constraint"
+    dolt branch b2
+    
+    dolt sql -q "alter table child drop constraint fk_v1"
+    dolt checkout b2
+
+    dolt schema show child
+    run dolt schema show child
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "KEY `fk_v1`" ]] || false
+    [[ ! "$output" =~ "CONSTRAINT `fk_v1`" ]] || false
+
+    dolt checkout main
+    
+    run dolt schema show child
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "KEY `fk_v1`" ]] || false
+    [[ ! "$output" =~ "CONSTRAINT `fk_v1`" ]] || false
+}
+
+@test "foreign-keys: non-overlapping changes in working set and target branch during checkout" {
+    dolt sql <<SQL
+CREATE TABLE parent2 (
+    id int PRIMARY KEY,
+    v1 int,
+    v2 int,
+    INDEX v1 (v1),
+    INDEX v2 (v2)
+);
+CREATE TABLE child2 (
+    id int primary key,
+    v1 int,
+    v2 int
+);
+SQL
+    dolt add . && dolt commit -m "added parent and child tables, parent2 and child2 tables"
+
+    dolt checkout -b other
+    dolt sql -q "ALTER TABLE child2 ADD CONSTRAINT fk_v2 FOREIGN KEY (v1) REFERENCES parent2(v1);"
+    dolt commit -Am "parent2 and child2, with constraint"
+
+    dolt checkout main
+    dolt sql -q "ALTER TABLE child ADD CONSTRAINT fk_v1 FOREIGN KEY (v1) REFERENCES parent(v1);"
+
+    dolt checkout other
+
+    run dolt schema show child2
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "fk_v2" ]] || false
+
+    run dolt schema show child
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "fk_v1" ]] || false
+
+    dolt checkout main
+
+    run dolt schema show child2
+    [ "$status" -eq "0" ]
+    [[ ! "$output" =~ "fk_v2" ]] || false
+
+    run dolt schema show child
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "fk_v1" ]] || false
+}
+
+@test "foreign-keys: conflict during checkout" {
+    dolt add . && dolt commit -m "added parent and child tables"
+
+    dolt checkout -b other
+    dolt sql -q "ALTER TABLE child ADD CONSTRAINT fk_v2 FOREIGN KEY (v2) REFERENCES parent(v2);"
+    dolt commit -Am "added a FK constraint"
+
+    dolt checkout main
+    dolt sql -q "ALTER TABLE child ADD CONSTRAINT fk_v1 FOREIGN KEY (v1) REFERENCES parent(v1);"
+
+    run dolt checkout other
+    [ "$status" -ne "0" ]
+    [[ "$output" =~ "Your local changes to the following tables would be overwritten by checkout" ]] || false
+    [[ "$output" =~ "child" ]] || false
+
+    run dolt status
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "main" ]] || false
+
+    run dolt schema show child
+    [ "$status" -eq "0" ]
     [[ "$output" =~ "fk_v1" ]] || false
 }
 
@@ -1934,7 +2166,7 @@ SQL
     # the prefix key should not be unique
     run dolt sql -q "show create table parent"
     [ $status -eq 0 ]
-    [[ $output =~ "KEY \`b\` (\`b\`)" ]] || false
+    [[ ! $output =~ "KEY \`b\` (\`b\`)" ]] || false
     [[ ! $output =~ "UNIQUE" ]] || false
 
     run dolt sql -q "show create table child"
@@ -1968,4 +2200,54 @@ SQL
     [ "$status" -eq 1 ]
     [[ ! "$output" =~ "panic:" ]] || false
     [[ "$output" =~ "cannot add or update a child row - Foreign key violation on fk: \`fk_b_a_id_refs_a\`, table: \`b\`, referenced table: \`a\`, key: \`[31337]\`" ]] || false
+}
+
+@test "foreign-keys: partial updates work against foreign key constraints" {
+    skip "Partial updates are unsupported"
+    dolt sql <<SQL
+DROP TABLE IF EXISTS parent;
+DROP TABLE IF EXISTS child;
+CREATE TABLE parent(
+  a int PRIMARY KEY
+);
+CREATE TABLE child (
+  a int NOT NULL,
+  b int DEFAULT NULL,
+  c int DEFAULT NULL,
+  PRIMARY KEY (a),
+  KEY child_b (b),
+  KEY child_c (c),
+  CONSTRAINT child_ibfk_1 FOREIGN KEY (b) REFERENCES parent (a),
+  CONSTRAINT child_ibfk_2 FOREIGN KEY (c) REFERENCES parent (a)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO parent VALUES (1);
+
+SET FOREIGN_KEY_CHECKS=0;
+INSERT INTO child values (100, 1, 1), (101, 2, 2);
+SET FOREIGN_KEY_CHECKS=1;
+SQL
+
+    run dolt sql -q "update child set b = 1 where a = 101;"
+    [ "$status" -eq 0 ]
+}
+
+@test "foreign-keys: foreign key that references dropped table should not panic when using dolt diff {
+    dolt commit -Am "start here"
+    dolt sql <<SQL
+create table parent1(a int primary key, b int);
+create table child1(c int primary key);
+alter table child1 add foreign key (c) references parent1(a);
+call dolt_commit('-Am', 'new tables');
+set foreign_key_checks=0;
+drop table parent1;
+set foreign_key_checks=1;
+SQL
+
+    dolt diff HEAD~
+    run dolt diff HEAD~
+    [ "$status" -eq 0 ]
+    [[ ! "$output" =~ "panic" ]] || false
+    [[ "$output" =~ "CREATE TABLE \`child1\`" ]] || false
+    [[ "$output" =~ "FOREIGN KEY (\`c\`) REFERENCES \`parent1\` (\`a\`)" ]] || false
 }

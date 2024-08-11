@@ -28,35 +28,41 @@ import (
 	"github.com/dolthub/dolt/go/store/types"
 )
 
-func hackVRToCS(vr types.ValueReader) chunks.ChunkStore {
-	switch v := vr.(type) {
-	case Database:
-		return ChunkStoreFromDatabase(v)
-	case *types.ValueStore:
-		return v.ChunkStore()
+func NewParentsClosure(ctx context.Context, c *Commit, sv types.SerialMessage, vr types.ValueReader, ns tree.NodeStore) (prolly.CommitClosure, error) {
+	var msg serial.Commit
+	err := serial.InitCommitRoot(&msg, sv, serial.MessagePrefixSz)
+	if err != nil {
+		return prolly.CommitClosure{}, err
 	}
-	panic("unknown ValueReader implementation...")
+	addr := hash.New(msg.ParentClosureBytes())
+	if addr.IsEmpty() {
+		return prolly.CommitClosure{}, nil
+	}
+	v, err := vr.ReadValue(ctx, addr)
+	if err != nil {
+		return prolly.CommitClosure{}, err
+	}
+	if types.IsNull(v) {
+		return prolly.CommitClosure{}, fmt.Errorf("internal error or data loss: dangling commit parent closure for addr %s or commit %s", addr.String(), c.Addr().String())
+	}
+	node, err := tree.NodeFromBytes(v.(types.SerialMessage))
+	if err != nil {
+		return prolly.CommitClosure{}, err
+	}
+	return prolly.NewCommitClosure(node, ns)
 }
 
-func newParentsClosureIterator(ctx context.Context, c *Commit, vr types.ValueReader) (parentsClosureIter, error) {
+func newParentsClosureIterator(ctx context.Context, c *Commit, vr types.ValueReader, ns tree.NodeStore) (parentsClosureIter, error) {
 	sv := c.NomsValue()
 
-	if _, ok := sv.(types.SerialMessage); ok {
-		msg := serial.GetRootAsCommit(sv.(types.SerialMessage), 0)
-		addr := hash.New(msg.ParentClosureBytes())
-		if addr.IsEmpty() {
-			return nil, nil
-		}
-		v, err := vr.ReadValue(ctx, addr)
+	if sm, ok := sv.(types.SerialMessage); ok {
+		cc, err := NewParentsClosure(ctx, c, sm, vr, ns)
 		if err != nil {
 			return nil, err
 		}
-		if types.IsNull(v) {
-			return nil, fmt.Errorf("internal error or data loss: dangling commit parent closure for addr %s or commit %s", addr.String(), c.Addr().String())
+		if cc.IsEmpty() {
+			return nil, nil
 		}
-		node := tree.NodeFromBytes(v.(types.TupleRowStorage))
-		ns := tree.NewNodeStore(hackVRToCS(vr))
-		cc := prolly.NewCommitClosure(node, ns)
 		ci, err := cc.IterAllReverse(ctx)
 		if err != nil {
 			return nil, err
@@ -124,7 +130,7 @@ type parentsClosureIter interface {
 	Err() error
 	Hash() hash.Hash
 	Height() uint64
-	Less(*types.NomsBinFormat, parentsClosureIter) bool
+	Less(ctx context.Context, nbf *types.NomsBinFormat, itr parentsClosureIter) bool
 	Next(context.Context) bool
 }
 
@@ -169,12 +175,12 @@ func (i *parentsClosureIterator) Hash() hash.Hash {
 	return h
 }
 
-func (i *parentsClosureIterator) Less(f *types.NomsBinFormat, otherI parentsClosureIter) bool {
+func (i *parentsClosureIterator) Less(ctx context.Context, nbf *types.NomsBinFormat, otherI parentsClosureIter) bool {
 	other := otherI.(*parentsClosureIterator)
 	if i.err != nil || other.err != nil {
 		return false
 	}
-	ret, err := i.curr.Less(f, other.curr)
+	ret, err := i.curr.Less(ctx, nbf, other.curr)
 	if err != nil {
 		i.err = err
 		other.err = err
@@ -240,7 +246,7 @@ func (i *fbParentsClosureIterator) Next(ctx context.Context) bool {
 	return true
 }
 
-func (i *fbParentsClosureIterator) Less(f *types.NomsBinFormat, otherI parentsClosureIter) bool {
+func (i *fbParentsClosureIterator) Less(ctx context.Context, nbf *types.NomsBinFormat, otherI parentsClosureIter) bool {
 	other := otherI.(*fbParentsClosureIterator)
 	return i.curr.Less(other.curr)
 }
@@ -384,7 +390,7 @@ func writeTypesCommitParentClosure(ctx context.Context, vrw types.ValueReadWrite
 	return r, true, nil
 }
 
-func writeFbCommitParentClosure(ctx context.Context, cs chunks.ChunkStore, vrw types.ValueReadWriter, parents []*serial.Commit, parentAddrs []hash.Hash) (hash.Hash, error) {
+func writeFbCommitParentClosure(ctx context.Context, cs chunks.ChunkStore, vrw types.ValueReadWriter, ns tree.NodeStore, parents []*serial.Commit, parentAddrs []hash.Hash) (hash.Hash, error) {
 	if len(parents) == 0 {
 		// We write an empty hash for parent-less commits of height 1.
 		return hash.Hash{}, nil
@@ -399,14 +405,22 @@ func writeFbCommitParentClosure(ctx context.Context, cs chunks.ChunkStore, vrw t
 		return hash.Hash{}, fmt.Errorf("writeCommitParentClosure: ReadManyValues: %w", err)
 	}
 	// Load them as ProllyTrees.
-	ns := tree.NewNodeStore(cs)
 	closures := make([]prolly.CommitClosure, len(parents))
 	for i := range addrs {
 		if !types.IsNull(vs[i]) {
-			node := tree.NodeFromBytes(vs[i].(types.TupleRowStorage))
-			closures[i] = prolly.NewCommitClosure(node, ns)
+			node, err := tree.NodeFromBytes(vs[i].(types.SerialMessage))
+			if err != nil {
+				return hash.Hash{}, err
+			}
+			closures[i], err = prolly.NewCommitClosure(node, ns)
+			if err != nil {
+				return hash.Hash{}, err
+			}
 		} else {
-			closures[i] = prolly.NewEmptyCommitClosure(ns)
+			closures[i], err = prolly.NewEmptyCommitClosure(ns)
+			if err != nil {
+				return hash.Hash{}, err
+			}
 		}
 	}
 	// Add all the missing entries from [1, ...) maps to the 0th map.

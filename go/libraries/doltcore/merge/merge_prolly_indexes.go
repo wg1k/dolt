@@ -16,7 +16,9 @@ package merge
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+
+	"github.com/dolthub/go-mysql-server/sql"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
@@ -28,156 +30,67 @@ import (
 	"github.com/dolthub/dolt/go/store/val"
 )
 
-// indexEdit is an edit to a secondary index based on the primary row's key and value.
-// The members of tree.Diff have the following meanings:
-// - |Key| = the key to apply this edit on
-// - |From| = the previous value of this key (If nil, an insert is performed.)
-// - |To| = the new value of this key (If nil, a delete is performed.)
-//
-// It is invalid for |From| and |To| to be both be nil.
-type indexEdit interface {
-	leftEdit() *tree.Diff
-	rightEdit() *tree.Diff
-}
-
-// cellWiseMergeEdit implements indexEdit. It resets the left and updates the
-// right to the merged value.
-type cellWiseMergeEdit struct {
-	left   tree.Diff
-	right  tree.Diff
-	merged tree.Diff
-}
-
-var _ indexEdit = cellWiseMergeEdit{}
-
-func (m cellWiseMergeEdit) leftEdit() *tree.Diff {
-	// Reset left
-	return &tree.Diff{
-		Key:  m.left.Key,
-		From: m.left.To,
-		To:   m.left.From,
-	}
-}
-
-func (m cellWiseMergeEdit) rightEdit() *tree.Diff {
-	// Update right to merged val
-	return &tree.Diff{
-		Key:  m.merged.Key,
-		From: m.right.To,
-		To:   m.merged.To,
-	}
-}
-
-// conflictEdit implements indexEdit and it resets the right value.
-type conflictEdit struct {
-	right tree.Diff
-}
-
-var _ indexEdit = conflictEdit{}
-
-func (c conflictEdit) leftEdit() *tree.Diff {
-	// Noop left
-	return nil
-}
-
-func (c conflictEdit) rightEdit() *tree.Diff {
-	// Reset right
-	return &tree.Diff{
-		Key:  c.right.Key,
-		From: c.right.To,
-		To:   c.right.From,
-	}
-}
-
-type confVals struct {
-	key      val.Tuple
-	ourVal   val.Tuple
-	theirVal val.Tuple
-	baseVal  val.Tuple
-}
-
 // mergeProllySecondaryIndexes merges the secondary indexes of the given |tbl|,
 // |mergeTbl|, and |ancTbl|. It stores the merged indexes into |tableToUpdate|
-// and returns its updated value.
-func mergeProllySecondaryIndexes(ctx context.Context, vrw types.ValueReadWriter, postMergeSchema, rootSch, mergeSch, ancSch schema.Schema, mergedData durable.Index, tbl, mergeTbl, tableToUpdate *doltdb.Table, ancSet durable.IndexSet) (*doltdb.Table, error) {
-	rootSet, err := tbl.GetIndexSet(ctx)
+// and returns its updated value. If |forceIndexRebuild| is true, then all indexes
+// will be rebuilt from the table's data, instead of relying on incremental
+// changes from the other side of the merge to have been merged in before this
+// function was called. This is safer, but less efficient.
+func mergeProllySecondaryIndexes(
+	ctx *sql.Context,
+	tm *TableMerger,
+	leftSet, rightSet durable.IndexSet,
+	finalSch schema.Schema,
+	finalRows durable.Index,
+	artifacts *prolly.ArtifactsEditor,
+	forceIndexRebuild bool,
+) (durable.IndexSet, error) {
+	mergedIndexSet, err := durable.NewIndexSet(ctx, tm.vrw, tm.ns)
 	if err != nil {
 		return nil, err
 	}
-	mergeSet, err := mergeTbl.GetIndexSet(ctx)
-	if err != nil {
-		return nil, err
-	}
-	mergedSet, err := mergeProllyIndexSets(ctx, vrw, postMergeSchema, rootSch, mergeSch, ancSch, mergedData, rootSet, mergeSet, ancSet)
-	if err != nil {
-		return nil, err
-	}
-	updatedTbl, err := tableToUpdate.SetIndexSet(ctx, mergedSet)
-	if err != nil {
-		return nil, err
-	}
-	return updatedTbl, nil
-}
 
-// mergeProllyIndexSets merges the |root|, |merge|, and |anc| index sets based
-// on the provided |postMergeSchema|. It returns the merged index set.
-func mergeProllyIndexSets(ctx context.Context, vrw types.ValueReadWriter, postMergeSchema, rootSch, mergeSch, ancSch schema.Schema, mergedData durable.Index, root, merge, anc durable.IndexSet) (durable.IndexSet, error) {
-	mergedIndexSet := durable.NewIndexSet(ctx, vrw)
+	mergedM := durable.ProllyMapFromIndex(finalRows)
 
-	tryGetIdx := func(sch schema.Schema, iS durable.IndexSet, indexName string) (idx durable.Index, ok bool, err error) {
-		ok = sch.Indexes().Contains(indexName)
+	tryGetIdx := func(sch schema.Schema, iS durable.IndexSet, indexName string) (prolly.Map, bool, error) {
+		ok := sch.Indexes().Contains(indexName)
 		if ok {
-			idx, err = iS.GetIndex(ctx, sch, indexName)
+			idx, err := iS.GetIndex(ctx, sch, nil, indexName)
 			if err != nil {
-				return nil, false, err
+				return prolly.Map{}, false, err
 			}
-			return idx, true, nil
+			m := durable.ProllyMapFromIndex(idx)
+			if schema.IsKeyless(sch) {
+				m = prolly.ConvertToSecondaryKeylessIndex(m)
+			}
+			return m, true, nil
 		}
-		return nil, false, nil
+		return prolly.Map{}, false, nil
 	}
 
-	// Based on the indexes in the post merge schema, merge the root, merge,
-	// and ancestor indexes.
-	for _, index := range postMergeSchema.Indexes().AllIndexes() {
+	// Schema merge can introduce new constraints/uniqueness checks.
+	for _, index := range finalSch.Indexes().AllIndexes() {
+		left, rootOK, err := tryGetIdx(tm.leftSch, leftSet, index.Name())
+		if err != nil {
+			return nil, err
+		}
 
-		rootI, rootOK, err := tryGetIdx(rootSch, root, index.Name())
-		if err != nil {
-			return nil, err
-		}
-		mergeI, mergeOK, err := tryGetIdx(mergeSch, merge, index.Name())
-		if err != nil {
-			return nil, err
-		}
-		ancI, ancOK, err := tryGetIdx(ancSch, anc, index.Name())
-		if err != nil {
-			return nil, err
+		// If the left (destination) side of the merge doesn't have an index it is supposed to have,
+		// then a full rebuild for this index is required.
+		rebuildRequired := !rootOK
+
+		// If the index existed on the left (destination) side, before this merge, and differs
+		// from the final version we need for the merged schema, then it needs to be rebuilt.
+		leftIndexDefinition := tm.leftSch.Indexes().GetByName(index.Name())
+		if leftIndexDefinition != nil && leftIndexDefinition.Equals(index) == false {
+			rebuildRequired = true
 		}
 
 		mergedIndex, err := func() (durable.Index, error) {
-			if !rootOK || !mergeOK || !ancOK {
-				mergedIndex, err := creation.BuildSecondaryProllyIndex(ctx, vrw, postMergeSchema, index, durable.ProllyMapFromIndex(mergedData))
-				if err != nil {
-					return nil, err
-				}
-				return mergedIndex, nil
+			if forceIndexRebuild || rebuildRequired {
+				return buildIndex(ctx, tm.vrw, tm.ns, finalSch, index, mergedM, artifacts, tm.rightSrc, tm.name)
 			}
-
-			left := durable.ProllyMapFromIndex(rootI)
-			right := durable.ProllyMapFromIndex(mergeI)
-			base := durable.ProllyMapFromIndex(ancI)
-
-			var collision = false
-			merged, err := prolly.MergeMaps(ctx, left, right, base, func(left, right tree.Diff) (tree.Diff, bool) {
-				collision = true
-				return tree.Diff{}, true
-			})
-			if err != nil {
-				return nil, err
-			}
-			if collision {
-				return nil, errors.New("collisions not implemented")
-			}
-			return durable.IndexFromProllyMap(merged), nil
+			return durable.IndexFromProllyMap(left), nil
 		}()
 		if err != nil {
 			return nil, err
@@ -192,121 +105,74 @@ func mergeProllyIndexSets(ctx context.Context, vrw types.ValueReadWriter, postMe
 	return mergedIndexSet, nil
 }
 
-// Given cellWiseMergeEdit's sent on |cellWiseChan|, update the secondary indexes in
-// |rootIndexSet| and |mergeIndexSet| such that when the index sets are merged,
-// they produce entries consistent with the cell-wise merges. The updated
-// |rootIndexSet| and |mergeIndexSet| are returned.
-func updateProllySecondaryIndexes(
-	ctx context.Context,
-	cellWiseChan chan indexEdit,
-	rootSchema, mergeSchema schema.Schema,
-	tbl, mergeTbl *doltdb.Table,
-	rootIndexSet, mergeIndexSet durable.IndexSet) (durable.IndexSet, durable.IndexSet, error) {
-
-	rootIdxs, err := getMutableSecondaryIdxs(ctx, rootSchema, tbl)
-	if err != nil {
-		return nil, nil, err
-	}
-	mergeIdxs, err := getMutableSecondaryIdxs(ctx, mergeSchema, mergeTbl)
-	if err != nil {
-		return nil, nil, err
-	}
-
-OUTER:
-	for {
-		select {
-		case e, ok := <-cellWiseChan:
-			if !ok {
-				break OUTER
-			}
-			// See cellWiseMergeEdit and conflictEdit for implementations of leftEdit and rightEdit
-			if edit := e.leftEdit(); edit != nil {
-				for _, idx := range rootIdxs {
-					err := applyEdit(ctx, idx, edit)
-					if err != nil {
-						return nil, nil, err
-					}
-				}
-			}
-			if edit := e.rightEdit(); edit != nil {
-				for _, idx := range mergeIdxs {
-					err := applyEdit(ctx, idx, edit)
-					if err != nil {
-						return nil, nil, err
-					}
-				}
-			}
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		}
-	}
-
-	persistIndexMuts := func(indexSet durable.IndexSet, idxs []MutableSecondaryIdx) (durable.IndexSet, error) {
-		for _, idx := range idxs {
-			m, err := idx.Map(ctx)
-			if err != nil {
-				return nil, err
-			}
-			indexSet, err = indexSet.PutIndex(ctx, idx.Name, durable.IndexFromProllyMap(m))
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return indexSet, nil
-	}
-
-	updatedRootIndexSet, err := persistIndexMuts(rootIndexSet, rootIdxs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	updatedMergeIndexSet, err := persistIndexMuts(mergeIndexSet, mergeIdxs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return updatedRootIndexSet, updatedMergeIndexSet, nil
-}
-
-// getMutableSecondaryIdxs returns a MutableSecondaryIdx for each secondary index
-// defined in |schema| and |tbl|.
-func getMutableSecondaryIdxs(ctx context.Context, schema schema.Schema, tbl *doltdb.Table) ([]MutableSecondaryIdx, error) {
-	indexSet, err := tbl.GetIndexSet(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	mods := make([]MutableSecondaryIdx, schema.Indexes().Count())
-	for i, index := range schema.Indexes().AllIndexes() {
-		idx, err := indexSet.GetIndex(ctx, schema, index.Name())
+func buildIndex(
+	ctx *sql.Context,
+	vrw types.ValueReadWriter,
+	ns tree.NodeStore,
+	postMergeSchema schema.Schema,
+	index schema.Index,
+	m prolly.Map,
+	artEditor *prolly.ArtifactsEditor,
+	theirRootIsh doltdb.Rootish,
+	tblName string,
+) (durable.Index, error) {
+	if index.IsUnique() {
+		meta, err := makeUniqViolMeta(postMergeSchema, index)
 		if err != nil {
 			return nil, err
 		}
-		m := durable.ProllyMapFromIndex(idx)
+		vInfo, err := json.Marshal(meta)
+		if err != nil {
+			return nil, err
+		}
+		kd := postMergeSchema.GetKeyDescriptor()
+		kb := val.NewTupleBuilder(kd)
+		p := m.Pool()
 
-		mods[i] = NewMutableSecondaryIdx(m, schema, index, m.Pool())
+		pkMapping := ordinalMappingFromIndex(index)
+
+		mergedMap, err := creation.BuildUniqueProllyIndex(ctx, vrw, ns, postMergeSchema, tblName, index, m, func(ctx context.Context, existingKey, newKey val.Tuple) (err error) {
+			eK := getPKFromSecondaryKey(kb, p, pkMapping, existingKey)
+			nK := getPKFromSecondaryKey(kb, p, pkMapping, newKey)
+			err = replaceUniqueKeyViolation(ctx, artEditor, m, eK, kd, theirRootIsh, vInfo, tblName)
+			if err != nil {
+				return err
+			}
+			err = replaceUniqueKeyViolation(ctx, artEditor, m, nK, kd, theirRootIsh, vInfo, tblName)
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return mergedMap, nil
 	}
 
-	return mods, nil
+	mergedIndex, err := creation.BuildSecondaryProllyIndex(ctx, vrw, ns, postMergeSchema, tblName, index, m)
+	if err != nil {
+		return nil, err
+	}
+	return mergedIndex, nil
 }
 
 // applyEdit applies |edit| to |idx|. If |len(edit.To)| == 0, then action is
 // a delete, if |len(edit.From)| == 0 then it is an insert, otherwise it is an
 // update.
-func applyEdit(ctx context.Context, idx MutableSecondaryIdx, edit *tree.Diff) error {
-	if len(edit.From) == 0 {
-		err := idx.InsertEntry(ctx, val.Tuple(edit.Key), val.Tuple(edit.To))
+func applyEdit(ctx context.Context, idx MutableSecondaryIdx, key, from, to val.Tuple) (err error) {
+	if len(from) == 0 {
+		err := idx.InsertEntry(ctx, key, to)
 		if err != nil {
 			return err
 		}
-	} else if len(edit.To) == 0 {
-		err := idx.DeleteEntry(ctx, val.Tuple(edit.Key), val.Tuple(edit.From))
+	} else if len(to) == 0 {
+		err := idx.DeleteEntry(ctx, key, from)
 		if err != nil {
 			return err
 		}
 	} else {
-		err := idx.UpdateEntry(ctx, val.Tuple(edit.Key), val.Tuple(edit.From), val.Tuple(edit.To))
+		err := idx.UpdateEntry(ctx, key, from, to)
 		if err != nil {
 			return err
 		}

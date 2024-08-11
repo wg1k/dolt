@@ -18,24 +18,22 @@ import (
 	"context"
 	"os"
 	"path"
+	"strings"
+
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
+	"github.com/dolthub/dolt/go/store/types"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
+	"github.com/dolthub/dolt/go/libraries/doltcore/creds"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
-	"github.com/dolthub/dolt/go/libraries/doltcore/remotestorage"
 	"github.com/dolthub/dolt/go/libraries/events"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 	"github.com/dolthub/dolt/go/libraries/utils/earl"
-	"github.com/dolthub/dolt/go/store/types"
-)
-
-const (
-	remoteParam = "remote"
-	branchParam = "branch"
 )
 
 var cloneDocs = cli.CommandDocumentationContent{
@@ -75,14 +73,7 @@ func (cmd CloneCmd) Docs() *cli.CommandDocumentation {
 }
 
 func (cmd CloneCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsString(remoteParam, "", "name", "Name of the remote to be added. Default will be 'origin'.")
-	ap.SupportsString(branchParam, "b", "branch", "The branch to be cloned.  If not specified all branches will be cloned.")
-	ap.SupportsString(dbfactory.AWSRegionParam, "", "region", "")
-	ap.SupportsValidatedString(dbfactory.AWSCredsTypeParam, "", "creds-type", "", argparser.ValidatorFromStrList(dbfactory.AWSCredsTypeParam, credTypes))
-	ap.SupportsString(dbfactory.AWSCredsFileParam, "", "file", "AWS credentials file.")
-	ap.SupportsString(dbfactory.AWSCredsProfile, "", "profile", "AWS profile to use.")
-	return ap
+	return cli.CreateCloneArgParser()
 }
 
 // EventType returns the type of the event to log
@@ -91,7 +82,7 @@ func (cmd CloneCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd CloneCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd CloneCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cloneDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
@@ -105,14 +96,26 @@ func (cmd CloneCmd) Exec(ctx context.Context, commandStr string, args []string, 
 }
 
 func clone(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env.DoltEnv) errhand.VerboseError {
-	remoteName := apr.GetValueOrDefault(remoteParam, "origin")
-	branch := apr.GetValueOrDefault(branchParam, "")
+	remoteName := apr.GetValueOrDefault(cli.RemoteParam, "origin")
+	branch := apr.GetValueOrDefault(cli.BranchParam, "")
+	singleBranch := apr.Contains(cli.SingleBranchFlag)
 	dir, urlStr, verr := parseArgs(apr)
 	if verr != nil {
 		return verr
 	}
 
+	dEnv.UserPassConfig, verr = getRemoteUserAndPassConfig(apr)
+	if verr != nil {
+		return verr
+	}
+
 	userDirExists, _ := dEnv.FS.Exists(dir)
+
+	// Check for a valid dolthub url and replace the urlStr with the parsed repoName.
+	repoName, ok := validateAndParseDolthubUrl(urlStr)
+	if ok {
+		urlStr = repoName
+	}
 
 	scheme, remoteUrl, err := env.GetAbsRemoteUrl(dEnv.FS, dEnv.Config, urlStr)
 
@@ -132,22 +135,28 @@ func clone(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env.DoltEn
 		return verr
 	}
 
-	dEnv, err = actions.EnvForClone(ctx, srcDB.ValueReadWriter().Format(), r, dir, dEnv.FS, dEnv.Version, env.GetCurrentUserHomeDir)
+	// Create a new Dolt env for the clone
+	clonedEnv, err := actions.EnvForClone(ctx, srcDB.ValueReadWriter().Format(), r, dir, dEnv.FS, dEnv.Version, env.GetCurrentUserHomeDir)
 	if err != nil {
 		return errhand.VerboseErrorFromError(err)
 	}
 
-	err = actions.CloneRemote(ctx, srcDB, remoteName, branch, dEnv)
+	depth, ok := apr.GetInt(cli.DepthFlag)
+	if !ok {
+		depth = -1
+	}
+
+	// Nil out the old Dolt env so we don't accidentally operate on the wrong database
+	dEnv = nil
+
+	err = actions.CloneRemote(ctx, srcDB, remoteName, branch, singleBranch, depth, clonedEnv)
 	if err != nil {
 		// If we're cloning into a directory that already exists do not erase it. Otherwise
 		// make best effort to delete the directory we created.
 		if userDirExists {
-			// Set the working dir to the parent of the .dolt folder so we can delete .dolt
-			_ = os.Chdir(dir)
-			_ = dEnv.FS.Delete(dbfactory.DoltDir, true)
+			clonedEnv.FS.Delete(dbfactory.DoltDir, true)
 		} else {
-			_ = os.Chdir("../")
-			_ = dEnv.FS.Delete(dir, true)
+			clonedEnv.FS.Delete(".", true)
 		}
 		return errhand.VerboseErrorFromError(err)
 	}
@@ -160,15 +169,10 @@ func clone(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env.DoltEn
 		}
 	}
 
-	err = dEnv.RepoStateWriter().UpdateBranch(dEnv.RepoState.CWBHeadRef().GetPath(), env.BranchConfig{
-		Merge:  dEnv.RepoState.Head,
+	err = clonedEnv.RepoStateWriter().UpdateBranch(clonedEnv.RepoState.CWBHeadRef().GetPath(), env.BranchConfig{
+		Merge:  clonedEnv.RepoState.Head,
 		Remote: remoteName,
 	})
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-
-	err = dEnv.RepoState.Save(dEnv.FS)
 	if err != nil {
 		return errhand.VerboseErrorFromError(err)
 	}
@@ -196,7 +200,7 @@ func parseArgs(apr *argparser.ArgParseResults) (string, string, errhand.VerboseE
 		if dir == "." {
 			dir = path.Dir(urlStr)
 		} else if dir == "/" {
-			return "", "", errhand.BuildDError("Could not infer repo name.  Please explicitily define a directory for this url").Build()
+			return "", "", errhand.BuildDError("Could not infer repo name.  Please explicitly define a directory for this url").Build()
 		}
 	}
 
@@ -206,20 +210,49 @@ func parseArgs(apr *argparser.ArgParseResults) (string, string, errhand.VerboseE
 func createRemote(ctx context.Context, remoteName, remoteUrl string, params map[string]string, dEnv *env.DoltEnv) (env.Remote, *doltdb.DoltDB, errhand.VerboseError) {
 	cli.Printf("cloning %s\n", remoteUrl)
 
-	r := env.NewRemote(remoteName, remoteUrl, params, dEnv)
-
-	ddb, err := r.GetRemoteDB(ctx, types.Format_Default)
-
+	r := env.NewRemote(remoteName, remoteUrl, params)
+	ddb, err := r.GetRemoteDB(ctx, types.Format_Default, dEnv)
 	if err != nil {
 		bdr := errhand.BuildDError("error: failed to get remote db").AddCause(err)
-
-		if err == remotestorage.ErrInvalidDoltSpecPath {
-			urlObj, _ := earl.Parse(remoteUrl)
-			bdr.AddDetails("'%s' should be in the format 'organization/repo'", urlObj.Path)
-		}
-
 		return env.NoRemote, nil, bdr.Build()
 	}
 
 	return r, ddb, nil
+}
+
+// validateAndParseDolthubUrl validates and returns a Dolthub repo link's repository name. For example, given this url: https://www.dolthub.com/repositories/user/test
+// the function would return 'user/test'. Note this function correctly does not handle removing additional path extensions. The url: https://www.dolthub.com/repositories/user/test/pulls
+// would return 'user/test/pulls' and eventually error later in the code base.
+func validateAndParseDolthubUrl(urlStr string) (string, bool) {
+	u, err := earl.Parse(urlStr)
+
+	if err != nil {
+		return "", false
+	}
+
+	if u.Scheme == dbfactory.HTTPSScheme && u.Host == "www.dolthub.com" {
+		// Get the actual repo name and covert the remote
+		split := strings.Split(u.Path, "/")
+
+		if len(split) > 2 {
+			// the path is of the form /repositories/user/repoName
+			return strings.Join(split[2:], "/"), true
+		}
+	}
+
+	return "", false
+}
+
+func getRemoteUserAndPassConfig(apr *argparser.ArgParseResults) (*creds.DoltCredsForPass, errhand.VerboseError) {
+	if !apr.Contains(cli.UserFlag) {
+		return nil, nil
+	}
+	pass, found := os.LookupEnv(dconfig.EnvDoltRemotePassword)
+	if !found {
+		return nil, errhand.BuildDError("error: must set DOLT_REMOTE_PASSWORD environment variable to use --user param").Build()
+	}
+	return &creds.DoltCredsForPass{
+		Username: apr.GetValueOrDefault(cli.UserFlag, ""),
+		Password: pass,
+	}, nil
 }

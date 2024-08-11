@@ -25,8 +25,8 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema/typeinfo"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/globalstate"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlutil"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/writer"
@@ -45,7 +45,7 @@ type TempTable struct {
 
 	lookup sql.IndexLookup
 
-	ed   writer.TableWriter
+	ed   dsess.TableWriter
 	opts editor.Options
 }
 
@@ -58,6 +58,7 @@ var _ sql.ForeignKeyTable = &TempTable{}
 var _ sql.CheckTable = &TempTable{}
 var _ sql.CheckAlterableTable = &TempTable{}
 var _ sql.StatisticsTable = &TempTable{}
+var _ sql.AutoIncrementTable = &TempTable{}
 
 func NewTempTable(
 	ctx *sql.Context,
@@ -65,6 +66,7 @@ func NewTempTable(
 	pkSch sql.PrimaryKeySchema,
 	name, db string,
 	opts editor.Options,
+	collation sql.CollationID,
 ) (*TempTable, error) {
 	sess := dsess.DSessFromSess(ctx.Session)
 
@@ -77,34 +79,56 @@ func NewTempTable(
 		return nil, fmt.Errorf("database %s not found in session", db)
 	}
 
-	ws := dbState.WorkingSet
+	ws := dbState.WorkingSet()
+	if ws == nil {
+		return nil, doltdb.ErrOperationNotSupportedInDetachedHead
+	}
 
-	sch, err := temporaryDoltSchema(ctx, pkSch)
+	colNames := make([]string, len(pkSch.Schema))
+	colKinds := make([]types.NomsKind, len(pkSch.Schema))
+	for i, col := range pkSch.Schema {
+		colNames[i] = col.Name
+		ti, err := typeinfo.FromSqlType(col.Type)
+		if err != nil {
+			return nil, err
+		}
+		colKinds[i] = ti.NomsKind()
+	}
+
+	tags, err := doltdb.GenerateTagsForNewColumns(ctx, ws.WorkingRoot(), name, colNames, colKinds, ws.WorkingRoot())
+	if err != nil {
+		return nil, err
+	}
+
+	sch, err := temporaryDoltSchema(ctx, pkSch, tags, collation)
 	if err != nil {
 		return nil, err
 	}
 	vrw := ddb.ValueReadWriter()
+	ns := ddb.NodeStore()
 
-	idx, err := durable.NewEmptyIndex(ctx, vrw, sch)
+	idx, err := durable.NewEmptyIndex(ctx, vrw, ns, sch)
 	if err != nil {
 		return nil, err
 	}
-	set := durable.NewIndexSet(ctx, vrw)
-
-	tbl, err := doltdb.NewTable(ctx, ddb.ValueReadWriter(), sch, idx, set, nil)
+	set, err := durable.NewIndexSet(ctx, vrw, ns)
 	if err != nil {
 		return nil, err
 	}
 
-	newRoot, err := ws.WorkingRoot().PutTable(ctx, name, tbl)
+	tbl, err := doltdb.NewTable(ctx, vrw, ns, sch, idx, set, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	newRoot, err := ws.WorkingRoot().PutTable(ctx, doltdb.TableName{Name: name}, tbl)
 	if err != nil {
 		return nil, err
 	}
 
 	newWs := ws.WithWorkingRoot(newRoot)
 
-	gs := globalstate.NewGlobalStateStore()
-	ait, err := gs.GetAutoIncrementTracker(ctx, newWs)
+	ait, err := dsess.NewAutoIncrementTracker(ctx, db, newWs)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +144,7 @@ func NewTempTable(
 		opts:      opts,
 	}
 
-	tempTable.ed, err = writeSession.GetTableWriter(ctx, name, db, setTempTableRoot(tempTable), false)
+	tempTable.ed, err = writeSession.GetTableWriter(ctx, doltdb.TableName{Name: name}, db, setTempTableRoot(tempTable))
 	if err != nil {
 		return nil, err
 	}
@@ -128,9 +152,9 @@ func NewTempTable(
 	return tempTable, nil
 }
 
-func setTempTableRoot(t *TempTable) func(ctx *sql.Context, dbName string, newRoot *doltdb.RootValue) error {
-	return func(ctx *sql.Context, dbName string, newRoot *doltdb.RootValue) error {
-		newTable, _, err := newRoot.GetTable(ctx, t.tableName)
+func setTempTableRoot(t *TempTable) func(ctx *sql.Context, dbName string, newRoot doltdb.RootValue) error {
+	return func(ctx *sql.Context, dbName string, newRoot doltdb.RootValue) error {
+		newTable, _, err := newRoot.GetTable(ctx, doltdb.TableName{Name: t.tableName})
 		if err != nil {
 			return err
 		}
@@ -148,17 +172,19 @@ func setTempTableRoot(t *TempTable) func(ctx *sql.Context, dbName string, newRoo
 			return fmt.Errorf("database %s not found in session", t.dbName)
 		}
 
-		ws := dbState.WorkingSet
+		ws := dbState.WorkingSet()
+		if ws == nil {
+			return doltdb.ErrOperationNotSupportedInDetachedHead
+		}
 		newWs := ws.WithWorkingRoot(newRoot)
 
-		gs := globalstate.NewGlobalStateStore()
-		ait, err := gs.GetAutoIncrementTracker(ctx, newWs)
+		ait, err := dsess.NewAutoIncrementTracker(ctx, t.dbName, newWs)
 		if err != nil {
 			return err
 		}
 
 		writeSession := writer.NewWriteSession(newTable.Format(), newWs, ait, t.opts)
-		t.ed, err = writeSession.GetTableWriter(ctx, t.tableName, t.dbName, setTempTableRoot(t), false)
+		t.ed, err = writeSession.GetTableWriter(ctx, doltdb.TableName{Name: t.tableName}, t.dbName, setTempTableRoot(t))
 		if err != nil {
 			return err
 		}
@@ -167,8 +193,21 @@ func setTempTableRoot(t *TempTable) func(ctx *sql.Context, dbName string, newRoo
 	}
 }
 
+func (t *TempTable) RowCount(ctx *sql.Context) (uint64, bool, error) {
+	rows, err := t.table.GetRowData(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	cnt, err := rows.Count()
+	return cnt, true, err
+}
+
 func (t *TempTable) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
 	return index.DoltIndexesFromTable(ctx, t.dbName, t.tableName, t.table)
+}
+
+func (t *TempTable) PreciseMatch() bool {
+	return true
 }
 
 func (t *TempTable) Name() string {
@@ -179,20 +218,16 @@ func (t *TempTable) String() string {
 	return t.tableName
 }
 
-func (t *TempTable) NumRows(ctx *sql.Context) (uint64, error) {
-	m, err := t.table.GetRowData(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return m.Count(), nil
-}
-
 func (t *TempTable) Format() *types.NomsBinFormat {
 	return t.table.Format()
 }
 
 func (t *TempTable) Schema() sql.Schema {
 	return t.pkSch.Schema
+}
+
+func (t *TempTable) Collation() sql.CollationID {
+	return sql.CollationID(t.sch.GetCollation())
 }
 
 func (t *TempTable) sqlSchema() sql.PrimaryKeySchema {
@@ -204,19 +239,24 @@ func (t *TempTable) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newDoltTablePartitionIter(rows, partitionsFromRows(ctx, rows)...), nil
+	parts, err := partitionsFromRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	return newDoltTablePartitionIter(rows, parts...), nil
 }
 
 func (t *TempTable) IsTemporary() bool {
 	return true
 }
 
+// DataLength implements the sql.StatisticsTable interface.
 func (t *TempTable) DataLength(ctx *sql.Context) (uint64, error) {
 	idx, err := t.table.GetRowData(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return idx.Count(), nil
+	return idx.Count()
 }
 
 func (t *TempTable) DoltTable(ctx *sql.Context) (*doltdb.Table, error) {
@@ -227,38 +267,39 @@ func (t *TempTable) DataCacheKey(ctx *sql.Context) (doltdb.DataCacheKey, bool, e
 	return doltdb.DataCacheKey{}, false, nil
 }
 
+func (t *TempTable) LookupPartitions(ctx *sql.Context, lookup sql.IndexLookup) (sql.PartitionIter, error) {
+	t.lookup = lookup
+	return t.Partitions(ctx)
+}
+
 func (t *TempTable) PartitionRows(ctx *sql.Context, partition sql.Partition) (sql.RowIter, error) {
-	if t.lookup != nil {
+	if !t.lookup.IsEmpty() {
 		return index.RowIterForIndexLookup(ctx, t, t.lookup, t.pkSch, nil)
 	} else {
-		return partitionRows(ctx, t.table, t.sqlSchema().Schema, nil, partition)
+		return partitionRows(ctx, t.table, nil, partition)
 	}
 }
 
-func (t *TempTable) WithIndexLookup(lookup sql.IndexLookup) sql.Table {
-	t.lookup = lookup
+func (t *TempTable) IndexedAccess(lookup sql.IndexLookup) sql.IndexedTable {
 	return t
 }
 
-func (t *TempTable) CreateIndex(ctx *sql.Context, indexName string, using sql.IndexUsing, constraint sql.IndexConstraint, columns []sql.IndexColumn, comment string) error {
-	if constraint != sql.IndexConstraint_None && constraint != sql.IndexConstraint_Unique {
-		return fmt.Errorf("only the following types of index constraints are supported: none, unique")
+func (t *TempTable) CreateIndex(ctx *sql.Context, idx sql.IndexDef) error {
+	if idx.Constraint != sql.IndexConstraint_None && idx.Constraint != sql.IndexConstraint_Unique && idx.Constraint != sql.IndexConstraint_Spatial {
+		return fmt.Errorf("only the following types of index constraints are supported: none, unique, spatial")
 	}
-	cols := make([]string, len(columns))
-	for i, c := range columns {
+	cols := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
 		cols[i] = c.Name
 	}
 
-	ret, err := creation.CreateIndex(
-		ctx,
-		t.table,
-		indexName,
-		cols,
-		constraint == sql.IndexConstraint_Unique,
-		true,
-		comment,
-		t.opts,
-	)
+	ret, err := creation.CreateIndex(ctx, t.table, t.Name(), idx.Name, cols, allocatePrefixLengths(idx.Columns), schema.IndexProperties{
+		IsUnique:      idx.Constraint == sql.IndexConstraint_Unique,
+		IsSpatial:     idx.Constraint == sql.IndexConstraint_Spatial,
+		IsFullText:    idx.Constraint == sql.IndexConstraint_Fulltext,
+		IsUserDefined: true,
+		Comment:       idx.Comment,
+	}, t.opts)
 	if err != nil {
 		return err
 	}
@@ -313,7 +354,7 @@ func (t *TempTable) GetReferencedForeignKeys(ctx *sql.Context) ([]sql.ForeignKey
 	return nil, nil
 }
 
-func (t *TempTable) CreateIndexForForeignKey(ctx *sql.Context, indexName string, using sql.IndexUsing, constraint sql.IndexConstraint, columns []sql.IndexColumn) error {
+func (t *TempTable) CreateIndexForForeignKey(ctx *sql.Context, idx sql.IndexDef) error {
 	return sql.ErrTemporaryTablesForeignKeySupport.New()
 }
 
@@ -329,7 +370,7 @@ func (t *TempTable) DropForeignKey(ctx *sql.Context, fkName string) error {
 	return sql.ErrTemporaryTablesForeignKeySupport.New()
 }
 
-func (t *TempTable) GetForeignKeyUpdater(ctx *sql.Context) sql.ForeignKeyUpdater {
+func (t *TempTable) GetForeignKeyEditor(ctx *sql.Context) sql.ForeignKeyEditor {
 	return nil
 }
 
@@ -404,27 +445,26 @@ func (t *TempTable) StatementBegin(ctx *sql.Context) {
 }
 
 func (t *TempTable) DiscardChanges(ctx *sql.Context, errorEncountered error) error {
-	t.lookup = nil
+	t.lookup = sql.IndexLookup{}
 	return nil
 }
 
 func (t *TempTable) StatementComplete(ctx *sql.Context) error {
-	t.lookup = nil
+	t.lookup = sql.IndexLookup{}
 	return nil
 }
 
 func (t *TempTable) Close(ctx *sql.Context) error {
 	err := t.ed.Close(ctx)
 
-	t.lookup = nil
+	t.lookup = sql.IndexLookup{}
 	return err
 }
 
-func temporaryDoltSchema(ctx context.Context, pkSch sql.PrimaryKeySchema) (sch schema.Schema, err error) {
+func temporaryDoltSchema(ctx context.Context, pkSch sql.PrimaryKeySchema, tags []uint64, collation sql.CollationID) (sch schema.Schema, err error) {
 	cols := make([]schema.Column, len(pkSch.Schema))
 	for i, col := range pkSch.Schema {
-		tag := uint64(i)
-		cols[i], err = sqlutil.ToDoltCol(tag, col)
+		cols[i], err = sqlutil.ToDoltCol(tags[i], col)
 		if err != nil {
 			return nil, err
 		}
@@ -439,6 +479,23 @@ func temporaryDoltSchema(ctx context.Context, pkSch sql.PrimaryKeySchema) (sch s
 	if err != nil {
 		return nil, err
 	}
+	sch.SetCollation(schema.Collation(collation))
 
 	return sch, nil
+}
+
+func (t *TempTable) PeekNextAutoIncrementValue(ctx *sql.Context) (uint64, error) {
+	return t.table.GetAutoIncrementValue(ctx)
+}
+
+func (t *TempTable) GetNextAutoIncrementValue(ctx *sql.Context, insertVal interface{}) (uint64, error) {
+	autoIncEditor, ok := t.ed.(writer.AutoIncrementGetter)
+	if !ok {
+		return 0, sql.ErrNoAutoIncrementCol
+	}
+	return autoIncEditor.GetNextAutoIncrementValue(ctx, insertVal)
+}
+
+func (t *TempTable) AutoIncrementSetter(ctx *sql.Context) sql.AutoIncrementSetter {
+	return t.ed
 }

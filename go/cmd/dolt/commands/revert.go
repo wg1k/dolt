@@ -15,17 +15,18 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 
-	"github.com/dolthub/dolt/go/store/types"
+	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
-	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/merge"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"github.com/dolthub/dolt/go/store/util/outputpager"
 )
 
 var revertDocs = cli.CommandDocumentationContent{
@@ -36,7 +37,6 @@ var revertDocs = cli.CommandDocumentationContent{
 		"{{.EmphasisLeft}}HEAD~1..HEAD~2{{.EmphasisRight}}, giving us a patch of what to remove to effectively remove the " +
 		"influence of the specified commit. If multiple commits are specified, then this process is repeated for each " +
 		"commit in the order specified. This requires a clean working set." +
-
 		"\n\nAny conflicts or constraint violations caused by the merge cause the command to fail.",
 	Synopsis: []string{
 		"<revision>...",
@@ -52,13 +52,13 @@ func (cmd RevertCmd) Name() string {
 	return "revert"
 }
 
+func (cmd RevertCmd) RequiresRepo() bool {
+	return false
+}
+
 // Description implements the interface cli.Command.
 func (cmd RevertCmd) Description() string {
 	return "Undo the changes introduced in a commit."
-}
-
-func (cmd RevertCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
 }
 
 func (cmd RevertCmd) Docs() *cli.CommandDocumentation {
@@ -71,13 +71,13 @@ func (cmd RevertCmd) ArgParser() *argparser.ArgParser {
 }
 
 // Exec implements the interface cli.Command.
-func (cmd RevertCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd RevertCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cli.CreateRevertArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, revertDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	// This command creates a commit, so we need user identity
-	if !cli.CheckUserNameAndEmail(dEnv) {
+	if !cli.CheckUserNameAndEmail(cliCtx.Config()) {
 		return 1
 	}
 
@@ -85,75 +85,67 @@ func (cmd RevertCmd) Exec(ctx context.Context, commandStr string, args []string,
 		usage()
 		return 1
 	}
-	headCommit, err := dEnv.HeadCommit(ctx)
+
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Println(err.Error())
+		return 1
 	}
-	headRoot, err := headCommit.GetRootValue(ctx)
+	if closeFunc != nil {
+		defer closeFunc()
+	}
+
+	var author string
+	if apr.Contains(cli.AuthorParam) {
+		author, _ = apr.GetValue(cli.AuthorParam)
+	} else {
+		name, email, err := env.GetNameAndEmail(cliCtx.Config())
+		if err != nil {
+			cli.Println(err.Error())
+			return 1
+		}
+		author = fmt.Sprintf("%s <%s>", name, email)
+	}
+
+	var params []interface{}
+	params = append(params, author)
+
+	var buffer bytes.Buffer
+	buffer.WriteString("CALL DOLT_REVERT('--author', ?")
+	// Loop over args and add them to the query
+	for _, input := range apr.Args {
+		buffer.WriteString(", ?")
+		params = append(params, input)
+	}
+	buffer.WriteString(")")
+	query, err := dbr.InterpolateForDialect(buffer.String(), params, dialect.MySQL)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	workingRoot, err := dEnv.WorkingRoot(ctx)
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	headHash, err := headRoot.HashOf()
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	workingHash, err := workingRoot.HashOf()
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	if !headHash.Equal(workingHash) {
-		cli.PrintErrln("You must commit any changes before using revert.")
+		cli.Println(err.Error())
 		return 1
 	}
 
-	headRef := dEnv.RepoState.CWBHeadRef()
-	commits := make([]*doltdb.Commit, apr.NArg())
-	for i, arg := range apr.Args {
-		commitSpec, err := doltdb.NewCommitSpec(arg)
-		if err != nil {
-			return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-		}
-		commit, err := dEnv.DoltDB.Resolve(ctx, commitSpec, headRef)
-		if err != nil {
-			return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-		}
-		commits[i] = commit
-	}
-
-	opts := editor.Options{Deaf: dEnv.DbEaFactory(), Tempdir: dEnv.TempTableFilesDir()}
-	workingRoot, revertMessage, err := merge.Revert(ctx, dEnv.DoltDB, workingRoot, headCommit, commits, opts)
+	_, rowIter, _, err := queryist.Query(sqlCtx, query)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Printf("Failure to execute '%s': %s\n", query, err.Error())
+		return 1
 	}
-
-	workingHash, err = workingRoot.HashOf()
+	_, err = sql.RowIterToRows(sqlCtx, rowIter)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	if headHash.Equal(workingHash) {
-		cli.Println("No changes were made.")
-		return 0
+		cli.Println(err.Error())
+		return 1
 	}
 
-	err = dEnv.UpdateWorkingRoot(ctx, workingRoot)
+	commit, err := getCommitInfo(queryist, sqlCtx, "HEAD")
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Printf("Revert completed, but failure to get commit details occurred: %s\n", err.Error())
+		return 1
 	}
-	res := AddCmd{}.Exec(ctx, "add", []string{"-A"}, dEnv)
-	if res != 0 {
-		return res
-	}
+	cli.ExecuteWithStdioRestored(func() {
+		pager := outputpager.Start()
+		defer pager.Stop()
 
-	// Pass in the final parameters for the author string.
-	commitParams := []string{"-m", revertMessage}
-	authorStr, ok := apr.GetValue(cli.AuthorParam)
-	if ok {
-		commitParams = append(commitParams, "--author", authorStr)
-	}
+		PrintCommitInfo(pager, 0, false, "auto", commit)
+	})
 
-	return CommitCmd{}.Exec(ctx, "commit", commitParams, dEnv)
+	return 0
 }

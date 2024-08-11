@@ -41,7 +41,9 @@ import (
 func makeFileManifestTempDir(t *testing.T) fileManifest {
 	dir, err := os.MkdirTemp("", "")
 	require.NoError(t, err)
-	return fileManifest{dir: dir} //, cache: newManifestCache(defaultManifestCacheSize)}
+	fm, err := getFileManifest(context.Background(), dir, asyncFlush)
+	require.NoError(t, err)
+	return fm.(fileManifest)
 }
 
 func TestFileManifestLoadIfExists(t *testing.T) {
@@ -58,7 +60,7 @@ func TestFileManifestLoadIfExists(t *testing.T) {
 	jerk := computeAddr([]byte("jerk"))
 	newRoot := hash.Of([]byte("new root"))
 	tableName := hash.Of([]byte("table1"))
-	gcGen := addr{}
+	gcGen := hash.Hash{}
 	m := strings.Join([]string{StorageVersion, "0", jerk.String(), newRoot.String(), gcGen.String(), tableName.String(), "0"}, ":")
 	err = clobberManifest(fm.dir, m)
 	require.NoError(t, err)
@@ -76,42 +78,6 @@ func TestFileManifestLoadIfExists(t *testing.T) {
 	}
 }
 
-func TestFileManifestLoadIfExistsHoldsLock(t *testing.T) {
-	assert := assert.New(t)
-	fm := makeFileManifestTempDir(t)
-	defer file.RemoveAll(fm.dir)
-	stats := &Stats{}
-
-	// Simulate another process writing a manifest.
-	lock := computeAddr([]byte("locker"))
-	newRoot := hash.Of([]byte("new root"))
-	tableName := hash.Of([]byte("table1"))
-	gcGen := addr{}
-	m := strings.Join([]string{StorageVersion, constants.NomsVersion, lock.String(), newRoot.String(), gcGen.String(), tableName.String(), "0"}, ":")
-	err := clobberManifest(fm.dir, m)
-	require.NoError(t, err)
-
-	// ParseIfExists should now reflect the manifest written above.
-	exists, upstream, err := fm.ParseIfExists(context.Background(), stats, func() error {
-		// This should fail to get the lock, and therefore _not_ clobber the manifest.
-		lock := computeAddr([]byte("newlock"))
-		badRoot := hash.Of([]byte("bad root"))
-		m = strings.Join([]string{StorageVersion, "0", lock.String(), badRoot.String(), gcGen.String(), tableName.String(), "0"}, ":")
-		b, err := tryClobberManifest(fm.dir, m)
-		require.NoError(t, err, string(b))
-		return err
-	})
-
-	require.NoError(t, err)
-	assert.True(exists)
-	assert.Equal(constants.NomsVersion, upstream.nbfVers)
-	assert.Equal(newRoot, upstream.root)
-	if assert.Len(upstream.specs, 1) {
-		assert.Equal(tableName.String(), upstream.specs[0].name.String())
-		assert.Equal(uint32(0), upstream.specs[0].chunkCount)
-	}
-}
-
 func TestFileManifestUpdateWontClobberOldVersion(t *testing.T) {
 	assert := assert.New(t)
 	fm := makeFileManifestTempDir(t)
@@ -119,11 +85,11 @@ func TestFileManifestUpdateWontClobberOldVersion(t *testing.T) {
 	stats := &Stats{}
 
 	// Simulate another process having already put old Noms data in dir/.
-	m := strings.Join([]string{StorageVersion, "0", addr{}.String(), hash.Hash{}.String(), addr{}.String()}, ":")
+	m := strings.Join([]string{StorageVersion, "0", hash.Hash{}.String(), hash.Hash{}.String(), hash.Hash{}.String()}, ":")
 	err := clobberManifest(fm.dir, m)
 	require.NoError(t, err)
 
-	_, err = fm.Update(context.Background(), addr{}, manifestContents{}, stats, nil)
+	_, err = fm.Update(context.Background(), hash.Hash{}, manifestContents{}, stats, nil)
 	assert.Error(err)
 }
 
@@ -134,13 +100,14 @@ func TestFileManifestUpdateEmpty(t *testing.T) {
 	stats := &Stats{}
 
 	l := computeAddr([]byte{0x01})
-	upstream, err := fm.Update(context.Background(), addr{}, manifestContents{nbfVers: constants.NomsVersion, lock: l}, stats, nil)
+	upstream, err := fm.Update(context.Background(), hash.Hash{}, manifestContents{nbfVers: constants.FormatLD1String, lock: l}, stats, nil)
 	require.NoError(t, err)
 	assert.Equal(l, upstream.lock)
 	assert.True(upstream.root.IsEmpty())
 	assert.Empty(upstream.specs)
 
-	fm2 := fileManifest{fm.dir} // Open existent, but empty manifest
+	fm2, err := getFileManifest(context.Background(), fm.dir, asyncFlush) // Open existent, but empty manifest
+	require.NoError(t, err)
 	exists, upstream, err := fm2.ParseIfExists(context.Background(), stats, nil)
 	require.NoError(t, err)
 	assert.True(exists)
@@ -149,7 +116,7 @@ func TestFileManifestUpdateEmpty(t *testing.T) {
 	assert.Empty(upstream.specs)
 
 	l2 := computeAddr([]byte{0x02})
-	upstream, err = fm2.Update(context.Background(), l, manifestContents{nbfVers: constants.NomsVersion, lock: l2}, stats, nil)
+	upstream, err = fm2.Update(context.Background(), l, manifestContents{nbfVers: constants.FormatLD1String, lock: l2}, stats, nil)
 	require.NoError(t, err)
 	assert.Equal(l2, upstream.lock)
 	assert.True(upstream.root.IsEmpty())
@@ -164,17 +131,17 @@ func TestFileManifestUpdate(t *testing.T) {
 
 	// First, test winning the race against another process.
 	contents := manifestContents{
-		nbfVers: constants.NomsVersion,
+		nbfVers: constants.FormatLD1String,
 		lock:    computeAddr([]byte("locker")),
 		root:    hash.Of([]byte("new root")),
 		specs:   []tableSpec{{computeAddr([]byte("a")), 3}},
 	}
-	upstream, err := fm.Update(context.Background(), addr{}, contents, stats, func() error {
+	upstream, err := fm.Update(context.Background(), hash.Hash{}, contents, stats, func() error {
 		// This should fail to get the lock, and therefore _not_ clobber the manifest. So the Update should succeed.
 		lock := computeAddr([]byte("nolock"))
 		newRoot2 := hash.Of([]byte("noroot"))
-		gcGen := addr{}
-		m := strings.Join([]string{StorageVersion, constants.NomsVersion, lock.String(), newRoot2.String(), gcGen.String()}, ":")
+		gcGen := hash.Hash{}
+		m := strings.Join([]string{StorageVersion, constants.FormatLD1String, lock.String(), newRoot2.String(), gcGen.String()}, ":")
 		b, err := tryClobberManifest(fm.dir, m)
 		require.NoError(t, err, string(b))
 		return nil
@@ -185,8 +152,8 @@ func TestFileManifestUpdate(t *testing.T) {
 	assert.Equal(contents.specs, upstream.specs)
 
 	// Now, test the case where the optimistic lock fails, and someone else updated the root since last we checked.
-	contents2 := manifestContents{lock: computeAddr([]byte("locker 2")), root: hash.Of([]byte("new root 2")), nbfVers: constants.NomsVersion}
-	upstream, err = fm.Update(context.Background(), addr{}, contents2, stats, nil)
+	contents2 := manifestContents{lock: computeAddr([]byte("locker 2")), root: hash.Of([]byte("new root 2")), nbfVers: constants.FormatLD1String}
+	upstream, err = fm.Update(context.Background(), hash.Hash{}, contents2, stats, nil)
 	require.NoError(t, err)
 	assert.Equal(contents.lock, upstream.lock)
 	assert.Equal(contents.root, upstream.root)
@@ -200,12 +167,12 @@ func TestFileManifestUpdate(t *testing.T) {
 	// Now, test the case where the optimistic lock fails because someone else updated only the tables since last we checked
 	jerkLock := computeAddr([]byte("jerk"))
 	tableName := computeAddr([]byte("table1"))
-	gcGen := addr{}
-	m := strings.Join([]string{StorageVersion, constants.NomsVersion, jerkLock.String(), contents2.root.String(), gcGen.String(), tableName.String(), "1"}, ":")
+	gcGen := hash.Hash{}
+	m := strings.Join([]string{StorageVersion, constants.FormatLD1String, jerkLock.String(), contents2.root.String(), gcGen.String(), tableName.String(), "1"}, ":")
 	err = clobberManifest(fm.dir, m)
 	require.NoError(t, err)
 
-	contents3 := manifestContents{lock: computeAddr([]byte("locker 3")), root: hash.Of([]byte("new root 3")), nbfVers: constants.NomsVersion}
+	contents3 := manifestContents{lock: computeAddr([]byte("locker 3")), root: hash.Of([]byte("new root 3")), nbfVers: constants.FormatLD1String}
 	upstream, err = fm.Update(context.Background(), upstream.lock, contents3, stats, nil)
 	require.NoError(t, err)
 	assert.Equal(jerkLock, upstream.lock)

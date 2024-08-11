@@ -1,29 +1,47 @@
-<img height="100" src="./docs/Dolt-Logo@3x.svg"/>
+<img height="100" src="./images/Dolt-Logo@3x.svg"/>
 
 # Dolt is Git for Data!
 
 Dolt is a SQL database that you can fork, clone, branch, merge, push
-and pull just like a git repository. Connect to Dolt just like any
-MySQL database to run queries or update the data using SQL
-commands. Use the command line interface to import CSV files, commit
-your changes, push them to a remote, or merge your teammate's changes.
+and pull just like a Git repository. 
 
-All the commands you know for Git work exactly the same for Dolt. Git
-versions files, Dolt versions tables. It's like Git and MySQL had a
+Connect to Dolt just like any MySQL database to read or modify schema 
+and data. Version control functionality is exposed in SQL via system 
+tables, functions, and procedures. 
+
+Or, use the Git-like command line interface to import CSV files, commit 
+your changes, push them to a remote, or merge your teammate's changes.
+All the commands you know for Git work exactly the same for Dolt. 
+
+Git versions files. Dolt versions tables. It's like Git and MySQL had a
 baby.
 
 We also built [DoltHub](https://www.dolthub.com), a place to share
 Dolt databases. We host public data for free. If you want to host
-your own version of DoltHub, we have [DoltLab](https://www.doltlab.com).
+your own version of DoltHub, we have [DoltLab](https://www.doltlab.com). 
+If you want us to run a Dolt server for you, we have [Hosted Dolt](https://hosted.doltdb.com). 
+If you are looking for a Postgres version of Dolt, we built 
+[DoltgreSQL](https://github.com/dolthub/doltgresql). Warning, it's 
+early Alpha. Dolt is production-ready.
 
 [Join us on Discord](https://discord.com/invite/RFwfYpu) to say hi and
-ask questions.
+ask questions, or [check out our roadmap](https://docs.dolthub.com/other/roadmap) 
+to see what we're building next.
 
-## What's it for?
+# Video Introduction
+
+[![Dolt Explainer Video](https://img.youtube.com/vi/H2iZy0Cme10/maxresdefault.jpg)](https://www.youtube.com/watch?v=H2iZy0Cme10)
+
+# What's it for?
 
 Lots of things! Dolt is a generally useful tool with countless
 applications. But if you want some ideas, [here's how people are using
-it so far](https://www.dolthub.com/blog/2021-03-09-dolt-use-cases-in-the-wild/).
+it so far](https://www.dolthub.com/blog/2022-07-11-dolt-case-studies/).
+
+Dolt can be [set up as a replica of your existing MySQL or MariaDB](https://www.dolthub.com/blog/2023-02-17-binlog-replication-preview/)
+database using standard MySQL binlog replication. Every write becomes
+a Dolt commit. This is a great way to get the version control benefits 
+of Dolt and keep an existing MySQL or MariaDB database. 
 
 # Dolt CLI
 
@@ -37,6 +55,7 @@ Valid commands for dolt are
                  add - Add table changes to the list of staged table changes.
                 diff - Diff a table.
                reset - Remove table changes from the list of staged table changes.
+               clean - Remove untracked tables from working set.
               commit - Record changes to the repository.
                  sql - Run a SQL query against tables in repository.
           sql-server - Start a MySQL-compatible server.
@@ -46,6 +65,7 @@ Valid commands for dolt are
             checkout - Checkout a branch or overwrite a table from HEAD.
                merge - Merge a branch.
            conflicts - Commands for viewing and resolving merge conflicts.
+         cherry-pick - Apply the changes introduced by an existing commit.
               revert - Undo the changes introduced in a commit.
                clone - Clone from a remote data repository.
                fetch - Update the database from a remote data repository.
@@ -62,7 +82,7 @@ Valid commands for dolt are
                  tag - Create, list, delete tags.
                blame - Show what revision and author last modified each row of a table.
          constraints - Commands for handling constraints.
-             migrate - Executes a repository migration to update to the latest format.
+             migrate - Executes a database migration to use the latest Dolt data format.
          read-tables - Fetch table(s) at a specific commit into a new dolt repo
                   gc - Cleans up unreferenced data from the repository.
        filter-branch - Edits the commit history using the provided query.
@@ -73,11 +93,11 @@ Valid commands for dolt are
 
 # Installation
 
-Dolt is a single ~68 megabyte program. 
+Dolt is a single ~103 megabyte program. 
 
 ```bash
-dolt $ du -h /Users/timsehn//go/bin/dolt
- 68M	/Users/timsehn/go/bin/dolt
+dolt $ du -h /Users/timsehn/go/bin/dolt
+103M	/Users/timsehn/go/bin/dolt
 ```
 
 It's really easy to install. Download it and put it on your `PATH`. 
@@ -100,12 +120,31 @@ privileges or aren't comfortable running a script with them, you can download th
 for your platform from [the latest release](https://github.com/dolthub/dolt/releases), unzip it,
 and put the binary somewhere on your `$PATH`.
 
-### Homebrew
+### Linux
+
+#### Arch Linux
+
+Dolt is packaged in the official repositories for Arch Linux.
+
+```
+pacman -S dolt
+```
+
+### Mac
+
+#### Homebrew
 
 Dolt is on Homebrew, updated every release.
 
 ```
 brew install dolt
+```
+#### MacPorts
+
+On macOS, Dolt can also be installed via a [community-managed port](https://ports.macports.org/port/dolt/) via [MacPorts](https://www.macports.org):
+
+```sh
+sudo port install dolt
 ```
 
 ### Windows
@@ -114,7 +153,7 @@ Download the latest Microsoft Installer (`.msi` file) in
 [releases](https://github.com/dolthub/dolt/releases) and run
 it.
 
-For information on running on Windows, see [here](./docs/windows.md).
+For information on running on Windows, see [here](https://docs.dolthub.com/introduction/installation/windows).
 
 #### Chocolatey
 
@@ -124,14 +163,28 @@ You can install `dolt` using [Chocolatey](https://chocolatey.org/):
 choco install dolt
 ```
 
+#### Docker
+
+There are following official Docker images for Dolt:
+
+* [`dolthub/dolt`](https://hub.docker.com/r/dolthub/dolt) for running Dolt
+as CLI tool.
+* [`dolthub/dolt-sql-server`](https://hub.docker.com/r/dolthub/dolt-sql-server) for running Dolt in server mode.
+
 ## From Source
 
-Make sure you have Go installed, and that `go` is in your path.
+Make sure you have Go installed, and that `go` is in your path. Dolt has a dependency on [cgo](https://pkg.go.dev/cmd/cgo), so you will need a working C compiler and toolchain as well.
 
 Clone this repository and cd into the `go` directory. Then run:
 
 ```
 go install ./cmd/dolt
+```
+
+The output will be in `$GOPATH/bin`, which defaults to `~/go/bin`. To test your build, try:
+
+```
+~/go/bin/dolt version
 ```
 
 # Configuration
@@ -167,6 +220,8 @@ Dolt needs a place to store your databases. I'm going to put my databases in `~/
 
 Any databases you create will be stored in this directory. So, for this example, a directory named `getting_started` will be created here once you run `create database getting_started`. Navigating to `~/dolt/getting_started` will allow you to access this database using the Dolt command line.
 
+NOTE: For this example, the `getting_started` directory will be created after you run `create database getting_started;` in a SQL shell in the [Create a schema section](#create-a-schema). Don't do anything except make the directory and navigate to it just yet.
+
 ## Start a MySQL-compatible database server
 
 Dolt ships with a MySQL compatible database server built in. To start it you use the command `dolt sql-server`. Running this command starts the server on port 3306. 
@@ -183,7 +238,7 @@ Your terminal will just hang there. This means the server is running. Any errors
 In the new terminal, we will now connect to the running database server using a client. Dolt also ships with a MySQL compatible client. 
 
 ```bash
-% dolt sql-client
+% dolt -u root -p "" sql
 # Welcome to the Dolt MySQL client.
 # Statements must be terminated with ';'.
 # "exit" or "quit" (or Ctrl-D) to exit.
@@ -207,7 +262,7 @@ MySQL comes with a MySQL server called `mysqld` and a MySQL client called `mysql
 mysql  Ver 8.0.29 for macos12.2 on x86_64 (Homebrew)
 ```
 
-Now, to connect the `mysql` client to Dolt, you have to force the MySQL client through the TCP interface by passing in a host and port. The default is the socket interface which Dolt does not support. The MySQL client also requires you specify a user, in this case `root`.
+Now, to connect the `mysql` client to Dolt, you are going to force the MySQL client through the TCP interface by passing in a host and port. The default is the socket interface which Dolt supports, but is only available on `localhost`. So, it's better to show off the TCP interface. The MySQL client also requires you specify a user, in this case `root`.
 
 ```bash
 % mysql --host 127.0.0.1 --port 3306 -uroot
@@ -317,7 +372,7 @@ mysql> select * from dolt_log;
 
 There you have it. Your schema is created and you have a Dolt commit tracking the creation, as seen in the `dolt_log` system table.
 
-Note, a Dolt commit is different than a standard SQL transaction `COMMIT`. In this case, I am running the database with [`AUTOCOMMIT`](https://dev.mysql.com/doc/refman/5.6/en/innodb-autocommit-commit-rollback.html) on, so each SQL statement is automatically generating a transaction `COMMIT`. If you want system to generate a Dolt commit for every transaction use the system variable,[`@@dolt_transaction_commit`](https://docs.dolthub.com/sql-reference/version-control/dolt-sysvars#dolt_transaction_commit).
+Note, a Dolt commit is different than a standard SQL transaction `COMMIT`. In this case, I am running the database with [`AUTOCOMMIT`](https://dev.mysql.com/doc/refman/5.6/en/innodb-autocommit-commit-rollback.html) on, so each SQL statement is automatically generating a transaction `COMMIT`. If you want system to generate a Dolt commit for every transaction use the system variable, [`@@dolt_transaction_commit`](https://docs.dolthub.com/sql-reference/version-control/dolt-sysvars#dolt_transaction_commit).
 
 ## Insert some data
 
@@ -340,7 +395,7 @@ mysql> select * from employees where first_name='Brian';
 +------+------------+------------+
 2 rows in set (0.00 sec)
 
-mysql> mysql> insert into teams values 
+mysql> insert into teams values 
     (0, 'Engineering'), 
     (1, 'Sales');
 Query OK, 2 rows affected (0.00 sec)
@@ -489,9 +544,8 @@ mysql> show tables;
 3 rows in set (0.01 sec)
 ```
 
-Dolt makes operating databases less error prone. You can always back out changes you have in progress or rewind to a known good state. You also have the ability to undo specific commits using [`dolt_revert()`](https://docs.dolthub.com/sql-reference/version-control/dolt-sql-procedures#dolt_revert).
+Dolt makes operating databases less error prone. You can always back out changes you have in progress or rewind to a known good state. You also have the ability to undo specific commits using [`dolt_revert()`](https://docs.dolthub.com/sql-reference/version-control/dolt-sql-procedures#dolt_revert). Even if you accidentally run `drop database` on the wrong database, Dolt lets you undo that by calling the [`dolt_undrop()` stored procedure](https://docs.dolthub.com/sql-reference/version-control/dolt-sql-procedures#dolt_undrop).
 
-Note, the only unrecoverable SQL statement in Dolt is `drop database`. This deletes the database and all of it's history on disk. `drop database` works this way for SQL tool compatibility as it is common for import tools to issue a `drop database` to clear all database state before an import. Dolt implements [remotes](https://docs.dolthub.com/concepts/dolt/remotes) like in Git so you can maintain an offline copy for backup using clone, fetch, push, and pull. Maintaining a remote copy allows you to restore in the case of an errant `drop database` query. 
 
 ## See the data in a SQL Workbench
 
@@ -499,11 +553,11 @@ Hate the command line? Let's use [Tableplus](https://tableplus.com/) to make som
 
 Now, to connect you must select MySQL as the connection type. Then enter a name for your connection, `getting_started` as your database, and `root` as your user.
 
-![Tableplus Connection](./docs/getting-started-tp-connect.png)
+![Tableplus Connection](./images/getting-started-tp-connect.png)
 
 Click connect and you'll be presented with a familiar database workbench GUI.
 
-![Tableplus](./docs/getting-started-tp.png)
+![Tableplus](./images/getting-started-tp.png)
 
 ## Make changes on a branch
 
@@ -517,12 +571,12 @@ update employees SET first_name='Timothy' where first_name='Tim';
 insert INTO employees (id, first_name, last_name) values (4,'Daylon', 'Wilkins');
 insert into employees_teams(team_id, employee_id) values (0,4);
 delete from employees_teams where employee_id=0 and team_id=1;
-call dolt_commit('-am', 'Modifications on a branch')
+call dolt_commit('-am', 'Modifications on a branch');
 ```
 
 Here's the result in Tableplus.
 
-![New Updates](./docs/getting-started-new-updates.png)
+![New Updates](./images/getting-started-new-updates.png)
 
 Back in my terminal, I cannot see the table modifications made in Tableplus because they happened on a different branch than the one I have checked out in my session. 
 
@@ -572,10 +626,10 @@ mysql> select * from employees as of 'modifications';
 5 rows in set (0.01 sec)
 ```
 
-If I'd like to see the diff between the two branches, I can use the `dolt_diff()` table function. It takes the table name and two branches as arguments.
+If I'd like to see the diff between the two branches, I can use the `dolt_diff()` table function. It takes two branches and the table name as arguments.
 
 ```
-mysql> select * from dolt_diff('employees', 'main','modifications');
+mysql> select * from dolt_diff('main', 'modifications', 'employees');
 +--------------+---------------+-------+---------------+-------------------------+----------------+-----------------+---------+-------------+-------------------------+-----------+
 | to_last_name | to_first_name | to_id | to_commit     | to_commit_date          | from_last_name | from_first_name | from_id | from_commit | from_commit_date        | diff_type |
 +--------------+---------------+-------+---------------+-------------------------+----------------+-----------------+---------+-------------+-------------------------+-----------+
@@ -774,9 +828,13 @@ mysql> select to_commit,from_first_name,to_first_name from dolt_diff_employees
 
 Dolt provides powerful data audit capabilities down to individual cells. When, how, and why has each cell in your database changed over time?
 
-# Additonal Reading
+# Additional Reading
 
-Head over to [our documentation](https://docs.dolthub.com/introduction/what-is-dolt) now that you have a feel for Dolt.
+Head over to [our documentation](https://docs.dolthub.com/introduction/what-is-dolt) now that you have a feel for Dolt. You can also read about what we've been working on in [our blog](https://www.dolthub.com/blog/).
+
+# Security Policy
+
+[Dolt's current security policy](https://github.com/dolthub/dolt/blob/main/SECURITY.md) is maintained in this repository. Please follow the disclosure instructions there. Please do not initially report security issues in this repository's public GitHub issues.
 
 # Credits and License
 

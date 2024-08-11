@@ -19,13 +19,16 @@ teardown() {
 
     cd sakila
 
-    # tables in working set
+    # tables and views in working set
     run dolt ls
-    [ "${#lines[@]}" -eq 17 ]
+    [ "${#lines[@]}" -eq 24 ]
+
 
     # triggers
     run dolt sql -q "select trigger_name from information_schema.triggers;" -r csv
-    [ "$output" = "trigger_name
+    [ "$status" -eq 0 ]
+
+    [ "$output" = "TRIGGER_NAME
 customer_create_date
 payment_date
 rental_date
@@ -35,7 +38,7 @@ upd_film" ]
 
     # views
     run dolt sql -q "select table_name from information_schema.views;" -r csv
-    [ "$output" = "table_name
+    [ "$output" = "TABLE_NAME
 actor_info
 customer_list
 film_list

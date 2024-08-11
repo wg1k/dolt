@@ -18,9 +18,10 @@ import (
 	"context"
 	"fmt"
 
-	fb "github.com/google/flatbuffers/go"
+	fb "github.com/dolthub/flatbuffers/v23/go"
 
 	"github.com/dolthub/dolt/go/gen/fb/serial"
+	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/marshal"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -82,20 +83,27 @@ func serializeNomsForeignKeys(ctx context.Context, vrw types.ValueReadWriter, fk
 	return fkMapEditor.Map(ctx)
 }
 
-// deserializeNomsForeignKeys returns a new ForeignKeyCollection using the provided map returned previously by GetMap.
+// deserializeFlatbufferForeignKeys returns a new ForeignKeyCollection using the provided map returned previously by GetMap.
 func deserializeFlatbufferForeignKeys(msg types.SerialMessage) (*ForeignKeyCollection, error) {
 	if serial.GetFileID(msg) != serial.ForeignKeyCollectionFileID {
 		return nil, fmt.Errorf("expect Serial Message with ForeignKeyCollectionFileID")
 	}
 
-	c := serial.GetRootAsForeignKeyCollection(msg, 0)
+	var c serial.ForeignKeyCollection
+	err := serial.InitForeignKeyCollectionRoot(&c, msg, serial.MessagePrefixSz)
+	if err != nil {
+		return nil, err
+	}
 	collection := &ForeignKeyCollection{
 		foreignKeys: make(map[string]ForeignKey, c.ForeignKeysLength()),
 	}
 
 	var fk serial.ForeignKey
 	for i := 0; i < c.ForeignKeysLength(); i++ {
-		c.ForeignKeys(&fk, i)
+		_, err = c.TryForeignKeys(&fk, i)
+		if err != nil {
+			return nil, err
+		}
 
 		childCols := make([]uint64, fk.ChildTableColumnsLength())
 		for j := range childCols {
@@ -145,7 +153,7 @@ func deserializeFlatbufferForeignKeys(msg types.SerialMessage) (*ForeignKeyColle
 	return collection, nil
 }
 
-// serializeNomsForeignKeys serializes a ForeignKeyCollection as a types.Map.
+// serializeFlatbufferForeignKeys serializes a ForeignKeyCollection as a types.Map.
 func serializeFlatbufferForeignKeys(fkc *ForeignKeyCollection) types.SerialMessage {
 	foreignKeys := fkc.AllKeys()
 	offsets := make([]fb.UOffsetT, len(foreignKeys))
@@ -166,10 +174,10 @@ func serializeFlatbufferForeignKeys(fkc *ForeignKeyCollection) types.SerialMessa
 
 		fk := foreignKeys[i]
 		if fk.UnresolvedFKDetails.ReferencedTableColumns != nil {
-			unresolvedParent = serializeStringVector(b, fk.UnresolvedFKDetails.ReferencedTableColumns)
+			unresolvedParent = datas.SerializeStringVector(b, fk.UnresolvedFKDetails.ReferencedTableColumns)
 		}
 		if fk.UnresolvedFKDetails.TableColumns != nil {
-			unresolvedChild = serializeStringVector(b, fk.UnresolvedFKDetails.TableColumns)
+			unresolvedChild = datas.SerializeStringVector(b, fk.UnresolvedFKDetails.TableColumns)
 		}
 		parentCols = serializeUint64Vector(b, fk.ReferencedTableColumns)
 		childCols = serializeUint64Vector(b, fk.TableColumns)
@@ -203,20 +211,7 @@ func serializeFlatbufferForeignKeys(fkc *ForeignKeyCollection) types.SerialMessa
 	serial.ForeignKeyCollectionStart(b)
 	serial.ForeignKeyCollectionAddForeignKeys(b, vec)
 	o := serial.ForeignKeyCollectionEnd(b)
-	b.FinishWithFileIdentifier(o, []byte(serial.ForeignKeyCollectionFileID))
-	return types.SerialMessage(b.FinishedBytes())
-}
-
-func serializeStringVector(b *fb.Builder, s []string) fb.UOffsetT {
-	offs := make([]fb.UOffsetT, len(s))
-	for j := len(s) - 1; j >= 0; j-- {
-		offs[j] = b.CreateString(s[j])
-	}
-	b.StartVector(4, len(s), 4)
-	for j := len(s) - 1; j >= 0; j-- {
-		b.PrependUOffsetT(offs[j])
-	}
-	return b.EndVector(len(s))
+	return []byte(serial.FinishMessage(b, o, []byte(serial.ForeignKeyCollectionFileID)))
 }
 
 func serializeUint64Vector(b *fb.Builder, u []uint64) fb.UOffsetT {
@@ -227,10 +222,14 @@ func serializeUint64Vector(b *fb.Builder, u []uint64) fb.UOffsetT {
 	return b.EndVector(len(u))
 }
 
-func emptyForeignKeyCollection(msg types.SerialMessage) bool {
+func EmptyForeignKeyCollection(msg types.SerialMessage) (bool, error) {
 	if serial.GetFileID(msg) != serial.ForeignKeyCollectionFileID {
-		return false
+		return false, nil
 	}
-	c := serial.GetRootAsForeignKeyCollection(msg, 0)
-	return c.ForeignKeysLength() == 0
+	var c serial.ForeignKeyCollection
+	err := serial.InitForeignKeyCollectionRoot(&c, msg, serial.MessagePrefixSz)
+	if err != nil {
+		return false, err
+	}
+	return c.ForeignKeysLength() == 0, nil
 }

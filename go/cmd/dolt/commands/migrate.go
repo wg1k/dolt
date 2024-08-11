@@ -16,12 +16,15 @@ package commands
 
 import (
 	"context"
+	"os"
 
-	"github.com/fatih/color"
+	"github.com/dolthub/dolt/go/store/types"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
+	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
+	"github.com/dolthub/dolt/go/libraries/doltcore/migrate"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 )
 
@@ -29,14 +32,13 @@ const (
 	migrationPrompt = `Run "dolt migrate" to update this database to the latest data format`
 	migrationMsg    = "Migrating database to the latest data format"
 
-	migratePushFlag = "push"
-	migratePullFlag = "pull"
+	migrateDropConflictsFlag = "drop-conflicts"
 )
 
 var migrateDocs = cli.CommandDocumentationContent{
 	ShortDesc: "Executes a database migration to use the latest Dolt data format.",
 	LongDesc: `Migrate is a multi-purpose command to update the data format of a Dolt database. Over time, development 
-on Dolt requires changes to the on-disk data format. These changes are necessary to improve Database performance amd 
+on Dolt requires changes to the on-disk data format. These changes are necessary to improve Database performance and 
 correctness. Migrating to the latest format is therefore necessary for compatibility with the latest Dolt clients, and
 to take advantage of the newly released Dolt features.`,
 
@@ -62,9 +64,8 @@ func (cmd MigrateCmd) Docs() *cli.CommandDocumentation {
 }
 
 func (cmd MigrateCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsFlag(migratePushFlag, "", "Push all migrated branches to the remote")
-	ap.SupportsFlag(migratePullFlag, "", "Update all local tracking refs for a migrated remote")
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
+	ap.SupportsFlag(migrateDropConflictsFlag, "", "Drop any conflicts visited during the migration")
 	return ap
 }
 
@@ -74,15 +75,43 @@ func (cmd MigrateCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd MigrateCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd MigrateCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, _ := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, migrateDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, migrateDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	if apr.Contains(migratePushFlag) && apr.Contains(migratePullFlag) {
-		cli.PrintErrf(color.RedString("options --%s and --%s are mutually exclusive", migratePushFlag, migratePullFlag))
-		return 1
+	dropConflicts := apr.Contains(migrateDropConflictsFlag)
+	if err := MigrateDatabase(ctx, dEnv, dropConflicts); err != nil {
+		verr := errhand.BuildDError("migration failed").AddCause(err).Build()
+		return HandleVErrAndExitCode(verr, usage)
+	}
+	os.Exit(0)
+	return 0 // unreachable
+}
+
+// MigrateDatabase migrates the NomsBinFormat of |dEnv.DoltDB|.
+func MigrateDatabase(ctx context.Context, dEnv *env.DoltEnv, dropConflicts bool) error {
+	menv, err := migrate.NewEnvironment(ctx, dEnv)
+	if err != nil {
+		return err
+	}
+	menv.DropConflicts = dropConflicts
+
+	if curr := menv.Existing.DoltDB.Format(); types.IsFormat_DOLT(curr) {
+		cli.Println("database is already migrated")
+		return nil
 	}
 
-	return 0
+	p, err := menv.Migration.FS.Abs(".")
+	if err != nil {
+		return err
+	}
+	cli.Println("migrating database at tmp dir: ", p)
+
+	err = migrate.TraverseDAG(ctx, menv, menv.Existing.DoltDB, menv.Migration.DoltDB)
+	if err != nil {
+		return err
+	}
+
+	return migrate.SwapChunkStores(ctx, menv)
 }

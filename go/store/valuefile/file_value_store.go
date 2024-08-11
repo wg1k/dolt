@@ -16,6 +16,7 @@ package valuefile
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -101,7 +102,11 @@ func (f *FileValueStore) WriteValue(ctx context.Context, v types.Value) (types.R
 			return types.Ref{}, err
 		}
 
-		err = f.Put(ctx, c)
+		err = f.Put(ctx, c, func(c chunks.Chunk) chunks.GetAddrsCb {
+			return func(ctx context.Context, addrs hash.HashSet, _ chunks.PendingRefExists) error {
+				return types.AddrsFromNomsValue(c, f.nbf, addrs)
+			}
+		})
 
 		if err != nil {
 			return types.Ref{}, err
@@ -151,6 +156,11 @@ func (f *FileValueStore) Has(ctx context.Context, h hash.Hash) (bool, error) {
 	return ok, nil
 }
 
+func (f *FileValueStore) CacheHas(h hash.Hash) bool {
+	_, ok := f.chunks[h]
+	return ok
+}
+
 // HasMany returns the set of hashes that are absent from the store
 func (f *FileValueStore) HasMany(ctx context.Context, hashes hash.HashSet) (absent hash.HashSet, err error) {
 	f.chunkLock.Lock()
@@ -168,8 +178,31 @@ func (f *FileValueStore) HasMany(ctx context.Context, hashes hash.HashSet) (abse
 	return absent, nil
 }
 
-// Put puts a chunk inton the store
-func (f *FileValueStore) Put(ctx context.Context, c chunks.Chunk) error {
+func (f *FileValueStore) errorIfDangling(ctx context.Context, addrs hash.HashSet) error {
+	absent, err := f.HasMany(ctx, addrs)
+	if err != nil {
+		return err
+	}
+	if len(absent) != 0 {
+		s := absent.String()
+		return fmt.Errorf("Found dangling references to %s", s)
+	}
+	return nil
+}
+
+// Put puts a chunk into the store
+func (f *FileValueStore) Put(ctx context.Context, c chunks.Chunk, getAddrs chunks.GetAddrsCurry) error {
+	addrs := hash.NewHashSet()
+	err := getAddrs(c)(ctx, addrs, f.CacheHas)
+	if err != nil {
+		return err
+	}
+
+	err = f.errorIfDangling(ctx, addrs)
+	if err != nil {
+		return err
+	}
+
 	f.chunkLock.Lock()
 	defer f.chunkLock.Unlock()
 
@@ -180,6 +213,10 @@ func (f *FileValueStore) Put(ctx context.Context, c chunks.Chunk) error {
 // Version returns the nbf version string
 func (f *FileValueStore) Version() string {
 	return f.nbf.VersionString()
+}
+
+func (f *FileValueStore) AccessMode() chunks.ExclusiveAccessMode {
+	return chunks.ExclusiveAccessMode_Shared
 }
 
 // Rebase brings this ChunkStore into sync with the persistent storage's current root.  Has no impact here
@@ -257,4 +294,9 @@ func (f *FileValueStore) iterChunks(cb func(ch chunks.Chunk) error) error {
 	}
 
 	return nil
+}
+
+func (f *FileValueStore) PersistGhostHashes(ctx context.Context, refs hash.HashSet) error {
+	// Current unimplemented, but may be useful for testing someday.
+	panic("not implemented")
 }

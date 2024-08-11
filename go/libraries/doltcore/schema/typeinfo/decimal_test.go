@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,8 +122,8 @@ func TestDecimalConvertValueToNomsValue(t *testing.T) {
 		{
 			generateDecimalType(t, 15, 7),
 			true,
-			types.Decimal{},
-			true,
+			types.Decimal(decimal.RequireFromString("1")),
+			false,
 		},
 		{
 			generateDecimalType(t, 20, 5),
@@ -337,13 +338,13 @@ func TestDecimalMarshal(t *testing.T) {
 			"16976349273982359874209023948672021737840592720387475.271912873754", false},
 		{65, 12, "99999999999999999999999999999999999999999999999999999.9999999999999", "", true},
 
-		{20, 10, []byte{32}, "", true},
+		{20, 10, []byte{32}, "0", false},
 		{20, 10, time.Date(2019, 12, 12, 12, 12, 12, 0, time.UTC), "", true},
 	}
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v %v %v", test.precision, test.scale, test.val), func(t *testing.T) {
-			typ := &decimalType{sql.MustCreateDecimalType(test.precision, test.scale)}
+			typ := &decimalType{gmstypes.MustCreateDecimalType(test.precision, test.scale)}
 			vrw := types.NewMemoryValueStore()
 			val, err := typ.ConvertValueToNomsValue(context.Background(), vrw, test.val)
 			if test.expectedErr {

@@ -19,6 +19,7 @@ import (
 	"io"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 )
@@ -26,13 +27,13 @@ import (
 // TableOfTablesWithViolations is a sql.Table implementation that implements a system table which shows the
 // tables that contain constraint violations.
 type TableOfTablesWithViolations struct {
-	root *doltdb.RootValue
+	root doltdb.RootValue
 }
 
 var _ sql.Table = (*TableOfTablesWithViolations)(nil)
 
 // NewTableOfTablesConstraintViolations creates a TableOfTablesWithViolations.
-func NewTableOfTablesConstraintViolations(ctx *sql.Context, root *doltdb.RootValue) sql.Table {
+func NewTableOfTablesConstraintViolations(ctx *sql.Context, root doltdb.RootValue) sql.Table {
 	return &TableOfTablesWithViolations{root: root}
 }
 
@@ -49,14 +50,19 @@ func (totwv *TableOfTablesWithViolations) String() string {
 // Schema implements the interface sql.Table.
 func (totwv *TableOfTablesWithViolations) Schema() sql.Schema {
 	return []*sql.Column{
-		{Name: "table", Type: sql.Text, Source: doltdb.TableOfTablesWithViolationsName, PrimaryKey: true},
-		{Name: "num_violations", Type: sql.Uint64, Source: doltdb.TableOfTablesWithViolationsName, PrimaryKey: false},
+		{Name: "table", Type: types.Text, Source: doltdb.TableOfTablesWithViolationsName, PrimaryKey: true},
+		{Name: "num_violations", Type: types.Uint64, Source: doltdb.TableOfTablesWithViolationsName, PrimaryKey: false},
 	}
+}
+
+// Collation implements the interface sql.Table.
+func (totwv *TableOfTablesWithViolations) Collation() sql.CollationID {
+	return sql.Collation_Default
 }
 
 // Partitions implements the interface sql.Table.
 func (totwv *TableOfTablesWithViolations) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
-	tblNames, err := totwv.root.TablesWithConstraintViolations(ctx)
+	tblNames, err := doltdb.TablesWithConstraintViolations(ctx, totwv.root)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +80,7 @@ func (totwv *TableOfTablesWithViolations) Partitions(ctx *sql.Context) (sql.Part
 func (totwv *TableOfTablesWithViolations) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter, error) {
 	tblName := string(part.Key())
 	var rows []sql.Row
-	tbl, _, ok, err := totwv.root.GetTableInsensitive(ctx, tblName)
+	tbl, _, ok, err := doltdb.GetTableInsensitive(ctx, totwv.root, doltdb.TableName{Name: tblName})
 	if err != nil {
 		return nil, err
 	}

@@ -68,13 +68,13 @@ func (cmd LsCmd) EventType() eventsapi.ClientEventType {
 }
 
 func (cmd LsCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	ap.SupportsFlag("verbose", "v", "Verbose output, including key id.")
 	return ap
 }
 
 // Exec executes the command
-func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, lsDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
@@ -93,7 +93,7 @@ func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 }
 
 func getJWKHandler(dEnv *env.DoltEnv) func(string, int64, bool) bool {
-	current, valid, _ := dEnv.UserRPCCreds()
+	current, valid, _ := dEnv.UserDoltCreds()
 	first := false
 	return func(path string, size int64, isDir bool) (stop bool) {
 		if strings.HasSuffix(path, creds.JWKFileExtension) {

@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,30 +17,35 @@
 package serial
 
 import (
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type CommitClosure struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) *CommitClosure {
+func InitCommitClosureRoot(o *CommitClosure, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &CommitClosure{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) *CommitClosure {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) (*CommitClosure, error) {
 	x := &CommitClosure{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitCommitClosureRoot(x, buf, offset)
 }
 
-func (rcv *CommitClosure) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsCommitClosure(buf []byte, offset flatbuffers.UOffsetT) (*CommitClosure, error) {
+	x := &CommitClosure{}
+	return x, InitCommitClosureRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *CommitClosure) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if CommitClosureNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *CommitClosure) Table() flatbuffers.Table {
@@ -173,8 +178,10 @@ func (rcv *CommitClosure) MutateTreeLevel(n byte) bool {
 	return rcv._tab.MutateByteSlot(12, n)
 }
 
+const CommitClosureNumFields = 5
+
 func CommitClosureStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(CommitClosureNumFields)
 }
 func CommitClosureAddKeyItems(builder *flatbuffers.Builder, keyItems flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(keyItems), 0)

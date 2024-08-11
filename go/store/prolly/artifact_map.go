@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/pool"
@@ -40,10 +41,16 @@ const (
 	ArtifactTypeUniqueKeyViol
 	// ArtifactTypeChkConsViol is the type for check constraint violations.
 	ArtifactTypeChkConsViol
+	// ArtifactTypeNullViol is the type for nullability violations.
+	ArtifactTypeNullViol
+)
+
+const (
+	artifactMapPendingBufferSize = 650_000
 )
 
 type ArtifactMap struct {
-	tuples orderedTree[val.Tuple, val.Tuple, val.TupleDesc]
+	tuples tree.StaticMap[val.Tuple, val.Tuple, val.TupleDesc]
 	// the description of the source table where these artifacts come from
 	srcKeyDesc val.TupleDesc
 	keyDesc    val.TupleDesc
@@ -53,11 +60,11 @@ type ArtifactMap struct {
 // NewArtifactMap creates an artifact map based on |srcKeyDesc| which is the key descriptor for
 // the corresponding row map.
 func NewArtifactMap(node tree.Node, ns tree.NodeStore, srcKeyDesc val.TupleDesc) ArtifactMap {
-	keyDesc, valDesc := calcArtifactsDescriptors(srcKeyDesc)
-	tuples := orderedTree[val.Tuple, val.Tuple, val.TupleDesc]{
-		root:  node,
-		ns:    ns,
-		order: keyDesc,
+	keyDesc, valDesc := mergeArtifactsDescriptorsFromSource(srcKeyDesc)
+	tuples := tree.StaticMap[val.Tuple, val.Tuple, val.TupleDesc]{
+		Root:      node,
+		NodeStore: ns,
+		Order:     keyDesc,
 	}
 	return ArtifactMap{
 		tuples:     tuples,
@@ -70,7 +77,9 @@ func NewArtifactMap(node tree.Node, ns tree.NodeStore, srcKeyDesc val.TupleDesc)
 // NewArtifactMapFromTuples creates an artifact map based on |srcKeyDesc| which is the key descriptor for
 // the corresponding row map and inserts the given |tups|. |tups| must be a key followed by a value.
 func NewArtifactMapFromTuples(ctx context.Context, ns tree.NodeStore, srcKeyDesc val.TupleDesc, tups ...val.Tuple) (ArtifactMap, error) {
-	serializer := message.ProllyMapSerializer{Pool: ns.Pool()}
+	kd, vd := mergeArtifactsDescriptorsFromSource(srcKeyDesc)
+	serializer := message.NewMergeArtifactSerializer(kd, ns.Pool())
+
 	ch, err := tree.NewEmptyChunker(ctx, ns, serializer)
 	if err != nil {
 		return ArtifactMap{}, err
@@ -91,27 +100,41 @@ func NewArtifactMapFromTuples(ctx context.Context, ns tree.NodeStore, srcKeyDesc
 		return ArtifactMap{}, err
 	}
 
-	return NewArtifactMap(root, ns, srcKeyDesc), nil
+	tuples := tree.StaticMap[val.Tuple, val.Tuple, val.TupleDesc]{
+		Root:      root,
+		NodeStore: ns,
+		Order:     kd,
+	}
+	return ArtifactMap{
+		tuples:     tuples,
+		srcKeyDesc: srcKeyDesc,
+		keyDesc:    kd,
+		valDesc:    vd,
+	}, nil
 }
 
-func (m ArtifactMap) Count() int {
-	return m.tuples.count()
+func (m ArtifactMap) Count() (int, error) {
+	return m.tuples.Count()
 }
 
 func (m ArtifactMap) Height() int {
-	return m.tuples.height()
+	return m.tuples.Height()
 }
 
 func (m ArtifactMap) HashOf() hash.Hash {
-	return m.tuples.hashOf()
+	return m.tuples.HashOf()
 }
 
 func (m ArtifactMap) Node() tree.Node {
-	return m.tuples.root
+	return m.tuples.Root
+}
+
+func (m ArtifactMap) NodeStore() tree.NodeStore {
+	return m.tuples.NodeStore
 }
 
 func (m ArtifactMap) Format() *types.NomsBinFormat {
-	return m.tuples.ns.Format()
+	return m.tuples.NodeStore.Format()
 }
 
 func (m ArtifactMap) Descriptors() (key, val val.TupleDesc) {
@@ -119,33 +142,26 @@ func (m ArtifactMap) Descriptors() (key, val val.TupleDesc) {
 }
 
 func (m ArtifactMap) WalkAddresses(ctx context.Context, cb tree.AddressCb) error {
-	return m.tuples.walkAddresses(ctx, cb)
+	return m.tuples.WalkAddresses(ctx, cb)
 }
 
 func (m ArtifactMap) WalkNodes(ctx context.Context, cb tree.NodeCb) error {
-	return m.tuples.walkNodes(ctx, cb)
-}
-
-func (m ArtifactMap) Get(ctx context.Context, key val.Tuple, cb KeyValueFn[val.Tuple, val.Tuple]) (err error) {
-	return m.tuples.get(ctx, key, cb)
-}
-
-func (m ArtifactMap) Has(ctx context.Context, key val.Tuple) (ok bool, err error) {
-	return m.tuples.has(ctx, key)
+	return m.tuples.WalkNodes(ctx, cb)
 }
 
 func (m ArtifactMap) Pool() pool.BuffPool {
-	return m.tuples.ns.Pool()
+	return m.tuples.NodeStore.Pool()
 }
 
-func (m ArtifactMap) Editor() ArtifactsEditor {
+func (m ArtifactMap) Editor() *ArtifactsEditor {
 	artKD, artVD := m.Descriptors()
-	return ArtifactsEditor{
+	return &ArtifactsEditor{
 		srcKeyDesc: m.srcKeyDesc,
 		mut: MutableMap{
-			tuples:  m.tuples.mutate(),
-			keyDesc: m.keyDesc,
-			valDesc: m.valDesc,
+			tuples:     m.tuples.Mutate(),
+			keyDesc:    m.keyDesc,
+			valDesc:    m.valDesc,
+			maxPending: artifactMapPendingBufferSize,
 		},
 		artKB: val.NewTupleBuilder(artKD),
 		artVB: val.NewTupleBuilder(artVD),
@@ -157,7 +173,7 @@ func (m ArtifactMap) Editor() ArtifactsEditor {
 func (m ArtifactMap) IterAll(ctx context.Context) (ArtifactIter, error) {
 	numPks := m.srcKeyDesc.Count()
 	tb := val.NewTupleBuilder(m.srcKeyDesc)
-	itr, err := m.tuples.iterAll(ctx)
+	itr, err := m.tuples.IterAll(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -172,11 +188,11 @@ func (m ArtifactMap) IterAll(ctx context.Context) (ArtifactIter, error) {
 }
 
 func (m ArtifactMap) IterAllCVs(ctx context.Context) (ArtifactIter, error) {
-	itr, err := m.iterAllOfTypes(ctx, ArtifactTypeForeignKeyViol, ArtifactTypeUniqueKeyViol, ArtifactTypeChkConsViol)
-	if err != nil {
-		return nil, err
-	}
-	return itr, nil
+	return m.iterAllOfTypes(ctx,
+		ArtifactTypeForeignKeyViol,
+		ArtifactTypeUniqueKeyViol,
+		ArtifactTypeChkConsViol,
+		ArtifactTypeNullViol)
 }
 
 // IterAllConflicts returns an iterator for the conflicts.
@@ -279,8 +295,14 @@ func (m ArtifactMap) iterAllOfTypes(ctx context.Context, artTypes ...ArtifactTyp
 }
 
 func MergeArtifactMaps(ctx context.Context, left, right, base ArtifactMap, cb tree.CollisionFn) (ArtifactMap, error) {
-	serializer := message.ProllyMapSerializer{Pool: left.tuples.ns.Pool()}
-	tuples, err := mergeOrderedTrees(ctx, left.tuples, right.tuples, base.tuples, cb, serializer)
+	serializer := message.NewMergeArtifactSerializer(base.keyDesc, left.tuples.NodeStore.Pool())
+	// TODO: MergeArtifactMaps does not properly detect merge conflicts when one side adds a NULL to the end of its tuple.
+	// To fix this, accurate values of `leftSchemaChanged` and `rightSchemaChanged` must be computed.
+	// However, currently we do not expect the value of ArtifactMap.valDesc to be different across branches,
+	// so we can safely assume `false` for both parameters.
+	leftSchemaChanged := false
+	rightSchemaChanged := false
+	tuples, _, err := tree.MergeOrderedTrees(ctx, left.tuples, right.tuples, base.tuples, cb, leftSchemaChanged, rightSchemaChanged, serializer)
 	if err != nil {
 		return ArtifactMap{}, err
 	}
@@ -299,13 +321,22 @@ type ArtifactsEditor struct {
 	pool         pool.BuffPool
 }
 
-func (wr ArtifactsEditor) Add(ctx context.Context, srcKey val.Tuple, theirRootIsh hash.Hash, artType ArtifactType, meta []byte) error {
+// BuildArtifactKey builds a val.Tuple to be used to look up a value in this ArtifactsEditor. The key is composed
+// of |srcKey|, the primary key fields from the original table, followed by the hash of the source root, |srcRootish|,
+// and then the artifact type, |artType|.
+func (wr *ArtifactsEditor) BuildArtifactKey(_ context.Context, srcKey val.Tuple, srcRootish hash.Hash, artType ArtifactType) val.Tuple {
 	for i := 0; i < srcKey.Count(); i++ {
 		wr.artKB.PutRaw(i, srcKey.GetField(i))
 	}
-	wr.artKB.PutAddress(srcKey.Count(), theirRootIsh)
+	wr.artKB.PutCommitAddr(srcKey.Count(), srcRootish)
 	wr.artKB.PutUint8(srcKey.Count()+1, uint8(artType))
-	key := wr.artKB.Build(wr.pool)
+	return wr.artKB.Build(wr.pool)
+}
+
+// Add adds an artifact entry to this editor. The key for the entry includes all the primary key fields from the
+// underlying table (|srcKey|), the hash of the source root (|srcRootish|), and the artifact type (|artType|).
+func (wr *ArtifactsEditor) Add(ctx context.Context, srcKey val.Tuple, srcRootish hash.Hash, artType ArtifactType, meta []byte) error {
+	key := wr.BuildArtifactKey(ctx, srcKey, srcRootish, artType)
 
 	wr.artVB.PutJSON(0, meta)
 	value := wr.artVB.Build(wr.pool)
@@ -313,12 +344,13 @@ func (wr ArtifactsEditor) Add(ctx context.Context, srcKey val.Tuple, theirRootIs
 	return wr.mut.Put(ctx, key, value)
 }
 
-// ReplaceFKConstraintViolation replaces foreign key constraint violations that
-// match the given one but have a different commit hash. If no existing violation
-// exists, the given will be inserted.
-func (wr ArtifactsEditor) ReplaceFKConstraintViolation(ctx context.Context, srcKey val.Tuple, theirRootIsh hash.Hash, meta ConstraintViolationMeta) error {
-	rng := ClosedRange(srcKey, srcKey, wr.srcKeyDesc)
-	itr, err := wr.mut.IterRange(ctx, rng)
+// ReplaceConstraintViolation replaces constraint violations that match the
+// given one but have a different commit hash. If no existing violation exists,
+// the given will be inserted. Returns true if a violation was replaced. If an
+// existing violation exists but has a different |meta.VInfo| value then
+// ErrMergeArtifactCollision is a returned.
+func (wr *ArtifactsEditor) ReplaceConstraintViolation(ctx context.Context, srcKey val.Tuple, srcRootish hash.Hash, artType ArtifactType, meta ConstraintViolationMeta) error {
+	itr, err := wr.mut.IterRange(ctx, PrefixRange(srcKey, wr.srcKeyDesc))
 	if err != nil {
 		return err
 	}
@@ -334,7 +366,11 @@ func (wr ArtifactsEditor) ReplaceFKConstraintViolation(ctx context.Context, srcK
 	var art Artifact
 	var currMeta ConstraintViolationMeta
 	for art, err = aItr.Next(ctx); err == nil; art, err = aItr.Next(ctx) {
-		if art.ArtType != ArtifactTypeForeignKeyViol {
+		// prefix scanning sometimes returns keys not in the range
+		if bytes.Compare(art.SourceKey, srcKey) != 0 {
+			continue
+		}
+		if art.ArtType != artType {
 			continue
 		}
 
@@ -344,6 +380,9 @@ func (wr ArtifactsEditor) ReplaceFKConstraintViolation(ctx context.Context, srcK
 		}
 
 		if bytes.Compare(currMeta.Value, meta.Value) == 0 {
+			if bytes.Compare(currMeta.VInfo, meta.VInfo) != 0 {
+				return artifactCollisionErr(srcKey, wr.srcKeyDesc, currMeta.VInfo, meta.VInfo)
+			}
 			// Key and Value is the same, so delete this
 			err = wr.Delete(ctx, art.ArtKey)
 			if err != nil {
@@ -359,7 +398,7 @@ func (wr ArtifactsEditor) ReplaceFKConstraintViolation(ctx context.Context, srcK
 	if err != nil {
 		return err
 	}
-	err = wr.Add(ctx, srcKey, theirRootIsh, ArtifactTypeForeignKeyViol, d)
+	err = wr.Add(ctx, srcKey, srcRootish, artType, d)
 	if err != nil {
 		return err
 	}
@@ -367,12 +406,24 @@ func (wr ArtifactsEditor) ReplaceFKConstraintViolation(ctx context.Context, srcK
 	return nil
 }
 
-func (wr ArtifactsEditor) Delete(ctx context.Context, key val.Tuple) error {
+func artifactCollisionErr(key val.Tuple, desc val.TupleDesc, old, new []byte) error {
+	return fmt.Errorf("error storing constraint violation for primary key (%s): another violation already exists\n"+
+		"new violation: %s old violation: (%s)", desc.Format(key), string(old), string(new))
+}
+
+func (wr *ArtifactsEditor) Delete(ctx context.Context, key val.Tuple) error {
 	return wr.mut.Delete(ctx, key)
 }
 
-func (wr ArtifactsEditor) Flush(ctx context.Context) (ArtifactMap, error) {
-	m, err := wr.mut.Map(ctx)
+// Has returns true if |key| is present in the underlying map being edited, including any in-flight edits.
+func (wr *ArtifactsEditor) Has(ctx context.Context, key val.Tuple) (bool, error) {
+	return wr.mut.Has(ctx, key)
+}
+
+func (wr *ArtifactsEditor) Flush(ctx context.Context) (ArtifactMap, error) {
+	s := message.NewMergeArtifactSerializer(wr.artKB.Desc, wr.NodeStore().Pool())
+
+	m, err := wr.mut.flushWithSerializer(ctx, s)
 	if err != nil {
 		return ArtifactMap{}, err
 	}
@@ -383,6 +434,10 @@ func (wr ArtifactsEditor) Flush(ctx context.Context) (ArtifactMap, error) {
 		keyDesc:    wr.mut.keyDesc,
 		valDesc:    wr.mut.valDesc,
 	}, nil
+}
+
+func (wr *ArtifactsEditor) NodeStore() tree.NodeStore {
+	return wr.mut.NodeStore()
 }
 
 // ConflictArtifactIter iters all the conflicts in ArtifactMap.
@@ -403,8 +458,8 @@ func (itr *ConflictArtifactIter) Next(ctx context.Context) (ConflictArtifact, er
 	}
 
 	return ConflictArtifact{
-		Key:          art.Key,
-		TheirRootIsh: art.TheirRootIsh,
+		Key:          art.SourceKey,
+		TheirRootIsh: art.SourceRootish,
 		Metadata:     parsedMeta,
 	}, nil
 }
@@ -420,7 +475,6 @@ type ConflictArtifact struct {
 type ConflictMetadata struct {
 	// BaseRootIsh is the target hash of the working set holding the base value for the conflict.
 	BaseRootIsh hash.Hash `json:"bc"`
-	TableName   string    `json:"tn"`
 }
 
 // ConstraintViolationMeta is the json metadata for foreign key constraint violations
@@ -458,7 +512,7 @@ var _ ArtifactIter = multiArtifactTypeItr{}
 
 // newMultiArtifactTypeItr creates an iter that iterates an artifact if its type exists in |types|.
 func newMultiArtifactTypeItr(itr ArtifactIter, types []ArtifactType) multiArtifactTypeItr {
-	members := make([]bool, 5)
+	members := make([]bool, 6)
 	for _, t := range types {
 		members[uint8(t)] = true
 	}
@@ -498,22 +552,22 @@ func (itr artifactIterImpl) Next(ctx context.Context) (Artifact, error) {
 	}
 
 	srcKey := itr.getSrcKeyFromArtKey(artKey)
-	cmHash, _ := itr.artKD.GetAddress(itr.numPks, artKey)
+	cmHash, _ := itr.artKD.GetCommitAddr(itr.numPks, artKey)
 	artType, _ := itr.artKD.GetUint8(itr.numPks+1, artKey)
 	metadata, _ := itr.artVD.GetJSON(0, v)
 
 	return Artifact{
-		ArtKey:       artKey,
-		Key:          srcKey,
-		TheirRootIsh: cmHash,
-		ArtType:      ArtifactType(artType),
-		Metadata:     metadata,
+		ArtKey:        artKey,
+		SourceKey:     srcKey,
+		SourceRootish: cmHash,
+		ArtType:       ArtifactType(artType),
+		Metadata:      metadata,
 	}, nil
 }
 
 func (itr artifactIterImpl) getSrcKeyFromArtKey(k val.Tuple) val.Tuple {
 	for i := 0; i < itr.numPks; i++ {
-		itr.tb.PutRaw(0, k.GetField(i))
+		itr.tb.PutRaw(i, k.GetField(i))
 	}
 	return itr.tb.Build(itr.pool)
 }
@@ -522,24 +576,23 @@ func (itr artifactIterImpl) getSrcKeyFromArtKey(k val.Tuple) val.Tuple {
 type Artifact struct {
 	// ArtKey is the key of the artifact itself
 	ArtKey val.Tuple
-	// Key is the key of the source row that the artifact references
-	Key val.Tuple
+	// SourceKey is the key of the source row that the artifact references
+	SourceKey val.Tuple
 	// TheirRootIsh is the working set hash or commit hash of the right in the merge
-	TheirRootIsh hash.Hash
+	SourceRootish hash.Hash
 	// ArtType is the type of the artifact
 	ArtType ArtifactType
 	// Metadata is the encoded json metadata
 	Metadata []byte
 }
 
-func calcArtifactsDescriptors(srcKd val.TupleDesc) (kd, vd val.TupleDesc) {
-
+func mergeArtifactsDescriptorsFromSource(srcKd val.TupleDesc) (kd, vd val.TupleDesc) {
 	// artifact key consists of keys of source schema, followed by target branch
 	// commit hash, and artifact type.
 	keyTypes := srcKd.Types
 
-	// target branch commit hash
-	keyTypes = append(keyTypes, val.Type{Enc: val.AddressEnc, Nullable: false})
+	// source branch commit hash
+	keyTypes = append(keyTypes, val.Type{Enc: val.CommitAddrEnc, Nullable: false})
 
 	// artifact type
 	keyTypes = append(keyTypes, val.Type{Enc: val.Uint8Enc, Nullable: false})
@@ -547,5 +600,41 @@ func calcArtifactsDescriptors(srcKd val.TupleDesc) (kd, vd val.TupleDesc) {
 	// json blob data
 	valTypes := []val.Type{{Enc: val.JSONEnc, Nullable: false}}
 
-	return val.NewTupleDescriptor(keyTypes...), val.NewTupleDescriptor(valTypes...)
+	// Add empty handlers for the new types
+	handlers := make([]val.TupleTypeHandler, len(keyTypes))
+	copy(handlers, srcKd.Handlers)
+
+	return val.NewTupleDescriptorWithArgs(val.TupleDescriptorArgs{Handlers: handlers}, keyTypes...), val.NewTupleDescriptor(valTypes...)
+}
+
+func ArtifactDebugFormat(ctx context.Context, m ArtifactMap) (string, error) {
+	kd, vd := m.Descriptors()
+	iter, err := m.tuples.IterAll(ctx)
+	if err != nil {
+		return "", err
+	}
+	c, err := m.Count()
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Artifact Map (count: %d) {\n", c))
+	for {
+		k, v, err := iter.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+
+		sb.WriteString("\t")
+		sb.WriteString(kd.Format(k))
+		sb.WriteString(": ")
+		sb.WriteString(vd.Format(v))
+		sb.WriteString(",\n")
+	}
+	sb.WriteString("}")
+	return sb.String(), nil
 }

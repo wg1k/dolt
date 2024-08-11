@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,12 +30,12 @@ import (
 )
 
 func TestGetComparisonType(t *testing.T) {
-	getId := expression.NewGetField(0, sql.Int64, "id", false)
-	getMedian := expression.NewGetField(1, sql.Int64, "median", false)
-	getAverage := expression.NewGetField(2, sql.Float64, "average", false)
-	litOne := expression.NewLiteral(int64(1), sql.Int64)
-	litTwo := expression.NewLiteral(int64(1), sql.Int64)
-	litThree := expression.NewLiteral(int64(1), sql.Int64)
+	getId := expression.NewGetField(0, gmstypes.Int64, "id", false)
+	getMedian := expression.NewGetField(1, gmstypes.Int64, "median", false)
+	getAverage := expression.NewGetField(2, gmstypes.Float64, "average", false)
+	litOne := expression.NewLiteral(int64(1), gmstypes.Int64)
+	litTwo := expression.NewLiteral(int64(1), gmstypes.Int64)
+	litThree := expression.NewLiteral(int64(1), gmstypes.Int64)
 
 	tests := []struct {
 		name             string
@@ -47,7 +47,7 @@ func TestGetComparisonType(t *testing.T) {
 	}{
 		{
 			"id = 1",
-			expression.NewEquals(getId, litOne).BinaryExpression,
+			expression.NewEquals(getId, litOne),
 			1,
 			1,
 			VariableConstCompare,
@@ -55,7 +55,7 @@ func TestGetComparisonType(t *testing.T) {
 		},
 		{
 			"1 = 1",
-			expression.NewEquals(litOne, litOne).BinaryExpression,
+			expression.NewEquals(litOne, litOne),
 			0,
 			2,
 			ConstConstCompare,
@@ -63,7 +63,7 @@ func TestGetComparisonType(t *testing.T) {
 		},
 		{
 			"average > float(median)",
-			expression.NewGreaterThan(getAverage, expression.NewConvert(getMedian, "float")).BinaryExpression,
+			expression.NewGreaterThan(getAverage, expression.NewConvert(getMedian, "float")),
 			2,
 			0,
 			VariableVariableCompare,
@@ -71,7 +71,7 @@ func TestGetComparisonType(t *testing.T) {
 		},
 		{
 			" > float(median)",
-			expression.NewInTuple(getId, expression.NewTuple(litOne, litTwo, litThree)).BinaryExpression,
+			expression.NewInTuple(getId, expression.NewTuple(litOne, litTwo, litThree)),
 			1,
 			3,
 			VariableInLiteralList,
@@ -219,12 +219,14 @@ func TestNewComparisonFunc(t *testing.T) {
 		lte        = "lte"
 	)
 
+	vrw := types.NewMemoryValueStore()
+
 	ops := make(map[string]CompareOp)
 	ops[eq] = EqualsOp{}
-	ops[gt] = GreaterOp{}
-	ops[gte] = GreaterEqualOp{}
-	ops[lt] = LessOp{}
-	ops[lte] = LessEqualOp{}
+	ops[gt] = GreaterOp{vrw}
+	ops[gte] = GreaterEqualOp{vrw}
+	ops[lt] = LessOp{vrw}
+	ops[lte] = LessEqualOp{vrw}
 
 	type funcTestVal struct {
 		name      string
@@ -243,10 +245,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare int literals -1 and -1",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewLiteral(int8(-1), sql.Int8),
-				Right: expression.NewLiteral(int64(-1), sql.Int64),
-			},
+			be: expression.NewEquals(
+				expression.NewLiteral(int8(-1), gmstypes.Int8),
+				expression.NewLiteral(int64(-1), gmstypes.Int64),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -268,10 +270,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare int literals -5 and 5",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewLiteral(int8(-5), sql.Int8),
-				Right: expression.NewLiteral(uint8(5), sql.Uint8),
-			},
+			be: expression.NewEquals(
+				expression.NewLiteral(int8(-5), gmstypes.Int8),
+				expression.NewLiteral(uint8(5), gmstypes.Uint8),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -293,10 +295,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare string literals b and a",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewLiteral("b", sql.Text),
-				Right: expression.NewLiteral("a", sql.Text),
-			},
+			be: expression.NewEquals(
+				expression.NewLiteral("b", gmstypes.Text),
+				expression.NewLiteral("a", gmstypes.Text),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -318,10 +320,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare int value to numeric string literals",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(0, sql.Int64, "col0", false),
-				Right: expression.NewLiteral("1", sql.Text),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(0, gmstypes.Int64, "col0", false),
+				expression.NewLiteral("1", gmstypes.Text),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -350,10 +352,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare date value to date string literals",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(2, sql.Datetime, "date", false),
-				Right: expression.NewLiteral("2000-01-01", sql.Text),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(2, gmstypes.Datetime, "date", false),
+				expression.NewLiteral("2000-01-01", gmstypes.Text),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -394,10 +396,10 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare col1 and col0",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(1, sql.Int64, "col1", false),
-				Right: expression.NewGetField(0, sql.Int64, "col0", false),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(1, gmstypes.Int64, "col1", false),
+				expression.NewGetField(0, gmstypes.Int64, "col0", false),
+			),
 			expectNewErr: false,
 			testVals: []funcTestVal{
 				{
@@ -444,40 +446,40 @@ func TestNewComparisonFunc(t *testing.T) {
 		{
 			name: "compare const and unknown column variable",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(0, sql.Int64, "unknown", false),
-				Right: expression.NewLiteral("1", sql.Text),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(0, gmstypes.Int64, "unknown", false),
+				expression.NewLiteral("1", gmstypes.Text),
+			),
 			expectNewErr: true,
 			testVals:     []funcTestVal{},
 		},
 		{
 			name: "compare variables with first unknown",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(0, sql.Int64, "unknown", false),
-				Right: expression.NewGetField(1, sql.Int64, "col1", false),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(0, gmstypes.Int64, "unknown", false),
+				expression.NewGetField(1, gmstypes.Int64, "col1", false),
+			),
 			expectNewErr: true,
 			testVals:     []funcTestVal{},
 		},
 		{
 			name: "compare variables with second unknown",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(1, sql.Int64, "col1", false),
-				Right: expression.NewGetField(0, sql.Int64, "unknown", false),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(1, gmstypes.Int64, "col1", false),
+				expression.NewGetField(0, gmstypes.Int64, "unknown", false),
+			),
 			expectNewErr: true,
 			testVals:     []funcTestVal{},
 		},
 		{
 			name: "variable with literal that can't be converted",
 			sch:  testSch,
-			be: expression.BinaryExpression{
-				Left:  expression.NewGetField(0, sql.Int64, "col0", false),
-				Right: expression.NewLiteral("not a number", sql.Text),
-			},
+			be: expression.NewEquals(
+				expression.NewGetField(0, gmstypes.Int64, "col0", false),
+				expression.NewLiteral("not a number", gmstypes.Text),
+			),
 			expectNewErr: true,
 			testVals:     []funcTestVal{},
 		},

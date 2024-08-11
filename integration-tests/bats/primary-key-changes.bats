@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 }
 
 teardown() {
@@ -71,7 +70,8 @@ teardown() {
     [ "$status" -eq 0 ]
 
     dolt sql -q "INSERT INTO t VALUES (1,1),(2,2),(2,2)"
-    run dolt sql -q "SELECT * FROM t" -r csv
+    dolt sql -q "SELECT * FROM t order by pk" -r csv
+    run dolt sql -q "SELECT * FROM t order by pk" -r csv
     [ "$status" -eq 0 ]
     [[ "${lines[1]}" =~ "1,1" ]] || false
     [[ "${lines[2]}" =~ '2,2' ]] || false
@@ -220,6 +220,7 @@ teardown() {
 
 @test "primary-key-changes: ff merge with primary key schema differences correctly works" {
     dolt sql -q "create table t(pk int PRIMARY KEY, val1 int, val2 int)"
+    dolt add .
     dolt sql -q "INSERT INTO t values (1,1,1)"
 
     dolt commit -am "cm1"
@@ -229,7 +230,7 @@ teardown() {
     dolt commit -am "cm2"
     dolt checkout main
 
-    run dolt merge test
+    run dolt merge test -m "merge other"
     [ "$status" -eq 0 ]
 
     run dolt sql -q "describe t;"
@@ -238,6 +239,7 @@ teardown() {
 
 @test "primary-key-changes: merge on branch with primary key dropped throws an error" {
     dolt sql -q "create table t(pk int PRIMARY KEY, val1 int, val2 int)"
+    dolt add .
     dolt sql -q "INSERT INTO t values (1,1,1)"
     dolt commit -am "cm1"
     dolt checkout -b test
@@ -257,13 +259,14 @@ teardown() {
     dolt sql -q "INSERT INTO t values (2,2,2)"
     dolt commit -am "cm3"
 
-    run dolt merge test
+    run dolt merge test -m "merge other"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ 'error: cannot merge two tables with different primary key sets' ]] || false
+    [[ "$output" =~ 'error: cannot merge because table t has different primary keys' ]] || false
 }
 
 @test "primary-key-changes: merge on branch with primary key added throws an error" {
     dolt sql -q "create table t(pk int, val1 int, val2 int)"
+    dolt add .
     dolt sql -q "INSERT INTO t values (1,1,1)"
     dolt commit -am "cm1"
     dolt checkout -b test
@@ -283,13 +286,43 @@ teardown() {
     dolt sql -q "INSERT INTO t values (2,2,2)"
     dolt commit -am "cm3"
 
-    run dolt merge test
+    run dolt merge test -m "merge other"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ 'error: cannot merge two tables with different primary key sets' ]] || false
+    [[ "$output" =~ 'error: cannot merge because table t has different primary keys' ]] || false
+}
+
+@test "primary-key-changes: merge on branches with different primary key from ancestor throws an error" {
+    dolt sql -q "create table t(pk int, val1 int, val2 int)"
+    dolt add .
+    dolt sql -q "INSERT INTO t values (1,1,1)"
+    dolt commit -am "cm1"
+    dolt checkout -b test
+
+    dolt sql -q "ALTER TABLE t add PRIMARY key (pk)"
+    dolt add .
+
+    run dolt status
+    [[ "$output" =~ 'Changes to be committed' ]] || false
+    [[ "$output" =~ ([[:space:]]*modified:[[:space:]]*t) ]] || false
+    ! [[ "$output" =~ 'deleted' ]] || false
+    ! [[ "$output" =~ 'new table' ]] || false
+
+    dolt commit -m "cm2"
+    dolt checkout main
+
+    dolt sql -q "ALTER TABLE t add PRIMARY key (pk)"
+    dolt sql -q "INSERT INTO t values (2,2,2)"
+    dolt commit -am "cm3"
+
+    run dolt merge test -m "merge other"
+    [ "$status" -eq 1 ]
+
+    [[ "$output" =~ 'error: cannot merge because table t has different primary keys' ]] || false
 }
 
 @test "primary-key-changes: diff on primary key schema change shows schema level diff but does not show row level diff" {
     dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, val int)"
+    dolt add .
     dolt sql -q "INSERT INTO t VALUES (1, 1)"
     dolt commit -am "cm1"
 
@@ -307,11 +340,12 @@ teardown() {
     dolt diff --data
     run dolt diff --data
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "warning: skipping data diff due to primary key set change" ]] || false
+    [[ "$output" =~ "Primary key sets differ between revisions for table 't', skipping data diff" ]] || false
 }
 
 @test "primary-key-changes: diff on composite schema" {
     dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, val int)"
+    dolt add .
     dolt sql -q "INSERT INTO t VALUES (1, 1)"
     dolt commit -am "cm1"
 
@@ -329,15 +363,15 @@ teardown() {
     [[ "$output" =~ '+  `val` int NOT NULL,' ]] || false
     [[ "$output" =~ '+  PRIMARY KEY (`pk`,`val`)' ]] || false
 
-    # Make sure there is not a data diff or summary diff
+    # Make sure there is not a data diff or stat diff
     dolt diff --data
     run dolt diff --data
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "warning: skipping data diff due to primary key set change" ]] || false
+    [[ "$output" =~ "Primary key sets differ between revisions for table 't', skipping data diff" ]] || false
 
-    run dolt diff --summary
+    run dolt diff --stat
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "diff summary will not compute due to primary key set change with table t" ]] || false
+    [[ "$output" =~ "failed to compute diff stat for table t: primary key set changed" ]] || false
 
     dolt add .
 
@@ -353,13 +387,14 @@ teardown() {
 }
 
 @test "primary-key-changes: dolt diff on working set shows correct status diff" {
+
     dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, val int)"
     dolt sql -q "INSERT INTO t VALUES (1, 1)"
     run dolt sql -q "ALTER TABLE t DROP PRIMARY key"
     [ "$status" -eq 0 ]
 
     run dolt status
-    [[ "$output" =~ 'Untracked files' ]] || false
+    [[ "$output" =~ 'Untracked tables' ]] || false
     [[ "$output" =~ ([[:space:]]*new table:[[:space:]]*t) ]] || false
     ! [[ "$output" =~ 'deleted' ]] || false
     ! [[ "$output" =~ 'modified' ]] || false
@@ -412,6 +447,7 @@ SQL
 
 @test "primary-key-changes: test whether dolt_commit_diff correctly returns a diff whether there is or isn't a schema change" {
     dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, val int)"
+    dolt add .
     dolt commit -am "cm0"
 
     dolt sql -q "INSERT INTO t VALUES (1, 1)"
@@ -435,7 +471,7 @@ SQL
     [ "$status" -eq 0 ]
     [[ "$output" =~ '| 0' ]] || false
     [[ "$output" =~ 'cannot render full diff between commits' ]] || false
-
+    
     run dolt sql -q "SELECT to_val,to_pk,from_val,from_pk from dolt_commit_diff_t where from_commit=HASHOF('HEAD~2') and to_commit=HASHOF('HEAD');" -r csv
     [[ "$output" =~ '3,3,,' ]] || false
     [[ "$output" =~ '4,4,,' ]] || false
@@ -448,11 +484,13 @@ SQL
 
     run dolt sql -q "ALTER TABLE child DROP PRIMARY KEY"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "error: can't drop index 'PRIMARY': needed in a foreign key constraint" ]] || false
+    [[ "$output" =~ "error: can't drop index 'PRIMARY': needed in foreign key constraint" ]] || false
 }
 
 @test "primary-key-changes: dolt constraints verify works gracefully with schema violations" {
+
     dolt sql -q "CREATE table t (pk int primary key, val int)"
+    dolt add .
     dolt commit -am "cm1"
 
     dolt sql -q "alter table t drop primary key"
@@ -467,6 +505,7 @@ SQL
 
 @test "primary-key-changes: add/drop primary key in different order" {
     dolt sql -q "CREATE table t (pk int primary key, val int)"
+    dolt add .
     dolt commit -am "cm1"
 
     dolt sql -q "alter table t drop primary key"
@@ -487,11 +526,12 @@ SQL
     run dolt sql -q "ALTER TABLE t ADD PRIMARY KEY (pk1)"
 
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "error: key column 'pk1' doesn't exist in table" ]] || false
+    [[ "$output" =~ "key column 'pk1' doesn't exist in table" ]] || false
 }
 
 @test "primary-key-changes: same primary key set in different order is detected and blocked on merge" {
     dolt sql -q "CREATE table t (pk int, val int, primary key (pk, val))"
+    dolt add .
     dolt commit -am "cm1"
 
     dolt checkout -b test
@@ -514,13 +554,13 @@ SQL
     dolt sql -q "INSERT INTO t VALUES (1,1)"
     dolt commit -am "insert"
 
-    run dolt merge test
+    run dolt merge test -m "merge other"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ 'error: cannot merge two tables with different primary key sets' ]] || false
+    [[ "$output" =~ 'error: cannot merge because table t has different primary keys' ]] || false
 
-    run dolt sql -q "SELECT DOLT_MERGE('test')"
+    run dolt sql -q "call dolt_merge('test')"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ 'error: cannot merge two tables with different primary key sets' ]] || false
+    [[ "$output" =~ 'error: cannot merge because table t has different primary keys' ]] || false
 
     skip "Dolt doesn't correctly store primary key order if it doesn't match the column order"
 }
@@ -551,6 +591,7 @@ SQL
 
 @test "primary-key-changes: column with duplicates throws an error when added as pk" {
     dolt sql -q "CREATE table t (pk int, val int)"
+    dolt add .
     dolt sql -q "INSERT INTO t VALUES (1,1),(2,1)"
     dolt commit -am "cm1"
 
@@ -654,12 +695,12 @@ alter table mydb.test add primary key(pk);
 SQL
     run dolt sql -q "show create table mydb.test"
     [ $status -eq 0 ]
-    [[ "$output" =~ "PRIMARY KEY" ]]
+    [[ "$output" =~ "PRIMARY KEY" ]] || false
 }
 
 @test "primary-key-changes: can add and drop primary keys on keyless db.table named tables" {
     dolt sql -q "CREATE DATABASE mydb"
-    dolt sql -q "CREATE TABLE mydb.test(pk INT, c1 LONGTEXT, c2 BIGINT, c3 INT)"
+    dolt sql -q "CREATE TABLE mydb.test(pk INT, c1 VARCHAR(10), c2 BIGINT, c3 INT)"
     dolt sql -q "ALTER TABLE mydb.test ADD PRIMARY KEY(pk, c1)"
     run dolt sql -q "SHOW CREATE TABLE mydb.test"
     [ $status -eq 0 ]
@@ -668,7 +709,7 @@ SQL
     dolt sql -q "ALTER TABLE mydb.test DROP PRIMARY KEY"
     run dolt sql -q "SHOW CREATE TABLE mydb.test"
     [ $status -eq 0 ]
-    [[ ! "$output" =~ "PRIMARY KEY" ]]
+    [[ ! "$output" =~ "PRIMARY KEY" ]] || false
 
     dolt sql -q "SHOW CREATE TABLE mydb.test" > output.txt
     run grep 'NOT NULL' output.txt

@@ -37,7 +37,7 @@ DELIM
 
     cat <<SQL > employees-sch.sql
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -119,7 +119,7 @@ teardown() {
     [[ "$output" =~ "Rows Processed: 2, Additions: 2, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
     # Sanity check
-    ! [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    ! [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
 
     # Validate that a successful import with no bad rows does not print the following
     ! [[ "$output" =~ "The following rows were skipped:" ]] || false
@@ -158,7 +158,7 @@ teardown() {
 @test "import-update-tables: update table using csv with newlines" {
     dolt sql <<SQL
 CREATE TABLE test (
-  pk LONGTEXT NOT NULL COMMENT 'tag:0',
+  pk varchar(20) NOT NULL COMMENT 'tag:0',
   c1 LONGTEXT COMMENT 'tag:1',
   c2 LONGTEXT COMMENT 'tag:2',
   c3 LONGTEXT COMMENT 'tag:3',
@@ -182,7 +182,7 @@ SQL
 @test "import-update-tables: update table using wrong json" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`idz\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`idz\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first namez\` LONGTEXT COMMENT 'tag:1',
   \`last namez\` LONGTEXT COMMENT 'tag:2',
   \`titlez\` LONGTEXT COMMENT 'tag:3',
@@ -221,7 +221,7 @@ SQL
 @test "import-update-tables: update table with a json with columns in different order" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -235,7 +235,7 @@ SQL
     [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
     run dolt schema export employees
-    [[ "$status" -eq 0 ]]
+    [[ "$status" -eq 0 ]] || false
     [[ "${lines[1]}" =~ "id" ]]         || false
     [[ "${lines[2]}" =~ "first name" ]] || false
     [[ "${lines[3]}" =~ "last name" ]]  || false
@@ -247,7 +247,7 @@ SQL
 @test "import-update-tables: update table with a csv with columns in different order" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -261,7 +261,85 @@ SQL
     [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
     run dolt schema export employees
-    [[ "$status" -eq 0 ]]
+    [[ "$status" -eq 0 ]] || false
+    [[ "${lines[1]}" =~ "id" ]]         || false
+    [[ "${lines[2]}" =~ "first name" ]] || false
+    [[ "${lines[3]}" =~ "last name" ]]  || false
+    [[ "${lines[4]}" =~ "title" ]]      || false
+    [[ "${lines[5]}" =~ "start date" ]] || false
+    [[ "${lines[6]}" =~ "end date" ]]   || false
+}
+
+@test "import-update-tables: update table with a csv with columns in different order, utf8 with bom" {
+    dolt sql <<SQL
+CREATE TABLE employees (
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
+  \`first name\` LONGTEXT COMMENT 'tag:1',
+  \`last name\` LONGTEXT COMMENT 'tag:2',
+  \`title\` LONGTEXT COMMENT 'tag:3',
+  \`start date\` LONGTEXT COMMENT 'tag:4',
+  \`end date\` LONGTEXT COMMENT 'tag:5',
+  PRIMARY KEY (id)
+);
+SQL
+    run dolt table import -u employees `batshelper employees-tbl-schema-unordered.utf8bom.csv`
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "$output" =~ "Import completed successfully." ]] || false
+    run dolt schema export employees
+    [[ "$status" -eq 0 ]] || false
+    [[ "${lines[1]}" =~ "id" ]]         || false
+    [[ "${lines[2]}" =~ "first name" ]] || false
+    [[ "${lines[3]}" =~ "last name" ]]  || false
+    [[ "${lines[4]}" =~ "title" ]]      || false
+    [[ "${lines[5]}" =~ "start date" ]] || false
+    [[ "${lines[6]}" =~ "end date" ]]   || false
+}
+
+@test "import-update-tables: update table with a csv with columns in different order, utf16le with bom" {
+    dolt sql <<SQL
+CREATE TABLE employees (
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
+  \`first name\` LONGTEXT COMMENT 'tag:1',
+  \`last name\` LONGTEXT COMMENT 'tag:2',
+  \`title\` LONGTEXT COMMENT 'tag:3',
+  \`start date\` LONGTEXT COMMENT 'tag:4',
+  \`end date\` LONGTEXT COMMENT 'tag:5',
+  PRIMARY KEY (id)
+);
+SQL
+    run dolt table import -u employees `batshelper employees-tbl-schema-unordered.utf16lebom.csv`
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "$output" =~ "Import completed successfully." ]] || false
+    run dolt schema export employees
+    [[ "$status" -eq 0 ]] || false
+    [[ "${lines[1]}" =~ "id" ]]         || false
+    [[ "${lines[2]}" =~ "first name" ]] || false
+    [[ "${lines[3]}" =~ "last name" ]]  || false
+    [[ "${lines[4]}" =~ "title" ]]      || false
+    [[ "${lines[5]}" =~ "start date" ]] || false
+    [[ "${lines[6]}" =~ "end date" ]]   || false
+}
+
+@test "import-update-tables: update table with a csv with columns in different order, utf16be with bom" {
+    dolt sql <<SQL
+CREATE TABLE employees (
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
+  \`first name\` LONGTEXT COMMENT 'tag:1',
+  \`last name\` LONGTEXT COMMENT 'tag:2',
+  \`title\` LONGTEXT COMMENT 'tag:3',
+  \`start date\` LONGTEXT COMMENT 'tag:4',
+  \`end date\` LONGTEXT COMMENT 'tag:5',
+  PRIMARY KEY (id)
+);
+SQL
+    run dolt table import -u employees `batshelper employees-tbl-schema-unordered.utf16bebom.csv`
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "$output" =~ "Import completed successfully." ]] || false
+    run dolt schema export employees
+    [[ "$status" -eq 0 ]] || false
     [[ "${lines[1]}" =~ "id" ]]         || false
     [[ "${lines[2]}" =~ "first name" ]] || false
     [[ "${lines[3]}" =~ "last name" ]]  || false
@@ -279,8 +357,10 @@ DELIM
     dolt sql < 1pk1col-char-sch.sql
     run dolt table import -u test 1pk1col-rpt-chars.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "Bad Row: [1,123456]" ]] || false
+    [[ "$output" =~ "An error occurred while moving data" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "pk: 1" ]] || false
+    [[ "$output" =~ "c: 123456" ]] || false
     [[ "$output" =~ 'too large for column' ]] || false
 }
 
@@ -313,22 +393,23 @@ DELIM
     dolt sql < check-constraint-sch.sql
     run dolt table import -u persons persons.csv
     [ "$status" -eq 1 ]
-
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "Bad Row:" ]] || false
-    [[ "$output" =~ "[2,little,doe,10]" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "ID: 2" ]] || false
+    [[ "$output" =~ "LastName: little" ]] || false
+    [[ "$output" =~ "FirstName: doe" ]] || false
+    [[ "$output" =~ "Age: 10" ]] || false
 
     run dolt table import -u --continue persons persons.csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "The following rows were skipped:" ]] || false
-    [[ "$output" =~ "[2,little,doe,10]" ]] || false
-    [[ "$output" =~ "[3,little,doe,4]" ]] || false
-    [[ "$output" =~ "[4,little,doe,1]" ]] || false
-    [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
-    [[ "$output" =~ "Import completed successfully." ]] || false
+    [[ "${lines[0]}" =~ "The following rows were skipped:" ]] || false
+    [[ "${lines[1]}" =~ '[2,little,doe,10]' ]] || false
+    [[ "${lines[2]}" =~ '[3,little,doe,4]' ]] || false
+    [[ "${lines[3]}" =~ '[4,little,doe,1]' ]] || false
+    [[ "${lines[4]}" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "${lines[5]}" =~ "Lines skipped: 3" ]] || false
+    [[ "${lines[6]}" =~ "Import completed successfully." ]] || false
 
     run dolt sql -r csv -q "select * from persons"
-    skip "this only worked b/c no rollback on keyless tables; this also fails on primary key tables"
     [ "${#lines[@]}" -eq 2 ]
     [[ "$output" =~ "ID,LastName,FirstName,Age" ]] || false
     [[ "$output" =~ "1,jon,doe,20" ]] || false
@@ -344,13 +425,14 @@ DELIM
 
     dolt sql < 1pk5col-ints-sch.sql
     dolt table import -u --continue test 1pk5col-rpt-ints.csv
+    dolt add .
     dolt commit -am "cm1"
 
     run dolt table import -u --continue test 1pk5col-rpt-ints.csv
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Modifications: 3" ]] || falsa
 
-    skip_nbf_dolt_1
+
     run dolt diff
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 0 ]
@@ -380,8 +462,9 @@ DELIM
 
     run dolt table import -u test bad-updates.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "csv reader's schema expects 2 fields, but line only has 3 values" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "CSV reader expected 2 values, but saw 3" ]] || false
+    [[ "$output" =~ "with the following values left over: '[\"\"]'" ]] || false
 
     run dolt table import -u --continue test bad-updates.csv
     [ "$status" -eq 0 ]
@@ -401,8 +484,8 @@ DELIM
 
     run dolt table import -u test bad-updates.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "[100]" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "pk: 100" ]] || false
 
     run dolt table import -u --continue test bad-updates.csv
     [ "$status" -eq 0 ]
@@ -438,10 +521,17 @@ DELIM
     dolt add .
     dolt commit --allow-empty -m "update table from parquet file"
 
-    skip_nbf_dolt_1
-    run dolt diff --summary main new_branch
+    run dolt diff --stat main new_branch
     [ "$status" -eq 0 ]
     [[ "$output" = "" ]] || false
+}
+
+@test "import-update-tables: bad parquet file import errors" {
+    dolt sql -q "CREATE TABLE test_table (pk int primary key, col1 text, col2 int);"
+    echo "This is a bad parquet file" > bad.parquet
+    run dolt table import -u test_table bad.parquet
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "When attempting to move data from parquet file:bad.parquet to test_table, could not open a reader." ]] || false
 }
 
 @test "import-update-tables: Subsequent updates with --continue correctly work" {
@@ -555,7 +645,7 @@ DELIM
 
     run dolt table import -u test 1pk5col-ints-updt.csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
 
@@ -566,7 +656,7 @@ DELIM
     [[ "$output" =~ "1" ]] || false
 }
 
-@test "import-update-tables: csv files has less columns that schema -u" {
+@test "import-update-tables: csv file has less columns than schema -u" {
     cat <<DELIM > 1pk5col-ints-updt.csv
 pk,c1,c2,c5,c3
 0,1,2,6,3
@@ -576,7 +666,7 @@ DELIM
 
     run dolt table import -u test 1pk5col-ints-updt.csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
 
@@ -599,7 +689,7 @@ DELIM
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
-    ! [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    ! [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
 
     run dolt sql -r csv -q "select * from test"
     [ "${lines[1]}" = "0,1,2,3,4,6" ]
@@ -618,12 +708,41 @@ DELIM
 
     run dolt table import -u test 1pk5col-ints-updt.csv
     [ "$status" -eq 0 ]
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
+    [[ "$output" =~ "If unintentional, check for any typos in the import file's header" ]] || false
+    [[ "$output" =~ "Extra columns in import file:" ]] || false
+    [[ "$output" =~ "	c7" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
-    ! [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
 
     run dolt sql -r csv -q "select * from test"
     [ "${lines[1]}" = "0,1,2,3,4,6" ]
+
+    run dolt sql -q "select count(*) from test"
+    [[ "$output" =~ "1" ]] || false
+}
+
+@test "import-update-tables: different schema warning lists differing columns" {
+    cat <<DELIM > 1pk5col-ints-updt.csv
+pk,c4,c5,c1,c3,c7
+0,4,6,1,3,100
+DELIM
+
+    dolt sql < 1pk5col-ints-sch.sql
+
+    run dolt table import -u test 1pk5col-ints-updt.csv
+    [ "$status" -eq 0 ]
+    [[ "${lines[0]}" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
+    [[ "${lines[1]}" =~ "If unintentional, check for any typos in the import file's header" ]] || false
+    [[ "${lines[2]}" =~ "Missing columns in test:" ]] || false
+    [[ "${lines[3]}" =~ "	c2" ]] || false
+    [[ "${lines[4]}" =~ "Extra columns in import file:" ]] || false
+    [[ "${lines[5]}" =~ "	c7" ]] || false
+    [[ "${lines[6]}" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "${lines[7]}" =~ "Import completed successfully." ]] || false
+
+    run dolt sql -r csv -q "select * from test"
+    [ "${lines[1]}" = "0,1,,3,4,6" ]
 
     run dolt sql -q "select count(*) from test"
     [[ "$output" =~ "1" ]] || false
@@ -641,7 +760,7 @@ DELIM
 
     run dolt table import -u test 1pk5col-ints-updt.csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 0, Modifications: 1, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
 
@@ -659,7 +778,7 @@ DELIM
 
     run dolt table import -u test 1pk5col-ints-updt.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Error determining the output schema." ]] || false
+    [[ "$output" =~ "Field 'pk' doesn't have a default value" ]] || false
 }
 
 @test "import-update-tables: partial update on keyless table" {
@@ -681,7 +800,7 @@ DELIM
 
     run dolt table import -u keyless data.csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Warning: There are fewer columns in the import file's schema than the table's schema" ]] || false
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
 
@@ -796,8 +915,10 @@ DELIM
 
     run dolt table import -u objects objects-bad.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "Bad Row: [6,bottle,gray]" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "id: 6" ]] || false
+    [[ "$output" =~ "name: bottle" ]] || false
+    [[ "$output" =~ "color: gray" ]] || false
     [[ "$output" =~ "cannot add or update a child row - Foreign key violation" ]] || false
 
     run dolt table import -u objects objects-bad.csv --continue
@@ -814,8 +935,7 @@ DELIM
     ! [[ "$output" =~ "6,bottle,red" ]] || false
 }
 
-@test "import-update-tables: successfully update child table in multi-key fk relationship " {
-    skip_nbf_dolt_1
+@test "import-update-tables: successfully update child table in multi-key fk relationship" {
     dolt sql -q "drop table objects"
     dolt sql -q "drop table colors"
 
@@ -877,8 +997,11 @@ DELIM
 
     run dolt table import -u objects multi-key-bad.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
-    [[ "$output" =~ "Bad Row: [6,bottle,blue,steel]" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "id: 6" ]] || false
+    [[ "$output" =~ "name: bottle" ]] || false
+    [[ "$output" =~ "color: blue" ]] || false
+    [[ "$output" =~ "material: steel" ]] || false
     [[ "$output" =~ "cannot add or update a child row - Foreign key violation" ]] || false
 
     run dolt table import -u objects multi-key-bad.csv --continue
@@ -896,7 +1019,6 @@ DELIM
 }
 
 @test "import-update-tables: import update with CASCADE ON UPDATE" {
-   skip_nbf_dolt_1
    dolt sql <<SQL
 CREATE TABLE one (
   pk int PRIMARY KEY,
@@ -957,7 +1079,7 @@ DELIM
 
     run dolt table import -u colors colors-bad.csv
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
     [[ "$output" =~ "cannot delete or update a parent row" ]] || false
 
     run dolt table import -u colors colors-bad.csv --continue
@@ -1000,12 +1122,11 @@ DELIM
 
     run dolt table import -u tbl circular-keys-bad.csv
     [ $status -eq 1 ]
-    [[ "$output" =~ "A bad row was encountered while moving data" ]] || false
+    [[ "$output" =~ "A bad row was encountered" ]] || false
     [[ "$output" =~ "cannot add or update a child row" ]] || false
 }
 
 @test "import-update-tables: disable foreign key checks" {
-    skip_nbf_dolt_1
     cat <<DELIM > objects-bad.csv
 id,name,color
 4,laptop,blue
@@ -1171,4 +1292,197 @@ DELIM
     [[ "$output" =~ "2,medium" ]] || false
     [[ "$output" =~ "3,large" ]] || false
     [[ "$output" =~ "4,x-small" ]] || false # should be empty
+}
+
+@test "import-update-tables: test better error message for mismatching column count with schema" {
+    # Case where there are fewer values in a row than the number of columns in the schema
+    cat <<DELIM > bad-updates.csv
+pk,v1, v2
+5,5
+6,5
+DELIM
+
+    dolt sql -q "CREATE TABLE test(pk BIGINT PRIMARY KEY, v1 BIGINT DEFAULT 2 NOT NULL, v2 int)"
+    dolt sql -q "INSERT INTO test (pk, v1, v2) VALUES (1, 2, 3), (2, 3, 4)"
+
+    run dolt table import -u test bad-updates.csv
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "CSV reader expected 3 values, but saw 2" ]] || false
+    [[ "$output" =~ "row values:" ]] || false
+    ! [[ "$output" =~ "with the following values left over: '[\"\"]'" ]] || false
+
+    # Case there are more columns in the rows than the number of columns in the schema
+ cat <<DELIM > bad-updates.csv
+pk,v1
+5,7,5
+6,5,5
+DELIM
+
+    run dolt table import -u test bad-updates.csv
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "CSV reader expected 2 values, but saw 3" ]] || false
+    [[ "$output" =~ "row values:" ]] || false
+    [[ "$output" =~ '"pk": "5"' ]] || false
+    [[ "$output" =~ '"v1": "7"' ]] || false
+    [[ "$output" =~ "with the following values left over: '[\"5\"]'" ]] || false
+
+    # Add a continue statement
+    run dolt table import -u --continue test bad-updates.csv
+    [ "$status" -eq 0 ]
+    [[ "${lines[4]}" =~ "The following rows were skipped:" ]] || false
+    [[ "${lines[5]}" =~ '[5,7,5]' ]] || false
+    [[ "${lines[6]}" =~ '[6,5,5]' ]] || false
+    [[ "${lines[7]}" =~ "Rows Processed: 0, Additions: 0, Modifications: 0, Had No Effect: 0" ]] || false
+    [[ "${lines[8]}" =~ "Lines skipped: 2" ]] || false
+    [[ "${lines[9]}" =~ "Import completed successfully." ]] || false
+}
+
+@test "import-update-tables: test error when import bad csv with nulls" {
+    # Case where there are fewer values in a row than the number of columns in the schema
+    cat <<DELIM > bad-updates.csv
+i,j,k
+,,,
+DELIM
+
+    dolt sql -q "CREATE TABLE test(i int, j int, k int, l int)"
+
+    run dolt table import -u test bad-updates.csv
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "A bad row was encountered" ]] || false
+    [[ "$output" =~ "CSV reader expected 3 values, but saw 4" ]] || false
+    [[ "$output" =~ "row values:" ]] || false
+    [[ "$output" =~ "with the following values left over: '[\"\"]'" ]] || false
+}
+
+@test "import-update-tables: incorrect values default to zero value when --continue is passed" {
+    dolt sql <<SQL
+CREATE TABLE t (
+    pk int primary key,
+    col1 boolean,
+    col2 integer,
+    col3 tinyint,
+    col4 smallint,
+    col5 mediumint,
+    col6 int,
+    col7 bigint,
+    col8 decimal,
+    col9 float,
+    col10 double,
+    col11 date,
+    col12 time,
+    col13 datetime,
+    col14 timestamp,
+    col15 year,
+    col16 ENUM('first', 'second'),
+    col17 SET('a', 'b'),
+    col18 JSON
+);
+SQL
+    dolt commit -Am "add table"
+
+    cat <<DELIM > bad-updates.csv
+pk,col1,col2,col3,col4,col5,col6,col7,col8,col9,col10,col11,col12,col13,col14,col15,col16,col17,col18
+1,val1,val2,val3,val4,val5,val6,val7,val8,val9,val10,val11,val12,val13,val14,val15,val16,val17,val18
+DELIM
+    # if a bad json value is encountered with insert ignore, MySQL throws an error
+    # so, in dolt table import we skip the row.
+    run dolt table import -u t --continue bad-updates.csv
+    [ $status -eq 0 ]
+    [[ $output =~ "The following rows were skipped:" ]] || false
+    [[ $output =~ "[1,val1,val2,val3,val4,val5,val6,val7,val8,val9,val10,val11,val12,val13,val14,val15,val16,val17,val18]" ]] || false
+
+    run dolt sql -r csv -q "select count(*) from t;"
+    [[ $output =~ "0" ]] || false
+
+    dolt sql -q "alter table t drop column col18;"
+    dolt commit -Am "drop json column"
+
+    cat <<DELIM > bad-updates.csv
+pk,col1,col2,col3,col4,col5,col6,col7,col8,col9,col10,col11,col12,col13,col14,col15,col16,col17
+1,val1,val2,val3,val4,val5,val6,val7,val8,val9,val10,val11,val12,val13,val14,val15,val16,val17
+DELIM
+    run dolt table import -u t --continue bad-updates.csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
+
+    run dolt sql -r csv -q "select * from t;"
+    [ $status -eq 0 ]
+    [[ "$output" =~ '1,0,0,0,0,0,0,0,0,0,0,0000-00-00,00:00:00,0000-00-00 00:00:00,0000-00-00 00:00:00,0,first,""' ]] || false
+}
+
+@test "import-update-tables: import table with absent auto-increment column" {
+    dolt sql <<SQL
+CREATE TABLE tbl (
+    id int PRIMARY KEY AUTO_INCREMENT,
+    v1 int,
+    v2 int,
+    INDEX v1 (v1),
+    INDEX v2 (v2)
+);
+SQL
+
+    cat <<DELIM > auto-increment.csv
+v1,v2
+4,2
+3,1
+DELIM
+
+    dolt table import -u tbl auto-increment.csv
+}
+@test "import-update-tables: distinguish between empty string and null for ENUMs" {
+    dolt sql <<SQL
+create table alphabet(pk int primary key, letter enum('', 'a', 'b'));
+SQL
+    dolt commit -Am "add a table"
+
+    expected=$(cat <<DELIM
+pk,letter
+1,a
+2,""
+3,
+DELIM
+)
+    echo "$expected" > data.csv
+
+    run dolt table import -u alphabet data.csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 3, Additions: 3, Modifications: 0, Had No Effect: 0" ]] || false
+
+    run dolt sql -r csv -q "select * from alphabet;"
+    [ $status -eq 0 ]
+    [[ "$output" = "$expected" ]] || false
+}
+
+@test "import-update-tables: distinguish between empty string and null for SETs" {
+    dolt sql <<SQL
+create table word(pk int primary key, letters set('', 'a', 'b'));
+SQL
+    dolt commit -Am "add a table"
+
+    expected=$(cat <<DELIM
+pk,letters
+1,"a,b"
+2,a
+3,""
+4,
+DELIM
+)
+    echo "$expected" > word_data.csv
+
+    run dolt table import -u word word_data.csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "Rows Processed: 4, Additions: 4, Modifications: 0, Had No Effect: 0" ]] || false
+
+    run dolt sql -r csv -q "select * from word order by pk;"
+    [ $status -eq 0 ]
+    [[ "$output" = "$expected" ]] || false
+}
+
+@test "import-update-tables: can't use --all-text with -u" {
+    dolt sql < 1pk5col-ints-sch.sql
+    run dolt table import -u --all-text test `batshelper 1pk5col-ints.csv`
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "fatal: --all-text is only supported for create operations" ]] || false
 }

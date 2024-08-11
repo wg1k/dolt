@@ -5,7 +5,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
   setup_common
-  skip_nbf_dolt_1
 
   mkdir test
   cd test
@@ -184,7 +183,7 @@ SQL
 
   run dolt sql -r csv -q "SELECT TABLE_NAME,TABLE_SCHEMA,COLUMN_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='test' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY ORDINAL_POSITION;"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "table_name,table_schema,column_name,referenced_table_schema,referenced_table_name,referenced_column_name" ]] || false
+  [[ "$output" =~ "TABLE_NAME,TABLE_SCHEMA,COLUMN_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" ]] || false
   [[ "$output" =~ "objects,test,color,test,colors,color" ]] || false
 }
 
@@ -220,27 +219,4 @@ SQL
   [ "$status" -eq 0 ]
   run dolt sql -q "show full tables from test"
   [ "$status" -eq 0 ]
-}
-
-@test "tableplus: information_schema.routines excludes procedure aliases, but works with CALL" {
-  run dolt sql -q "SELECT ROUTINE_SCHEMA as function_schema,ROUTINE_NAME as function_name,ROUTINE_DEFINITION as create_statement,ROUTINE_TYPE as function_type FROM information_schema.routines where ROUTINE_SCHEMA='test';"
-  [ "$status" -eq 0 ]
-  [[ ! "$output" =~ "dadd" ]] || false
-  [[ ! "$output" =~ "dadd" ]] || false
-  [[ ! "$output" =~ "dbranch" ]] || false
-  [[ ! "$output" =~ "dcheckout" ]] || false
-  [[ ! "$output" =~ "dclean" ]] || false
-  [[ ! "$output" =~ "dcommit" ]] || false
-  [[ ! "$output" =~ "dfetch" ]] || false
-  [[ ! "$output" =~ "dmerge" ]] || false
-  [[ ! "$output" =~ "dpull" ]] || false
-  [[ ! "$output" =~ "dpush" ]] || false
-  [[ ! "$output" =~ "dreset" ]] || false
-  [[ ! "$output" =~ "drevert" ]] || false
-  [[ ! "$output" =~ "dverify_constraints" ]] || false
-  [[ ! "$output" =~ "dverify_all_constraints" ]] || false
-
-  run dolt sql -q "CALL dbranch('branch1')"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "status" ]] || false
 }

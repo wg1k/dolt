@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/store/prolly/message"
+	"github.com/dolthub/dolt/go/store/val"
 )
 
 func init() {
@@ -71,7 +72,7 @@ func TestKeySplitterDistribution(t *testing.T) {
 	})
 	t.Run("summarize node distribution for item sizes (8,54)", func(t *testing.T) {
 		for sz := 8; sz <= 54; sz++ {
-			fmt.Println(fmt.Sprintf("Summary for map Size %d", sz))
+			fmt.Printf("Summary for map Size %d\n", sz)
 			nd, ns := makeProllyTreeWithSizes(t, factory, 100_000, sz, sz)
 			PrintTreeSummaryByLevel(t, nd, ns)
 			fmt.Println()
@@ -101,7 +102,7 @@ func makeProllyTreeWithSizes(t *testing.T, fact splitterFactory, scale, keySz, v
 
 	ctx := context.Background()
 	ns = NewTestNodeStore()
-	serializer := message.ProllyMapSerializer{Pool: ns.Pool()}
+	serializer := message.NewProllyMapSerializer(val.TupleDesc{}, ns.Pool())
 	chunker, err := newEmptyChunker(ctx, ns, serializer)
 	require.NoError(t, err)
 

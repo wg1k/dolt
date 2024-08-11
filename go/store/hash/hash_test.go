@@ -22,9 +22,14 @@
 package hash
 
 import (
+	"math/rand"
 	"testing"
 
+	"golang.org/x/crypto/blake2b"
+
 	"github.com/stretchr/testify/assert"
+	"github.com/zeebo/blake3"
+	"github.com/zeebo/xxh3"
 )
 
 func TestParseError(t *testing.T) {
@@ -143,4 +148,41 @@ func TestCompareGreater(t *testing.T) {
 	assert.False(r0.Compare(r0) > 0)
 	assert.False(r0.Compare(r2) > 0)
 	assert.True(r2.Compare(r0) > 0)
+}
+
+func init() {
+	for i := range benchData {
+		benchData[i] = make([]byte, 100)
+		rand.Read(benchData[i])
+	}
+}
+
+var benchData [512][]byte
+
+func BenchmarkSha512(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		j := i % len(benchData)
+		_ = Of(benchData[j])
+	}
+}
+
+func BenchmarkBlake2(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		j := i % len(benchData)
+		_ = blake2b.Sum256(benchData[j])
+	}
+}
+
+func BenchmarkBlake3(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		j := i % len(benchData)
+		_ = blake3.Sum256(benchData[j])
+	}
+}
+
+func BenchmarkXXHash(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		j := i % len(benchData)
+		_ = xxh3.Hash128(benchData[j])
+	}
 }

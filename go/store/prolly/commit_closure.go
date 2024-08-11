@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"io"
 
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/pool"
@@ -26,91 +28,137 @@ import (
 	"github.com/dolthub/dolt/go/store/types"
 )
 
+// Closure values are a long (8 bytes) followed by a hash (20 bytes, hash.ByteLen).
+const prefixWidth = 8
+
 type CommitClosureValue []byte
 
 type CommitClosure struct {
-	closure orderedTree[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]
+	closure tree.StaticMap[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]
 }
 
 type commitClosureKeyOrdering struct{}
 
-var _ ordering[CommitClosureKey] = commitClosureKeyOrdering{}
+var _ tree.Ordering[CommitClosureKey] = commitClosureKeyOrdering{}
 
 func (o commitClosureKeyOrdering) Compare(left, right CommitClosureKey) int {
 	lh, rh := left.Height(), right.Height()
 	if lh == rh {
-		return bytes.Compare(left[8:], right[8:])
+		return bytes.Compare(left[prefixWidth:], right[prefixWidth:])
 	} else if lh < rh {
 		return -1
 	}
 	return 1
 }
 
-func NewEmptyCommitClosure(ns tree.NodeStore) CommitClosure {
-	serializer := message.CommitClosureSerializer{Pool: ns.Pool()}
+func NewEmptyCommitClosure(ns tree.NodeStore) (CommitClosure, error) {
+	serializer := message.NewCommitClosureSerializer(ns.Pool())
 	msg := serializer.Serialize(nil, nil, nil, 0)
-	node := tree.NodeFromBytes(msg)
+	node, err := tree.NodeFromBytes(msg)
+	if err != nil {
+		return CommitClosure{}, err
+	}
 	return NewCommitClosure(node, ns)
 }
 
-func NewCommitClosure(node tree.Node, ns tree.NodeStore) CommitClosure {
+func NewCommitClosure(node tree.Node, ns tree.NodeStore) (CommitClosure, error) {
 	return CommitClosure{
-		closure: orderedTree[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]{
-			root:  node,
-			ns:    ns,
-			order: commitClosureKeyOrdering{},
+		closure: tree.StaticMap[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]{
+			Root:      node,
+			NodeStore: ns,
+			Order:     commitClosureKeyOrdering{},
 		},
-	}
+	}, nil
 }
 
-func (c CommitClosure) Count() int {
-	return c.closure.count()
+func (c CommitClosure) Count() (int, error) {
+	return c.closure.Count()
 }
 
 func (c CommitClosure) Height() int {
-	return c.closure.height()
+	return c.closure.Height()
 }
 
 func (c CommitClosure) Node() tree.Node {
-	return c.closure.root
+	return c.closure.Root
 }
 
 func (c CommitClosure) HashOf() hash.Hash {
-	return c.closure.hashOf()
+	return c.closure.HashOf()
 }
 
 func (c CommitClosure) Format() *types.NomsBinFormat {
-	return c.closure.ns.Format()
+	return c.closure.NodeStore.Format()
 }
 
 func (c CommitClosure) Editor() CommitClosureEditor {
 	return CommitClosureEditor{
-		closure: c.closure.mutate(),
+		closure: c.closure.Mutate(),
 	}
 }
 
 func (c CommitClosure) IterAllReverse(ctx context.Context) (CommitClosureIter, error) {
-	return c.closure.iterAllReverse(ctx)
+	return c.closure.IterAllReverse(ctx)
+}
+
+func (c CommitClosure) IterHeight(ctx context.Context, height uint64) (CommitClosureIter, error) {
+	start := NewCommitClosureKey(c.closure.NodeStore.Pool(), height, hash.Hash{})
+	stop := NewCommitClosureKey(c.closure.NodeStore.Pool(), height+1, hash.Hash{})
+	return c.closure.IterKeyRange(ctx, start, stop)
+}
+
+func (c CommitClosure) IsEmpty() bool {
+	return c.Node().Size() == 0
+}
+
+func (c CommitClosure) ContainsKey(ctx context.Context, h hash.Hash, height uint64) (bool, error) {
+	k := NewCommitClosureKey(c.closure.NodeStore.Pool(), height, h)
+	return c.closure.Has(ctx, k)
 }
 
 func DecodeCommitClosureKey(key []byte) (height uint64, addr hash.Hash) {
 	height = binary.LittleEndian.Uint64(key)
-	addr = hash.New(key[8:])
+	addr = hash.New(key[prefixWidth:])
+
 	return
 }
 
+func (c CommitClosure) AsHashSet(ctx context.Context) (hash.HashSet, error) {
+	closureIter, err := c.IterAllReverse(ctx)
+	if err != nil {
+		return hash.HashSet{}, err
+	}
+
+	skipCmts := hash.NewHashSet()
+	for {
+		key, _, err := closureIter.Next(ctx)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return hash.HashSet{}, err
+
+		}
+
+		clsrHash := hash.New(key[prefixWidth:])
+		skipCmts.Insert(clsrHash)
+	}
+
+	return skipCmts, nil
+}
+
 type CommitClosureEditor struct {
-	closure orderedMap[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]
+	closure tree.MutableMap[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]
 }
 
 type CommitClosureKey []byte
 
-type CommitClosureIter kvIter[CommitClosureKey, CommitClosureValue]
+type CommitClosureIter tree.KvIter[CommitClosureKey, CommitClosureValue]
 
 func NewCommitClosureKey(p pool.BuffPool, height uint64, addr hash.Hash) CommitClosureKey {
-	r := p.Get(8 + 20)
+	r := p.Get(prefixWidth + hash.ByteLen)
 	binary.LittleEndian.PutUint64(r, height)
-	copy(r[8:], addr[:])
+	copy(r[prefixWidth:], addr[:])
 	return CommitClosureKey(r)
 }
 
@@ -119,7 +167,7 @@ func (k CommitClosureKey) Height() uint64 {
 }
 
 func (k CommitClosureKey) Addr() hash.Hash {
-	return hash.New(k[8:])
+	return hash.New(k[prefixWidth:])
 }
 
 func (k CommitClosureKey) Less(other CommitClosureKey) bool {
@@ -129,31 +177,33 @@ func (k CommitClosureKey) Less(other CommitClosureKey) bool {
 var emptyCommitClosureValue CommitClosureValue = CommitClosureValue(make([]byte, 1))
 
 func (wr CommitClosureEditor) Add(ctx context.Context, key CommitClosureKey) error {
-	return wr.closure.put(ctx, key, emptyCommitClosureValue)
+	return wr.closure.Put(ctx, key, emptyCommitClosureValue)
 }
 
 func (wr CommitClosureEditor) Delete(ctx context.Context, key CommitClosureKey) error {
-	return wr.closure.delete(ctx, key)
+	return wr.closure.Delete(ctx, key)
 }
 
 func (wr CommitClosureEditor) Flush(ctx context.Context) (CommitClosure, error) {
-	tr := wr.closure.tree
-	serializer := message.CommitClosureSerializer{Pool: tr.ns.Pool()}
+	sm := wr.closure.Static
+	serializer := message.NewCommitClosureSerializer(sm.NodeStore.Pool())
+	fn := tree.ApplyMutations[CommitClosureKey, commitClosureKeyOrdering, message.CommitClosureSerializer]
 
-	root, err := tree.ApplyMutations(ctx, tr.ns, tr.root, serializer, wr.closure.mutations(), tr.compareItems)
+	root, err := fn(ctx, sm.NodeStore, sm.Root, commitClosureKeyOrdering{}, serializer, wr.closure.Mutations())
 	if err != nil {
 		return CommitClosure{}, err
 	}
 
 	return CommitClosure{
-		closure: orderedTree[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]{
-			root:  root,
-			ns:    tr.ns,
-			order: tr.order,
+		closure: tree.StaticMap[CommitClosureKey, CommitClosureValue, commitClosureKeyOrdering]{
+			Root:      root,
+			NodeStore: sm.NodeStore,
+			Order:     sm.Order,
 		},
 	}, nil
 }
 
-func DiffCommitClosures(ctx context.Context, from, to CommitClosure, cb DiffFn) error {
-	return diffOrderedTrees(ctx, from.closure, to.closure, cb)
+func DiffCommitClosures(ctx context.Context, from, to CommitClosure, cb tree.DiffFn) error {
+	considerAllRowsModified := false
+	return tree.DiffOrderedTrees(ctx, from.closure, to.closure, considerAllRowsModified, cb)
 }

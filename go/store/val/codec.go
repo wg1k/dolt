@@ -41,54 +41,80 @@ const (
 type ByteSize uint16
 
 const (
-	int8Size     ByteSize = 1
-	uint8Size    ByteSize = 1
-	int16Size    ByteSize = 2
-	uint16Size   ByteSize = 2
-	int32Size    ByteSize = 4
-	uint32Size   ByteSize = 4
-	int64Size    ByteSize = 8
-	uint64Size   ByteSize = 8
-	float32Size  ByteSize = 4
-	float64Size  ByteSize = 8
-	bit64Size    ByteSize = 8
-	hash128Size  ByteSize = 16
-	addressSize  ByteSize = 20
-	yearSize     ByteSize = 1
-	dateSize     ByteSize = 4
-	timeSize     ByteSize = 8
-	datetimeSize ByteSize = 8
-	enumSize     ByteSize = 2
-	setSize      ByteSize = 8
+	int8Size         ByteSize = 1
+	uint8Size        ByteSize = 1
+	int16Size        ByteSize = 2
+	uint16Size       ByteSize = 2
+	int32Size        ByteSize = 4
+	uint32Size       ByteSize = 4
+	int64Size        ByteSize = 8
+	uint64Size       ByteSize = 8
+	float32Size      ByteSize = 4
+	float64Size      ByteSize = 8
+	bit64Size        ByteSize = 8
+	hash128Size      ByteSize = 16
+	yearSize         ByteSize = 1
+	dateSize         ByteSize = 4
+	timeSize         ByteSize = 8
+	datetimeSize     ByteSize = 8
+	enumSize         ByteSize = 2
+	setSize          ByteSize = 8
+	bytesAddrEnc     ByteSize = hash.ByteLen
+	commitAddrEnc    ByteSize = hash.ByteLen
+	stringAddrEnc    ByteSize = hash.ByteLen
+	jsonAddrEnc      ByteSize = hash.ByteLen
+	cellSize         ByteSize = 17
+	geomAddrEnc      ByteSize = hash.ByteLen
+	extendedAddrSize ByteSize = hash.ByteLen
 )
 
 type Encoding byte
 
 // Fixed Width Encodings
 const (
-	NullEnc     = Encoding(serial.EncodingNull)
-	Int8Enc     = Encoding(serial.EncodingInt8)
-	Uint8Enc    = Encoding(serial.EncodingUint8)
-	Int16Enc    = Encoding(serial.EncodingInt16)
-	Uint16Enc   = Encoding(serial.EncodingUint16)
-	Int32Enc    = Encoding(serial.EncodingInt32)
-	Uint32Enc   = Encoding(serial.EncodingUint32)
-	Int64Enc    = Encoding(serial.EncodingInt64)
-	Uint64Enc   = Encoding(serial.EncodingUint64)
-	Float32Enc  = Encoding(serial.EncodingFloat32)
-	Float64Enc  = Encoding(serial.EncodingFloat64)
-	Bit64Enc    = Encoding(serial.EncodingBit64)
-	Hash128Enc  = Encoding(serial.EncodingHash128)
-	AddressEnc  = Encoding(serial.EncodingAddress)
-	YearEnc     = Encoding(serial.EncodingYear)
-	DateEnc     = Encoding(serial.EncodingDate)
-	TimeEnc     = Encoding(serial.EncodingTime)
-	DatetimeEnc = Encoding(serial.EncodingDatetime)
-	EnumEnc     = Encoding(serial.EncodingEnum)
-	SetEnc      = Encoding(serial.EncodingSet)
+	NullEnc         = Encoding(serial.EncodingNull)
+	Int8Enc         = Encoding(serial.EncodingInt8)
+	Uint8Enc        = Encoding(serial.EncodingUint8)
+	Int16Enc        = Encoding(serial.EncodingInt16)
+	Uint16Enc       = Encoding(serial.EncodingUint16)
+	Int32Enc        = Encoding(serial.EncodingInt32)
+	Uint32Enc       = Encoding(serial.EncodingUint32)
+	Int64Enc        = Encoding(serial.EncodingInt64)
+	Uint64Enc       = Encoding(serial.EncodingUint64)
+	Float32Enc      = Encoding(serial.EncodingFloat32)
+	Float64Enc      = Encoding(serial.EncodingFloat64)
+	Bit64Enc        = Encoding(serial.EncodingBit64)
+	Hash128Enc      = Encoding(serial.EncodingHash128)
+	YearEnc         = Encoding(serial.EncodingYear)
+	DateEnc         = Encoding(serial.EncodingDate)
+	TimeEnc         = Encoding(serial.EncodingTime)
+	DatetimeEnc     = Encoding(serial.EncodingDatetime)
+	EnumEnc         = Encoding(serial.EncodingEnum)
+	SetEnc          = Encoding(serial.EncodingSet)
+	BytesAddrEnc    = Encoding(serial.EncodingBytesAddr)
+	CommitAddrEnc   = Encoding(serial.EncodingCommitAddr)
+	StringAddrEnc   = Encoding(serial.EncodingStringAddr)
+	JSONAddrEnc     = Encoding(serial.EncodingJSONAddr)
+	CellEnc         = Encoding(serial.EncodingCell)
+	GeomAddrEnc     = Encoding(serial.EncodingGeomAddr)
+	ExtendedAddrEnc = Encoding(serial.EncodingExtendedAddr)
 
 	sentinel Encoding = 127
 )
+
+func IsAddrEncoding(enc Encoding) bool {
+	switch enc {
+	case BytesAddrEnc,
+		CommitAddrEnc,
+		StringAddrEnc,
+		JSONAddrEnc,
+		GeomAddrEnc,
+		ExtendedAddrEnc:
+		return true
+	default:
+		return false
+	}
+}
 
 // Variable Width Encodings
 const (
@@ -97,15 +123,7 @@ const (
 	DecimalEnc    = Encoding(serial.EncodingDecimal)
 	JSONEnc       = Encoding(serial.EncodingJSON)
 	GeometryEnc   = Encoding(serial.EncodingGeometry)
-
-	// TODO
-	//  CharEnc
-	//  BinaryEnc
-	//  TextEnc
-	//  BlobEnc
-	//  EnumEnc
-	//  SetEnc
-	//  ExpressionEnc
+	ExtendedEnc   = Encoding(serial.EncodingExtended)
 )
 
 func sizeFromType(t Type) (ByteSize, bool) {
@@ -130,10 +148,10 @@ func sizeFromType(t Type) (ByteSize, bool) {
 		return float32Size, true
 	case Float64Enc:
 		return float64Size, true
+	case Bit64Enc:
+		return bit64Size, true
 	case Hash128Enc:
 		return hash128Size, true
-	case AddressEnc:
-		return addressSize, true
 	case YearEnc:
 		return yearSize, true
 	case DateEnc:
@@ -146,8 +164,18 @@ func sizeFromType(t Type) (ByteSize, bool) {
 		return enumSize, true
 	case SetEnc:
 		return setSize, true
-	case Bit64Enc:
-		return bit64Size, true
+	case BytesAddrEnc:
+		return bytesAddrEnc, true
+	case CommitAddrEnc:
+		return commitAddrEnc, true
+	case StringAddrEnc:
+		return stringAddrEnc, true
+	case JSONAddrEnc:
+		return jsonAddrEnc, true
+	case GeomAddrEnc:
+		return geomAddrEnc, true
+	case ExtendedAddrEnc:
+		return extendedAddrSize, true
 	default:
 		return 0, false
 	}
@@ -238,12 +266,12 @@ func compareInt16(l, r int16) int {
 	}
 }
 
-func readUint16(val []byte) uint16 {
+func ReadUint16(val []byte) uint16 {
 	expectSize(val, uint16Size)
 	return binary.LittleEndian.Uint16(val)
 }
 
-func writeUint16(buf []byte, val uint16) {
+func WriteUint16(buf []byte, val uint16) {
 	expectSize(buf, uint16Size)
 	binary.LittleEndian.PutUint16(buf, val)
 }
@@ -418,15 +446,33 @@ func compareDecimal(l, r decimal.Decimal) int {
 }
 
 const minYear int16 = 1901
+const maxYear int16 = 2155
+const zeroToken uint8 = 255
 
 func readYear(val []byte) int16 {
 	expectSize(val, yearSize)
-	return int16(readUint8(val)) + minYear
+	v := readUint8(val)
+	if v == zeroToken {
+		return int16(0)
+	}
+	offset := int16(v)
+	return offset + minYear
 }
 
+// writeYear encodes the year |val| as an offset from the minimum year 1901.
+// |val| must be within 1901 - 2155. If val == 0, 255 is written as a special
+// token value.
 func writeYear(buf []byte, val int16) {
 	expectSize(buf, yearSize)
-	writeUint8(buf, uint8(val-minYear))
+	if val == 0 {
+		writeUint8(buf, zeroToken)
+		return
+	}
+	if val < minYear || val > maxYear {
+		panic("year is outside of allowed range [1901, 2155]")
+	}
+	offset := uint8(val - minYear)
+	writeUint8(buf, offset)
 }
 
 func compareYear(l, r int16) int {
@@ -499,11 +545,11 @@ func compareDatetime(l, r time.Time) int {
 }
 
 func readEnum(val []byte) uint16 {
-	return readUint16(val)
+	return ReadUint16(val)
 }
 
 func writeEnum(buf []byte, val uint16) {
-	writeUint16(buf, val)
+	WriteUint16(buf, val)
 }
 
 func compareEnum(l, r uint16) int {
@@ -549,6 +595,19 @@ func compareByteString(l, r []byte) int {
 	return bytes.Compare(l, r)
 }
 
+func readExtended(handler TupleTypeHandler, val []byte) any {
+	v, err := handler.DeserializeValue(val)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func writeExtended(handler TupleTypeHandler, buf []byte, val []byte) {
+	expectSize(buf, ByteSize(len(val)))
+	copy(buf, val)
+}
+
 func readHash128(val []byte) []byte {
 	expectSize(val, hash128Size)
 	return val
@@ -559,27 +618,27 @@ func writeHash128(buf, val []byte) {
 	copy(buf, val)
 }
 
-func readAddress(val []byte) []byte {
-	expectSize(val, addressSize)
-	return val
-}
-
-func writeAddress(buf []byte, val hash.Hash) {
-	expectSize(buf, addressSize)
-	copy(buf, val[:])
-}
-
 func compareHash128(l, r []byte) int {
 	return bytes.Compare(l, r)
 }
 
-func compareAddress(l, r []byte) int {
-	return bytes.Compare(l, r)
+func compareAddr(l, r hash.Hash) int {
+	return l.Compare(r)
 }
 
 func writeRaw(buf, val []byte) {
 	expectSize(buf, ByteSize(len(val)))
 	copy(buf, val)
+}
+
+func writeAddr(buf []byte, v []byte) {
+	expectSize(buf, hash.ByteLen)
+	copy(buf, v)
+}
+
+func readAddr(val []byte) hash.Hash {
+	expectSize(val, hash.ByteLen)
+	return hash.New(val)
 }
 
 func expectSize(buf []byte, sz ByteSize) {
@@ -591,4 +650,26 @@ func expectSize(buf []byte, sz ByteSize) {
 // stringFromBytes converts a []byte to string without a heap allocation.
 func stringFromBytes(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
+}
+
+// Cell is a representation of a subregion for Spatial Indexes
+// The first byte encodes the level, which is the size of the region
+// The highest level (the square covering all values floats) is 64
+// The lowest level (a point) is 0
+// The next 16 bytes is the z-value encoding of the minimum point of that subregion
+type Cell [cellSize]byte
+
+func compareCell(l, r Cell) int {
+	return bytes.Compare(l[:], r[:])
+}
+
+func readCell(val []byte) (res Cell) {
+	expectSize(val, cellSize)
+	copy(res[:], val[:])
+	return
+}
+
+func writeCell(buf []byte, v Cell) {
+	expectSize(buf, cellSize)
+	copy(buf[:], v[:])
 }

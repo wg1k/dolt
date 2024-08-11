@@ -23,7 +23,6 @@ import (
 
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	dsqle "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/sqlfmt"
@@ -41,7 +40,7 @@ type BatchSqlExportWriter struct {
 	parentSchs           map[string]schema.Schema
 	foreignKeys          []doltdb.ForeignKey
 	wr                   io.WriteCloser
-	root                 *doltdb.RootValue
+	root                 doltdb.RootValue
 	writtenFirstRow      bool
 	writtenAutocommitOff bool
 	numInserts           int
@@ -50,9 +49,9 @@ type BatchSqlExportWriter struct {
 }
 
 // OpenBatchedSQLExportWriter returns a new SqlWriter for the table with the writer given.
-func OpenBatchedSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *doltdb.RootValue, tableName string, autocommitOff bool, sch schema.Schema, editOpts editor.Options) (*BatchSqlExportWriter, error) {
+func OpenBatchedSQLExportWriter(ctx context.Context, wr io.WriteCloser, root doltdb.RootValue, tableName string, autocommitOff bool, sch schema.Schema, editOpts editor.Options) (*BatchSqlExportWriter, error) {
 
-	allSchemas, err := root.GetAllSchemas(ctx)
+	allSchemas, err := doltdb.GetAllSchemas(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +61,8 @@ func OpenBatchedSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *do
 		return nil, errhand.BuildDError("error: failed to read foreign key struct").AddCause(err).Build()
 	}
 
-	foreignKeys, _ := fkc.KeysForTable(tableName)
+	// TODO: schema name
+	foreignKeys, _ := fkc.KeysForTable(doltdb.TableName{Name: tableName})
 
 	return &BatchSqlExportWriter{
 		tableName:     tableName,
@@ -79,64 +79,6 @@ func OpenBatchedSQLExportWriter(ctx context.Context, wr io.WriteCloser, root *do
 // GetSchema returns the schema of this TableWriter.
 func (w *BatchSqlExportWriter) GetSchema() schema.Schema {
 	return w.sch
-}
-
-// WriteRow will write a row to a table
-func (w *BatchSqlExportWriter) WriteRow(ctx context.Context, r row.Row) error {
-	if err := w.maybeWriteDropCreate(ctx); err != nil {
-		return err
-	}
-
-	// Previous write was last insert
-	if w.numInserts > 0 && r == nil {
-		return iohelp.WriteLine(w.wr, ";")
-	}
-
-	// Reached max number of inserts on one line
-	if w.numInserts == batchSize {
-		// Reset count
-		w.numInserts = 0
-
-		// End line
-		err := iohelp.WriteLine(w.wr, ";")
-		if err != nil {
-			return err
-		}
-	}
-
-	// Append insert values as tuples
-	var stmt string
-	if w.numInserts == 0 {
-		// Get insert prefix string
-		prefix, err := sqlfmt.InsertStatementPrefix(w.tableName, w.sch)
-		if err != nil {
-			return nil
-		}
-		// Write prefix
-		err = iohelp.WriteWithoutNewLine(w.wr, prefix)
-		if err != nil {
-			return nil
-		}
-	} else {
-		stmt = ", "
-	}
-
-	// Get insert tuple string
-	tuple, err := sqlfmt.RowAsTupleString(ctx, r, w.sch)
-	if err != nil {
-		return err
-	}
-
-	// Write insert tuple
-	err = iohelp.WriteWithoutNewLine(w.wr, stmt+tuple)
-	if err != nil {
-		return nil
-	}
-
-	// Increase count of inserts written on this line
-	w.numInserts++
-
-	return err
 }
 
 func (w *BatchSqlExportWriter) WriteSqlRow(ctx context.Context, r sql.Row) error {
@@ -178,7 +120,7 @@ func (w *BatchSqlExportWriter) WriteSqlRow(ctx context.Context, r sql.Row) error
 	}
 
 	// Get insert tuple string
-	tuple, err := sqlfmt.SqlRowAsTupleString(ctx, r, w.sch)
+	tuple, err := sqlfmt.SqlRowAsTupleString(r, w.sch)
 	if err != nil {
 		return err
 	}

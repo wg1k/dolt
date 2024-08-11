@@ -34,6 +34,30 @@ teardown() {
     [[ "$output" =~ 'test,true,new table' ]] || false
 }
 
+@test "sql-status: status properly works with table rename" {
+    # Test is staged
+    dolt add test
+    run dolt sql -r csv -q "select * from dolt_status"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ 'test,true,new table' ]] || false
+
+    # Rename test to test2
+    run dolt sql -r csv -q "alter table test rename to test2"
+    [ "$status" -eq 0 ]
+
+    # Confirm table is now marked as renamed, test still staged
+    run dolt sql -r csv -q "select * from dolt_status"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ 'test,true,new table' ]] || false
+    [[ "$output" =~ 'test -> test2,false,renamed' ]] || false
+
+    # Confirm table is now marked as staged
+    dolt add test2
+    run dolt sql -r csv -q "select * from dolt_status"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ 'test2,true,new table' ]] || false
+}
+
 @test "sql-status: table that has staged and unstaged changes shows up twice" {
     # Stage one set of changes.
     dolt add test
@@ -48,21 +72,19 @@ teardown() {
     [[ "$output" =~ 'test,false,modified' ]] || false
 }
 
-@test "sql-status: status properly works with staged and not staged doc diffs" {
-    skip_nbf_dolt_1
+@test "sql-status: status properly works with docs" {
     echo readme-text > README.md
+    dolt docs upload README.md README.md
     echo license-text > LICENSE.md
+    dolt docs upload LICENSE.md LICENSE.md
 
-    dolt add LICENSE.md
-
+    dolt sql -r csv -q "select * from dolt_status ORDER BY table_name"
     run dolt sql -r csv -q "select * from dolt_status ORDER BY table_name"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ 'LICENSE.md,true,new doc' ]] || false
-    [[ "$output" =~ 'README.md,false,new doc' ]] || false
+    [[ "$output" =~ 'dolt_docs,false,new table' ]] || false
 }
 
 @test "sql-status: status works property with working tables in conflict" {
-    skip_nbf_dolt_1
     # Start by causing the conflict.
     dolt sql -q "insert into test values (0, 0, 0, 0, 0, 0)"
     dolt add test
@@ -76,8 +98,8 @@ teardown() {
     dolt add test
     dolt commit -m "changed pk=0 all cells to 11"
     dolt checkout main
-    run dolt merge change-cell
-    [ "$status" -eq 0 ]
+    run dolt merge change-cell -m "merge change-cell"
+    [ "$status" -eq 1 ]
     [[ "$output" =~ "CONFLICT" ]] || false
 
     run dolt sql -r csv -q "select * from dolt_status"
@@ -86,21 +108,27 @@ teardown() {
 }
 
 @test "sql-status: status works properly with working docs in conflict" {
-     skip_nbf_dolt_1
      echo "a readme" > README.md
+     dolt docs upload README.md README.md
      dolt add .
      dolt commit -m "Committing initial docs"
+
      dolt branch test-a
      dolt branch test-b
+
      dolt checkout test-a
      echo test-a branch > README.md
+     dolt docs upload README.md README.md
      dolt add .
      dolt commit -m "Changed README.md on test-a branch"
+
      dolt checkout test-b
-     run cat README.md
+     run dolt docs print README.md
      [[ $output =~ "a readme" ]] || false
      [[ ! $output =~ "test-a branch" ]] || false
+
      echo test-b branch > README.md
+     dolt docs upload README.md README.md
      dolt add .
      dolt commit -m "Changed README.md on test-a branch"
      dolt checkout main
@@ -109,15 +137,16 @@ teardown() {
      run dolt merge test-a
      [ "$status" -eq 0 ]
      [[ $output =~ "Fast-forward" ]] || false
-     run cat README.md
+     run dolt docs print README.md
      [[ "$output" =~ "test-a branch" ]] || false
 
      # A merge with conflicts does not change the working root.
      # If the conflicts are resolved with --ours, the working root and the docs on the filesystem remain the same.
-     run dolt merge test-b
-     [ "$status" -eq 0 ]
+     run dolt merge test-b -m "merge test-b"
+     [ "$status" -eq 1 ]
      [[ $output =~ "CONFLICT" ]] || false
 
+     dolt status
      run dolt sql -r csv -q "select * from dolt_status ORDER BY status"
      [ "$status" -eq 0 ]
      [[ "$output" =~ 'dolt_docs,false,conflict' ]] || false

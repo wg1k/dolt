@@ -22,39 +22,62 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 	"github.com/dolthub/dolt/go/store/prolly"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/val"
 )
 
 type prollyFkIndexer struct {
-	writer *prollyTableWriter
-	index  index.DoltIndex
-	pRange prolly.Range
+	writer   *prollyTableWriter
+	index    index.DoltIndex
+	pRange   prolly.Range
+	refCheck bool
 }
 
-var _ sql.Table = prollyFkIndexer{}
+var _ sql.Table = (*prollyFkIndexer)(nil)
+var _ sql.IndexedTable = (*prollyFkIndexer)(nil)
+var _ sql.ReferenceChecker = (*prollyFkIndexer)(nil)
 
 // Name implements the interface sql.Table.
-func (n prollyFkIndexer) Name() string {
-	return n.writer.tableName
+func (n *prollyFkIndexer) Name() string {
+	return n.writer.tableName.Name
 }
 
 // String implements the interface sql.Table.
-func (n prollyFkIndexer) String() string {
-	return n.writer.tableName
+func (n *prollyFkIndexer) String() string {
+	return n.writer.tableName.Name
 }
 
 // Schema implements the interface sql.Table.
-func (n prollyFkIndexer) Schema() sql.Schema {
+func (n *prollyFkIndexer) Schema() sql.Schema {
 	return n.writer.sqlSch
 }
 
+func (n *prollyFkIndexer) SetReferenceCheck() error {
+	n.refCheck = true
+	return nil
+}
+
+// Collation implements the interface sql.Table.
+func (n *prollyFkIndexer) Collation() sql.CollationID {
+	return sql.CollationID(n.writer.sch.GetCollation())
+}
+
+func (n *prollyFkIndexer) LookupPartitions(ctx *sql.Context, lookup sql.IndexLookup) (sql.PartitionIter, error) {
+	ranges, err := index.ProllyRangesFromIndexLookup(ctx, lookup)
+	if err != nil {
+		return nil, err
+	}
+	n.pRange = ranges[0]
+	return sql.PartitionsToPartitionIter(fkDummyPartition{}), nil
+}
+
 // Partitions implements the interface sql.Table.
-func (n prollyFkIndexer) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
+func (n *prollyFkIndexer) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
 	return sql.PartitionsToPartitionIter(fkDummyPartition{}), nil
 }
 
 // PartitionRows implements the interface sql.Table.
-func (n prollyFkIndexer) PartitionRows(ctx *sql.Context, _ sql.Partition) (sql.RowIter, error) {
+func (n *prollyFkIndexer) PartitionRows(ctx *sql.Context, _ sql.Partition) (sql.RowIter, error) {
 	var idxWriter indexWriter
 	var ok bool
 	if n.index.IsPrimaryKey() {
@@ -63,33 +86,25 @@ func (n prollyFkIndexer) PartitionRows(ctx *sql.Context, _ sql.Partition) (sql.R
 		return nil, fmt.Errorf("unable to find writer for index `%s`", n.index.ID())
 	}
 
-	idxToPkMap := make(map[int]int)
-	pkColToOrdinal := make(map[int]int)
-	for i, ord := range n.writer.sch.GetPkOrdinals() {
-		pkColToOrdinal[ord] = i
-	}
-	for idxPos, idxCol := range n.index.IndexSchema().GetAllCols().GetColumns() {
-		if tblIdx, ok := n.writer.sch.GetPKCols().TagToIdx[idxCol.Tag]; ok {
-			idxToPkMap[idxPos] = pkColToOrdinal[tblIdx]
+	pkToIdxMap := make(val.OrdinalMapping, n.writer.sch.GetPKCols().Size())
+	for j, idxCol := range n.index.IndexSchema().GetPKCols().GetColumns() {
+		if i, ok := n.writer.sch.GetPKCols().TagToIdx[idxCol.Tag]; ok {
+			pkToIdxMap[i] = j
 		}
 	}
-
+	rangeIter, err := idxWriter.IterRange(ctx, n.pRange)
+	if err != nil {
+		return nil, err
+	}
 	if primary, ok := n.writer.primary.(prollyIndexWriter); ok {
-		rangeIter, err := idxWriter.(prollyIndexWriter).mut.IterRange(ctx, n.pRange)
-		if err != nil {
-			return nil, err
-		}
 		return &prollyFkPkRowIter{
 			rangeIter:  rangeIter,
-			idxToPkMap: idxToPkMap,
+			pkToIdxMap: pkToIdxMap,
 			primary:    primary,
 			sqlSch:     n.writer.sqlSch,
+			refCheck:   n.refCheck,
 		}, nil
 	} else {
-		rangeIter, err := idxWriter.(prollyKeylessSecondaryWriter).mut.IterRange(ctx, n.pRange)
-		if err != nil {
-			return nil, err
-		}
 		return &prollyFkKeylessRowIter{
 			rangeIter: rangeIter,
 			primary:   n.writer.primary.(prollyKeylessWriter),
@@ -98,52 +113,67 @@ func (n prollyFkIndexer) PartitionRows(ctx *sql.Context, _ sql.Partition) (sql.R
 	}
 }
 
-// prollyFkPkRowIter returns rows requested by a foreign key reference. For use on tables with primary keys.
+// prollyFkPkRowIter returns rows of the parent table requested by a foreign key reference. For use on tables with primary keys.
 type prollyFkPkRowIter struct {
 	rangeIter  prolly.MapIter
-	idxToPkMap map[int]int
+	pkToIdxMap val.OrdinalMapping
 	primary    prollyIndexWriter
 	sqlSch     sql.Schema
+	refCheck   bool
 }
 
 var _ sql.RowIter = prollyFkPkRowIter{}
 
 // Next implements the interface sql.RowIter.
 func (iter prollyFkPkRowIter) Next(ctx *sql.Context) (sql.Row, error) {
-	k, _, err := iter.rangeIter.Next(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if k == nil {
-		return nil, io.EOF
-	}
+	for {
+		// |rangeIter| iterates on the foreign key index of the parent table
+		k, _, err := iter.rangeIter.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if k == nil {
+			return nil, io.EOF
+		}
 
-	pkBld := iter.primary.keyBld
-	for idxPos, pkPos := range iter.idxToPkMap {
-		pkBld.PutRaw(pkPos, k.GetField(idxPos))
-	}
-	pkTup := pkBld.BuildPermissive(sharePool)
+		pkBld := iter.primary.keyBld
+		for pkPos, idxPos := range iter.pkToIdxMap {
+			pkBld.PutRaw(pkPos, k.GetField(idxPos))
+		}
+		pkTup := pkBld.BuildPermissive(sharePool)
 
-	nextRow := make(sql.Row, len(iter.primary.keyMap)+len(iter.primary.valMap))
-	err = iter.primary.mut.Get(ctx, pkTup, func(tblKey, tblVal val.Tuple) error {
+		var tblKey, tblVal val.Tuple
+		err = iter.primary.mut.Get(ctx, pkTup, func(k, v val.Tuple) error {
+			tblKey, tblVal = k, v
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if tblKey == nil {
+			continue // referential integrity broken
+		}
+
+		if iter.refCheck {
+			// no need to deserialize
+			return nil, nil
+		}
+
+		nextRow := make(sql.Row, len(iter.primary.keyMap)+len(iter.primary.valMap))
 		for from := range iter.primary.keyMap {
 			to := iter.primary.keyMap.MapOrdinal(from)
-			if nextRow[to], err = index.GetField(iter.primary.keyBld.Desc, from, tblKey); err != nil {
-				return err
+			if nextRow[to], err = tree.GetField(ctx, iter.primary.keyBld.Desc, from, tblKey, iter.primary.mut.NodeStore()); err != nil {
+				return nil, err
 			}
 		}
 		for from := range iter.primary.valMap {
 			to := iter.primary.valMap.MapOrdinal(from)
-			if nextRow[to], err = index.GetField(iter.primary.valBld.Desc, from, tblVal); err != nil {
-				return err
+			if nextRow[to], err = tree.GetField(ctx, iter.primary.valBld.Desc, from, tblVal, iter.primary.mut.NodeStore()); err != nil {
+				return nil, err
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		return nextRow, nil
 	}
-	return nextRow, nil
 }
 
 // Close implements the interface sql.RowIter.
@@ -177,7 +207,7 @@ func (iter prollyFkKeylessRowIter) Next(ctx *sql.Context) (sql.Row, error) {
 	err = iter.primary.mut.Get(ctx, primaryKey, func(tblKey, tblVal val.Tuple) error {
 		for from := range iter.primary.valMap {
 			to := iter.primary.valMap.MapOrdinal(from)
-			if nextRow[to], err = index.GetField(iter.primary.valBld.Desc, from+1, tblVal); err != nil {
+			if nextRow[to], err = tree.GetField(ctx, iter.primary.valBld.Desc, from+1, tblVal, iter.primary.mut.NodeStore()); err != nil {
 				return err
 			}
 		}

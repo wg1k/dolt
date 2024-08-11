@@ -31,6 +31,7 @@ const (
 	globalParamName   = "global"
 	localParamName    = "local"
 	addOperationStr   = "add"
+	setOperationStr   = "set"
 	listOperationStr  = "list"
 	getOperationStr   = "get"
 	unsetOperationStr = "unset"
@@ -40,14 +41,39 @@ var cfgDocs = cli.CommandDocumentationContent{
 	ShortDesc: `Get and set repository or global options`,
 	LongDesc: `You can query/set/replace/unset options with this command.
 		
-	When reading, the values are read from the global and repository local configuration files, and options {{.LessThan}}--global{{.GreaterThan}}, and {{.LessThan}}--local{{.GreaterThan}} can be used to tell the command to read from only that location.
-	
-	When writing, the new value is written to the repository local configuration file by default, and options {{.LessThan}}--global{{.GreaterThan}}, can be used to tell the command to write to that location (you can say {{.LessThan}}--local{{.GreaterThan}} but that is the default).
+When reading, the values are read from the global and repository local configuration files, and options {{.LessThan}}--global{{.GreaterThan}}, and {{.LessThan}}--local{{.GreaterThan}} can be used to tell the command to read from only that location.
+
+When writing, the new value is written to the repository local configuration file by default, and options {{.LessThan}}--global{{.GreaterThan}}, can be used to tell the command to write to that location (you can say {{.LessThan}}--local{{.GreaterThan}} but that is the default).
+
+Valid configuration variables:
+
+	- core.editor - lets you edit 'commit' or 'tag' messages by launching the set editor.
+
+	- creds.add_url - sets the endpoint used to authenticate a client for 'dolt login'.
+
+	- doltlab.insecure - boolean flag used to authenticate a client against DoltLab.
+
+	- init.defaultbranch - allows overriding the default branch name e.g. when initializing a new repository.
+
+	- metrics.disabled - boolean flag disables sending metrics when true.
+
+	- user.creds - sets user keypairs for authenticating with doltremoteapi.
+
+	- user.email - sets name used in the author and committer field of commit objects.
+
+	- user.name - sets email used in the author and committer field of commit objects.
+
+	- remotes.default_host - sets default host for authenticating with doltremoteapi.
+
+	- remotes.default_port - sets default port for authenticating with doltremoteapi.
+
+	- push.autoSetupRemote - if set to "true" assume --set-upstream on default push when no upstream tracking exists for the current branch.
 `,
 
 	Synopsis: []string{
 		`[--global|--local] --list`,
 		`[--global|--local] --add {{.LessThan}}name{{.GreaterThan}} {{.LessThan}}value{{.GreaterThan}}`,
+		`[--global|--local] --set {{.LessThan}}name{{.GreaterThan}} {{.LessThan}}value{{.GreaterThan}}`,
 		`[--global|--local] --get {{.LessThan}}name{{.GreaterThan}}`,
 		`[--global|--local] --unset {{.LessThan}}name{{.GreaterThan}}...`,
 	},
@@ -55,7 +81,7 @@ var cfgDocs = cli.CommandDocumentationContent{
 
 type ConfigCmd struct{}
 
-// Name is returns the name of the Dolt cli command. This is what is used on the command line to invoke the command
+// Name returns the name of the Dolt cli command. This is what is used on the command line to invoke the command
 func (cmd ConfigCmd) Name() string {
 	return "config"
 }
@@ -77,10 +103,11 @@ func (cmd ConfigCmd) Docs() *cli.CommandDocumentation {
 }
 
 func (cmd ConfigCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithVariableArgs(cmd.Name())
 	ap.SupportsFlag(globalParamName, "", "Use global config.")
 	ap.SupportsFlag(localParamName, "", "Use repository local config.")
 	ap.SupportsFlag(addOperationStr, "", "Set the value of one or more config parameters")
+	ap.SupportsFlag(setOperationStr, "", "Set the value of one or more config parameters")
 	ap.SupportsFlag(listOperationStr, "", "List the values of all config parameters.")
 	ap.SupportsFlag(getOperationStr, "", "Get the value of one or more config parameters.")
 	ap.SupportsFlag(unsetOperationStr, "", "Unset the value of one or more config parameters.")
@@ -89,13 +116,13 @@ func (cmd ConfigCmd) ArgParser() *argparser.ArgParser {
 
 // Exec is used by the config command to allow users to view / edit their global and repository local configurations.
 // Exec executes the command
-func (cmd ConfigCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd ConfigCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cfgDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	cfgTypes := apr.FlagsEqualTo([]string{globalParamName, localParamName}, true)
-	ops := apr.FlagsEqualTo([]string{addOperationStr, listOperationStr, getOperationStr, unsetOperationStr}, true)
+	ops := apr.FlagsEqualTo([]string{addOperationStr, setOperationStr, listOperationStr, getOperationStr, unsetOperationStr}, true)
 
 	if cfgTypes.Size() > 1 {
 		cli.PrintErrln(color.RedString("Specifying both -local and -global is not valid. Exactly one may be set"))
@@ -105,7 +132,7 @@ func (cmd ConfigCmd) Exec(ctx context.Context, commandStr string, args []string,
 		case 1:
 			return processConfigCommand(dEnv, cfgTypes, ops.AsSlice()[0], apr.Args, usage)
 		default:
-			cli.PrintErrln(color.RedString("Exactly one of the -add, -get, -unset, -list flags must be set."))
+			cli.PrintErrln(color.RedString("Exactly one of the -add, -set, -get, -unset, -list flags must be set."))
 			usage()
 		}
 	}
@@ -119,7 +146,7 @@ func processConfigCommand(dEnv *env.DoltEnv, setCfgTypes *set.StrSet, opName str
 		return getOperation(dEnv, setCfgTypes, args, func(k string, v *string) {
 			cli.Println(*v)
 		})
-	case addOperationStr:
+	case addOperationStr, setOperationStr:
 		return addOperation(dEnv, setCfgTypes, args, usage)
 	case unsetOperationStr:
 		return unsetOperation(dEnv, setCfgTypes, args, usage)
@@ -180,7 +207,13 @@ func addOperation(dEnv *env.DoltEnv, setCfgTypes *set.StrSet, args []string, usa
 
 	updates := make(map[string]string)
 	for i := 0; i < len(args); i += 2 {
-		updates[strings.ToLower(args[i])] = args[i+1]
+		option := strings.ToLower(args[i])
+		value := args[i+1]
+		if _, ok := config.ConfigOptions[option]; !ok && !strings.HasPrefix(option, env.SqlServerGlobalsPrefix) {
+			cli.Println("error: invalid config option, use dolt config --help to check valid configuration variables")
+			return 1
+		}
+		updates[option] = value
 	}
 
 	var cfgType string
@@ -200,7 +233,12 @@ func addOperation(dEnv *env.DoltEnv, setCfgTypes *set.StrSet, args []string, usa
 		case globalParamName:
 			panic("Should not have been able to get this far without a global config.")
 		case localParamName:
-			err := dEnv.Config.CreateLocalConfig(updates)
+			configDir, err := dEnv.FS.Abs(".")
+			if err != nil {
+				cli.PrintErrln(color.RedString("Unable to resolve current path to create repo local config file"))
+				return 1
+			}
+			err = dEnv.Config.CreateLocalConfig(configDir, updates)
 			if err != nil {
 				cli.PrintErrln(color.RedString("Unable to create repo local config file"))
 				return 1

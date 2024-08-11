@@ -22,7 +22,7 @@ table Table {
 
   // an embedded row map;
   // for __DOLT_DEV__, an EncodeValue(types.Map).
-  // for __DOLT_1__, a TupleMap.
+  // for __DOLT__, a TupleMap.
   primary_index:[ubyte] (required);
 
   // Entries map from index names to addresses of
@@ -34,12 +34,14 @@ table Table {
   conflicts:Conflicts;
 
   // address of a violations types.Map (for __DOLT_DEV__).
+  // todo: deprecate
   violations:[ubyte];
 
   // address of artifacts
   artifacts:[ubyte];
 }
 
+// todo: deprecate
 table Conflicts {
     // address of a conflicts types.Map (for __DOLT_DEV__).
     data:[ubyte] (required);

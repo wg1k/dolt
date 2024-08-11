@@ -3,14 +3,13 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 }
 
 teardown() {
     teardown_common
 }
 
-@test "conflict-detection: merge non-existant branch errors" {
+@test "conflict-detection: merge non-existent branch errors" {
     run dolt merge batmans-parents
     [ $status -eq 1 ]
     [[ "$output" =~ "branch not found" ]] || false
@@ -42,15 +41,15 @@ SQL
     dolt checkout main
     dolt sql -q "replace into test values (0, 11, 0, 0, 0, 0)"
 
-    run dolt merge other
+    run dolt merge other -m "merge"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "error: Your local changes to the following tables would be overwritten by merge:" ]] || false
+    [[ "$output" =~ "error: local changes would be stomped by merge:" ]] || false
     [[ "$output" =~ "test" ]] || false
     [[ "$output" =~ "Please commit your changes before you merge." ]] || false
 
     dolt add test
     dolt commit -m "changes pk=0 c1 t0 11"
-    run dolt merge other
+    run dolt merge other -m "merge"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ "$output" =~ "1 tables changed" ]] || false
@@ -59,6 +58,7 @@ SQL
 }
 
 @test "conflict-detection: two branches modify different cell different row. merge. no conflict" {
+
     dolt sql <<SQL
 CREATE TABLE test (
   pk BIGINT NOT NULL,
@@ -83,12 +83,12 @@ SQL
     dolt add test
     dolt commit -m "changed pk=1 c5 to 11"
     dolt checkout main
-    run dolt merge change-cell
+    run dolt merge change-cell --no-commit
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ "$output" =~ "1 tables changed" ]] || false
-    [[ "$output" =~ "1 rows modified" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
+    [[ "$output" =~ "1 rows modified" ]] || false
     run dolt status
     [[ "$output" =~ "All conflicts and constraint violations fixed" ]] || false
     [[ "$output" =~ "Changes to be committed:" ]] || false
@@ -118,12 +118,12 @@ SQL
     dolt add test
     dolt commit -m "changed pk=0 c5 to 11"
     dolt checkout main
-    run dolt merge change-cell
+    run dolt merge change-cell --no-commit
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ "$output" =~ "1 tables changed" ]] || false
-    [[ "$output" =~ "1 rows modified" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
+    [[ "$output" =~ "1 rows modified" ]] || false
     run dolt status
     [[ "$output" =~ "All conflicts and constraint violations fixed" ]] || false
     [[ "$output" =~ "Changes to be committed:" ]] || false
@@ -153,8 +153,8 @@ SQL
     dolt add test
     dolt commit -m "changed pk=0 all cells to 11"
     dolt checkout main
-    run dolt merge change-cell
-    [ "$status" -eq 0 ]
+    run dolt merge change-cell -m "merge"
+    [ "$status" -eq 1 ]
     [[ "$output" =~ "CONFLICT" ]] || false
     run dolt status
     [[ "$output" =~ "You have unmerged tables." ]] || false
@@ -184,7 +184,7 @@ SQL
     dolt add test
     dolt commit -m "added pk=1 row"
     dolt checkout main
-    run dolt merge add-row
+    run dolt merge add-row -m "merge"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ "$output" =~ "1 tables changed" ]] || false
@@ -215,7 +215,7 @@ SQL
     dolt add test
     dolt commit -m "added pk=0 row"
     dolt checkout main
-    run dolt merge add-row
+    run dolt merge add-row -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
@@ -254,7 +254,7 @@ SQL
     dolt add test2
     dolt commit -m "added new table test2"
     dolt checkout main
-    run dolt merge add-table
+    run dolt merge add-table -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     skip "should have a merge summary section that says 1 table changed"
@@ -285,7 +285,7 @@ SQL
     dolt add test
     dolt commit -m "added same column c0"
     dolt checkout main
-    run dolt merge add-column
+    run dolt merge add-column -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
@@ -316,7 +316,7 @@ SQL
     dolt add test
     dolt commit -m "added column c6"
     dolt checkout main
-    run dolt merge add-column
+    run dolt merge add-column -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ "$output" =~ "1 tables changed" ]] || false
@@ -351,7 +351,7 @@ SQL
     dolt commit -m "added column c0 as int"
     dolt checkout main
     skip "This created two c0 columns with different types and tag numbers. Bug I think."
-    run dolt merge add-column
+    run dolt merge add-column -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "CONFLICT" ]] || false
 }
@@ -379,7 +379,7 @@ SQL
     dolt add test
     dolt commit -m "deleted c5 again"
     dolt checkout main
-    run dolt merge delete-column
+    run dolt merge delete-column -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
@@ -412,7 +412,7 @@ SQL
     dolt add test
     dolt commit -m "deleted column c4"
 
-    run dolt merge one
+    run dolt merge one -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
@@ -451,7 +451,7 @@ SQL
     dolt add test
     dolt commit -m "renamed c5 to c0 again"
     dolt checkout main
-    run dolt merge rename-column
+    run dolt merge rename-column -m "merge"
     [ $status -eq 0 ]
     [[ "$output" =~ "Updating" ]] || false
     [[ ! "$output" =~ "CONFLICT" ]] || false
@@ -481,7 +481,7 @@ SQL
     dolt add test
     dolt commit -m "renamed c5 to c6"
     dolt checkout main
-    run dolt merge rename-column
+    run dolt merge rename-column -m "merge"
     [ $status -eq 1 ]
     [[ "$output" =~ "Bad merge" ]] || false
     [ $status -eq 0 ]
@@ -512,7 +512,7 @@ SQL
     dolt add test
     dolt commit -m "renamed c5 to c6"
     dolt checkout main
-    run dolt merge rename-column
+    run dolt merge rename-column -m "merge"
     [ $status -eq 1 ]
     [[ "$output" =~ "Bad merge" ]] || false
     [ $status -eq 0 ]
@@ -536,7 +536,7 @@ SQL
     [ $status -eq 0 ]
     [[ "$output" =~ "nothing to commit" ]] || false
     dolt checkout main
-    run dolt merge other
+    run dolt merge other -m "merge"
     [ $status -eq 0 ]
     [[ ! "$output" =~ "CONFLICT" ]] || false
 }

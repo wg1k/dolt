@@ -27,7 +27,7 @@ import (
 
 type ArtifactIndex interface {
 	HashOf() (hash.Hash, error)
-	Count() uint64
+	Count() (uint64, error)
 	Format() *types.NomsBinFormat
 	HasConflicts(ctx context.Context) (bool, error)
 	// ConflictCount returns the number of conflicts
@@ -42,27 +42,26 @@ type ArtifactIndex interface {
 // RefFromArtifactIndex persists |idx| and returns the types.Ref targeting it.
 func RefFromArtifactIndex(ctx context.Context, vrw types.ValueReadWriter, idx ArtifactIndex) (types.Ref, error) {
 	switch idx.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		panic("TODO")
 
-	case types.Format_DOLT_1:
+	case types.Format_DOLT:
 		b := shim.ValueFromArtifactMap(idx.(prollyArtifactIndex).index)
 		return refFromNomsValue(ctx, vrw, b)
 
 	default:
-		return types.Ref{}, errNbfUnkown
+		return types.Ref{}, errNbfUnknown
 	}
 }
 
 // NewEmptyArtifactIndex returns an ArtifactIndex with no artifacts.
-func NewEmptyArtifactIndex(ctx context.Context, vrw types.ValueReadWriter, tableSch schema.Schema) (ArtifactIndex, error) {
+func NewEmptyArtifactIndex(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, tableSch schema.Schema) (ArtifactIndex, error) {
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		panic("TODO")
 
-	case types.Format_DOLT_1:
-		kd := shim.KeyDescriptorFromSchema(tableSch)
-		ns := tree.NewNodeStore(shim.ChunkStoreFromVRW(vrw))
+	case types.Format_DOLT:
+		kd := tableSch.GetKeyDescriptor()
 		m, err := prolly.NewArtifactMapFromTuples(ctx, ns, kd)
 		if err != nil {
 			return nil, err
@@ -70,7 +69,7 @@ func NewEmptyArtifactIndex(ctx context.Context, vrw types.ValueReadWriter, table
 		return ArtifactIndexFromProllyMap(m), nil
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
@@ -84,29 +83,31 @@ func ProllyMapFromArtifactIndex(i ArtifactIndex) prolly.ArtifactMap {
 	return i.(prollyArtifactIndex).index
 }
 
-func artifactIndexFromRef(ctx context.Context, vrw types.ValueReadWriter, tableSch schema.Schema, r types.Ref) (ArtifactIndex, error) {
-	return artifactIndexFromAddr(ctx, vrw, tableSch, r.TargetHash())
+func artifactIndexFromRef(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, tableSch schema.Schema, r types.Ref) (ArtifactIndex, error) {
+	return artifactIndexFromAddr(ctx, vrw, ns, tableSch, r.TargetHash())
 }
 
-func artifactIndexFromAddr(ctx context.Context, vrw types.ValueReadWriter, tableSch schema.Schema, addr hash.Hash) (ArtifactIndex, error) {
+func artifactIndexFromAddr(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, tableSch schema.Schema, addr hash.Hash) (ArtifactIndex, error) {
 	v, err := vrw.ReadValue(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		panic("TODO")
 
-	case types.Format_DOLT_1:
-		root := shim.NodeFromValue(v)
-		kd := shim.KeyDescriptorFromSchema(tableSch)
-		ns := tree.NewNodeStore(shim.ChunkStoreFromVRW(vrw))
+	case types.Format_DOLT:
+		root, err := shim.NodeFromValue(v)
+		if err != nil {
+			return nil, err
+		}
+		kd := tableSch.GetKeyDescriptor()
 		m := prolly.NewArtifactMap(root, ns, kd)
 		return ArtifactIndexFromProllyMap(m), nil
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
@@ -118,8 +119,9 @@ func (i prollyArtifactIndex) HashOf() (hash.Hash, error) {
 	return i.index.HashOf(), nil
 }
 
-func (i prollyArtifactIndex) Count() uint64 {
-	return uint64(i.index.Count())
+func (i prollyArtifactIndex) Count() (uint64, error) {
+	c, err := i.index.Count()
+	return uint64(c), err
 }
 
 func (i prollyArtifactIndex) Format() *types.NomsBinFormat {
@@ -135,7 +137,11 @@ func (i prollyArtifactIndex) ConflictCount(ctx context.Context) (uint64, error) 
 }
 
 func (i prollyArtifactIndex) ConstraintViolationCount(ctx context.Context) (uint64, error) {
-	return i.index.CountOfTypes(ctx, prolly.ArtifactTypeForeignKeyViol, prolly.ArtifactTypeUniqueKeyViol, prolly.ArtifactTypeChkConsViol)
+	return i.index.CountOfTypes(ctx,
+		prolly.ArtifactTypeForeignKeyViol,
+		prolly.ArtifactTypeUniqueKeyViol,
+		prolly.ArtifactTypeChkConsViol,
+		prolly.ArtifactTypeNullViol)
 }
 
 func (i prollyArtifactIndex) ClearConflicts(ctx context.Context) (ArtifactIndex, error) {

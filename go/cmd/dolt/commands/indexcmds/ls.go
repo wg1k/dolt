@@ -20,10 +20,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dolthub/dolt/go/store/types"
-
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 )
@@ -47,28 +46,24 @@ func (cmd LsCmd) Description() string {
 	return "Internal debugging command to display the list of indexes."
 }
 
-func (cmd LsCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
-}
-
 func (cmd LsCmd) Docs() *cli.CommandDocumentation {
 	return nil
 }
 
 func (cmd LsCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 1)
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"table", "The table to display indexes from. If one is not specified, then all tables' indexes are displayed."})
 	return ap
 }
 
-func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, lsDocs, ap))
-	apr := cli.ParseArgsOrDie(ap, args, help)
-
-	if apr.NArg() > 1 {
-		return HandleErr(errhand.BuildDError("Only one table may be provided at a time.").Build(), usage)
+	ap.TooManyArgsErrorFunc = func(receivedArgs []string) error {
+		args := strings.Join(receivedArgs, ", ")
+		return fmt.Errorf("Only one table may be provided at a time. Received %d: %s", len(receivedArgs), args)
 	}
+	help, _ := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, lsDocs, ap))
+	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	working, err := dEnv.WorkingRoot(context.Background())
 	if err != nil {
@@ -77,7 +72,7 @@ func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 
 	var tableNames []string
 	if apr.NArg() == 0 {
-		tableNames, err = working.GetTableNames(ctx)
+		tableNames, err = working.GetTableNames(ctx, doltdb.DefaultSchemaName)
 		if err != nil {
 			return HandleErr(errhand.BuildDError("Unable to get tables.").AddCause(err).Build(), nil)
 		}
@@ -93,7 +88,7 @@ func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 
 	var output []string
 	for _, tableName := range tableNames {
-		table, ok, err := working.GetTable(ctx, tableName)
+		table, ok, err := working.GetTable(ctx, doltdb.TableName{Name: tableName})
 		if err != nil {
 			return HandleErr(errhand.BuildDError("Unable to get table `%s`.", tableName).AddCause(err).Build(), nil)
 		}
@@ -115,6 +110,14 @@ func (cmd LsCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 			}
 			for _, index := range sch.Indexes().AllIndexes() {
 				output = append(output, fmt.Sprintf("    %s(%s)", index.Name(), strings.Join(index.ColumnNames(), ", ")))
+				if index.IsFullText() {
+					props := index.FullTextProperties()
+					output = append(output, fmt.Sprintf("        %s", props.ConfigTable))
+					output = append(output, fmt.Sprintf("        %s", props.PositionTable))
+					output = append(output, fmt.Sprintf("        %s", props.DocCountTable))
+					output = append(output, fmt.Sprintf("        %s", props.GlobalCountTable))
+					output = append(output, fmt.Sprintf("        %s", props.RowCountTable))
+				}
 			}
 		}
 	}

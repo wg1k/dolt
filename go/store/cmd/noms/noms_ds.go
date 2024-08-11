@@ -64,7 +64,7 @@ func runDs(ctx context.Context, args []string) int {
 			util.CheckError(fmt.Errorf("Dataset %v not found", set.ID()))
 		}
 
-		_, err = set.Database().Delete(ctx, set)
+		_, err = set.Database().Delete(ctx, set, "")
 		util.CheckError(err)
 
 		fmt.Printf("Deleted %v (was #%v)\n", toDelete, oldCommitAddr.String())
@@ -73,7 +73,7 @@ func runDs(ctx context.Context, args []string) int {
 		if len(args) >= 1 {
 			dbSpec = args[0]
 		}
-		store, _, err := cfg.GetDatabase(ctx, dbSpec)
+		store, _, _, err := cfg.GetDatabase(ctx, dbSpec)
 		util.CheckError(err)
 		defer store.Close()
 

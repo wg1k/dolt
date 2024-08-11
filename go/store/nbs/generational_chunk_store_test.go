@@ -131,7 +131,7 @@ func requireChunks(t *testing.T, ctx context.Context, chunks []chunks.Chunk, gen
 
 func putChunks(t *testing.T, ctx context.Context, chunks []chunks.Chunk, cs chunks.ChunkStore, indexesIn map[int]bool, chunkIndexes ...int) {
 	for _, idx := range chunkIndexes {
-		err := cs.Put(ctx, chunks[idx])
+		err := cs.Put(ctx, chunks[idx], noopGetAddrs)
 		require.NoError(t, err)
 		indexesIn[idx] = true
 	}
@@ -147,7 +147,7 @@ func TestGenerationalCS(t *testing.T) {
 
 	putChunks(t, ctx, chnks, oldGen, inOld, 0, 1, 2, 3, 4)
 
-	cs := NewGenerationalCS(oldGen, newGen)
+	cs := NewGenerationalCS(oldGen, newGen, nil) // NM4 - I guess we need more test here.
 	requireChunks(t, ctx, chnks, cs, inOld, inNew)
 
 	putChunks(t, ctx, chnks, cs, inNew, 6, 7, 8, 9)

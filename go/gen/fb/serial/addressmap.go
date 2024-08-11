@@ -1,4 +1,4 @@
-// Copyright 2022 Dolthub, Inc.
+// Copyright 2022-2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,30 +17,35 @@
 package serial
 
 import (
-	flatbuffers "github.com/google/flatbuffers/go"
+	flatbuffers "github.com/dolthub/flatbuffers/v23/go"
 )
 
 type AddressMap struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsAddressMap(buf []byte, offset flatbuffers.UOffsetT) *AddressMap {
+func InitAddressMapRoot(o *AddressMap, buf []byte, offset flatbuffers.UOffsetT) error {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &AddressMap{}
-	x.Init(buf, n+offset)
-	return x
+	return o.Init(buf, n+offset)
 }
 
-func GetSizePrefixedRootAsAddressMap(buf []byte, offset flatbuffers.UOffsetT) *AddressMap {
-	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+func TryGetRootAsAddressMap(buf []byte, offset flatbuffers.UOffsetT) (*AddressMap, error) {
 	x := &AddressMap{}
-	x.Init(buf, n+offset+flatbuffers.SizeUint32)
-	return x
+	return x, InitAddressMapRoot(x, buf, offset)
 }
 
-func (rcv *AddressMap) Init(buf []byte, i flatbuffers.UOffsetT) {
+func TryGetSizePrefixedRootAsAddressMap(buf []byte, offset flatbuffers.UOffsetT) (*AddressMap, error) {
+	x := &AddressMap{}
+	return x, InitAddressMapRoot(x, buf, offset+flatbuffers.SizeUint32)
+}
+
+func (rcv *AddressMap) Init(buf []byte, i flatbuffers.UOffsetT) error {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
+	if AddressMapNumFields < rcv.Table().NumFields() {
+		return flatbuffers.ErrTableHasUnknownFields
+	}
+	return nil
 }
 
 func (rcv *AddressMap) Table() flatbuffers.Table {
@@ -199,8 +204,10 @@ func (rcv *AddressMap) MutateTreeLevel(n byte) bool {
 	return rcv._tab.MutateByteSlot(14, n)
 }
 
+const AddressMapNumFields = 6
+
 func AddressMapStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(AddressMapNumFields)
 }
 func AddressMapAddKeyItems(builder *flatbuffers.Builder, keyItems flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(keyItems), 0)

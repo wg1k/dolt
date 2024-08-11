@@ -29,9 +29,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/semaphore"
 
-	"github.com/dolthub/dolt/go/libraries/utils/file"
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/nbs"
@@ -44,22 +43,7 @@ var ErrDBUpToDate = errors.New("the database does not need to be pulled as it's 
 // the event that the source ChunkStore does not implement `NBSCompressedChunkStore`.
 var ErrIncompatibleSourceChunkStore = errors.New("the chunk store of the source database does not implement NBSCompressedChunkStore.")
 
-const (
-	maxChunkWorkers       = 2
-	outstandingTableFiles = 2
-)
-
-// FilledWriters store CmpChunkTableWriter that have been filled and are ready to be flushed.  In the future will likely
-// add the md5 of the data to this structure to be used to verify table upload calls.
-type FilledWriters struct {
-	wr *nbs.CmpChunkTableWriter
-}
-
-// CmpChnkAndRefs holds a CompressedChunk and all of it's references
-type CmpChnkAndRefs struct {
-	cmpChnk nbs.CompressedChunk
-	refs    map[hash.Hash]bool
-}
+type WalkAddrs func(chunks.Chunk, func(hash.Hash, bool) error) error
 
 // Puller is used to sync data between to Databases
 type Puller struct {
@@ -67,13 +51,10 @@ type Puller struct {
 
 	srcChunkStore nbs.NBSCompressedChunkStore
 	sinkDBCS      chunks.ChunkStore
-	rootChunkHash hash.Hash
-	downloaded    hash.HashSet
+	hashes        hash.HashSet
 
-	wr            *nbs.CmpChunkTableWriter
-	tablefileSema *semaphore.Weighted
-	tempDir       string
-	chunksPerTF   int
+	wr *PullTableFileWriter
+	rd nbs.ChunkFetcher
 
 	pushLog *log.Logger
 
@@ -83,25 +64,31 @@ type Puller struct {
 
 // NewPuller creates a new Puller instance to do the syncing.  If a nil puller is returned without error that means
 // that there is nothing to pull and the sinkDB is already up to date.
-func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sinkCS chunks.ChunkStore, walkAddrs WalkAddrs, rootChunkHash hash.Hash, statsCh chan Stats) (*Puller, error) {
+func NewPuller(
+	ctx context.Context,
+	tempDir string,
+	chunksPerTF int,
+	srcCS, sinkCS chunks.ChunkStore,
+	walkAddrs WalkAddrs,
+	hashes []hash.Hash,
+	statsCh chan Stats,
+) (*Puller, error) {
 	// Sanity Check
-	exists, err := srcCS.Has(ctx, rootChunkHash)
-
+	hs := hash.NewHashSet(hashes...)
+	missing, err := srcCS.HasMany(ctx, hs)
 	if err != nil {
 		return nil, err
 	}
-
-	if !exists {
+	if missing.Size() != 0 {
 		return nil, errors.New("not found")
 	}
 
-	exists, err = sinkCS.Has(ctx, rootChunkHash)
-
+	hs = hash.NewHashSet(hashes...)
+	missing, err = sinkCS.HasMany(ctx, hs)
 	if err != nil {
 		return nil, err
 	}
-
-	if exists {
+	if missing.Size() == 0 {
 		return nil, ErrDBUpToDate
 	}
 
@@ -114,14 +101,18 @@ func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sink
 		return nil, ErrIncompatibleSourceChunkStore
 	}
 
-	wr, err := nbs.NewCmpChunkTableWriter(tempDir)
+	wr := NewPullTableFileWriter(ctx, PullTableFileWriterConfig{
+		ConcurrentUploads:    2,
+		ChunksPerFile:        chunksPerTF,
+		MaximumBufferedFiles: 8,
+		TempDir:              tempDir,
+		DestStore:            sinkCS.(chunks.TableFileStore),
+	})
 
-	if err != nil {
-		return nil, err
-	}
+	rd := GetChunkFetcher(ctx, srcChunkStore)
 
 	var pushLogger *log.Logger
-	if dbg, ok := os.LookupEnv("PUSH_LOG"); ok && strings.ToLower(dbg) == "true" {
+	if dbg, ok := os.LookupEnv(dconfig.EnvPushLog); ok && strings.ToLower(dbg) == "true" {
 		logFilePath := filepath.Join(tempDir, "push.log")
 		f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.ModePerm)
 
@@ -134,15 +125,14 @@ func NewPuller(ctx context.Context, tempDir string, chunksPerTF int, srcCS, sink
 		waf:           walkAddrs,
 		srcChunkStore: srcChunkStore,
 		sinkDBCS:      sinkCS,
-		rootChunkHash: rootChunkHash,
-		downloaded:    hash.HashSet{},
-		tablefileSema: semaphore.NewWeighted(outstandingTableFiles),
-		tempDir:       tempDir,
+		hashes:        hash.NewHashSet(hashes...),
 		wr:            wr,
-		chunksPerTF:   chunksPerTF,
+		rd:            rd,
 		pushLog:       pushLogger,
 		statsCh:       statsCh,
-		stats:         &stats{},
+		stats: &stats{
+			wrStatsGetter: wr.GetStats,
+		},
 	}
 
 	if lcs, ok := sinkCS.(chunks.LoggingChunkStore); ok {
@@ -158,9 +148,14 @@ func (p *Puller) Logf(fmt string, args ...interface{}) {
 	}
 }
 
+type readable interface {
+	Reader() (io.ReadCloser, error)
+	Remove() error
+}
+
 type tempTblFile struct {
 	id          string
-	path        string
+	read        readable
 	numChunks   int
 	chunksLen   uint64
 	contentLen  uint64
@@ -198,7 +193,8 @@ func emitStats(s *stats, ch chan Stats) (cancel func()) {
 		for {
 			select {
 			case <-ticker.C:
-				newSendBytes := atomic.LoadUint64(&s.finishedSendBytes)
+				wrStats := s.wrStatsGetter()
+				newSendBytes := wrStats.FinishedSendBytes
 				newFetchedBytes := atomic.LoadUint64(&s.fetchedSourceBytes)
 				sendBytesDiff := newSendBytes - lastSendBytes
 				fetchedBytesDiff := newFetchedBytes - lastFetchedBytes
@@ -219,6 +215,13 @@ func emitStats(s *stats, ch chan Stats) (cancel func()) {
 					smoothedFetchBPS = curFetchedBPS + weight*(newFetchedBPS-curFetchedBPS)
 				}
 
+				if smoothedSendBPS < 1 {
+					smoothedSendBPS = 0
+				}
+				if smoothedFetchBPS < 1 {
+					smoothedFetchBPS = 0
+				}
+
 				atomic.StoreUint64(&s.sendBytesPerSec, math.Float64bits(smoothedSendBPS))
 				atomic.StoreUint64(&s.fetchedSourceBytesPerSec, math.Float64bits(smoothedFetchBPS))
 
@@ -234,6 +237,7 @@ func emitStats(s *stats, ch chan Stats) (cancel func()) {
 		defer wg.Done()
 		updateduration := 1 * time.Second
 		ticker := time.NewTicker(updateduration)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
@@ -249,9 +253,7 @@ func emitStats(s *stats, ch chan Stats) (cancel func()) {
 }
 
 type stats struct {
-	finishedSendBytes uint64
-	bufferedSendBytes uint64
-	sendBytesPerSec   uint64
+	sendBytesPerSec uint64
 
 	totalSourceChunks        uint64
 	fetchedSourceChunks      uint64
@@ -260,6 +262,8 @@ type stats struct {
 
 	sendBytesPerSecF          float64
 	fetchedSourceBytesPerSecF float64
+
+	wrStatsGetter func() PullTableFileWriterStats
 }
 
 type Stats struct {
@@ -274,101 +278,17 @@ type Stats struct {
 }
 
 func (s *stats) read() Stats {
+	wrStats := s.wrStatsGetter()
+
 	var ret Stats
-	ret.FinishedSendBytes = atomic.LoadUint64(&s.finishedSendBytes)
-	ret.BufferedSendBytes = atomic.LoadUint64(&s.bufferedSendBytes)
+	ret.FinishedSendBytes = wrStats.FinishedSendBytes
+	ret.BufferedSendBytes = wrStats.BufferedSendBytes
 	ret.SendBytesPerSec = math.Float64frombits(atomic.LoadUint64(&s.sendBytesPerSec))
 	ret.TotalSourceChunks = atomic.LoadUint64(&s.totalSourceChunks)
 	ret.FetchedSourceChunks = atomic.LoadUint64(&s.fetchedSourceChunks)
 	ret.FetchedSourceBytes = atomic.LoadUint64(&s.fetchedSourceBytes)
 	ret.FetchedSourceBytesPerSec = math.Float64frombits(atomic.LoadUint64(&s.fetchedSourceBytesPerSec))
 	return ret
-}
-
-func (p *Puller) uploadTempTableFile(ctx context.Context, tmpTblFile tempTblFile) error {
-	fi, err := os.Stat(tmpTblFile.path)
-	if err != nil {
-		return err
-	}
-
-	fileSize := fi.Size()
-	defer func() {
-		_ = file.Remove(tmpTblFile.path)
-	}()
-
-	// By tracking the number of bytes uploaded here,
-	// we can add bytes on to our bufferedSendBytes when
-	// we have to retry a table file write.
-	var localUploaded uint64
-	return p.sinkDBCS.(nbs.TableFileStore).WriteTableFile(ctx, tmpTblFile.id, tmpTblFile.numChunks, tmpTblFile.contentHash, func() (io.ReadCloser, uint64, error) {
-		f, err := os.Open(tmpTblFile.path)
-		if err != nil {
-			return nil, 0, err
-		}
-
-		if localUploaded == 0 {
-			// So far, we've added all the bytes for the compressed chunk data.
-			// We add the remaining bytes here --- bytes for the index and the
-			// table file footer.
-			atomic.AddUint64(&p.stats.bufferedSendBytes, uint64(fileSize)-tmpTblFile.chunksLen)
-		} else {
-			// A retry. We treat it as if what was already uploaded was rebuffered.
-			atomic.AddUint64(&p.stats.bufferedSendBytes, uint64(localUploaded))
-			localUploaded = 0
-		}
-		fWithStats := countingReader{countingReader{f, &localUploaded}, &p.stats.finishedSendBytes}
-
-		return fWithStats, uint64(fileSize), nil
-	})
-}
-
-func (p *Puller) processCompletedTables(ctx context.Context, completedTables <-chan FilledWriters) error {
-	fileIdToNumChunks := make(map[string]int)
-
-LOOP:
-	for {
-		select {
-		case tblFile, ok := <-completedTables:
-			if !ok {
-				break LOOP
-			}
-			p.tablefileSema.Release(1)
-
-			// content length before we finish the write, which will
-			// add the index and table file footer.
-			chunksLen := tblFile.wr.ContentLength()
-
-			id, err := tblFile.wr.Finish()
-			if err != nil {
-				return err
-			}
-
-			path := filepath.Join(p.tempDir, id)
-			err = tblFile.wr.FlushToFile(path)
-			if err != nil {
-				return err
-			}
-
-			ttf := tempTblFile{
-				id:          id,
-				path:        path,
-				numChunks:   tblFile.wr.Size(),
-				chunksLen:   chunksLen,
-				contentLen:  tblFile.wr.ContentLength(),
-				contentHash: tblFile.wr.GetMD5(),
-			}
-			err = p.uploadTempTableFile(ctx, ttf)
-			if err != nil {
-				return err
-			}
-
-			fileIdToNumChunks[id] = ttf.numChunks
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	return p.sinkDBCS.(nbs.TableFileStore).AddTableFilesToManifest(ctx, fileIdToNumChunks)
 }
 
 // Pull executes the sync operation
@@ -378,191 +298,84 @@ func (p *Puller) Pull(ctx context.Context) error {
 		defer c()
 	}
 
-	leaves := make(hash.HashSet)
-	absent := make(hash.HashSet)
-	absent.Insert(p.rootChunkHash)
-
 	eg, ctx := errgroup.WithContext(ctx)
 
-	completedTables := make(chan FilledWriters, 8)
-
-	eg.Go(func() error {
-		return p.processCompletedTables(ctx, completedTables)
+	const batchSize = 64 * 1024
+	tracker := NewPullChunkTracker(ctx, p.hashes, TrackerConfig{
+		BatchSize: batchSize,
+		HasManyer: p.sinkDBCS,
 	})
 
+	// One thread calls ChunkFetcher.Get on each batch.
 	eg.Go(func() error {
-		if err := p.tablefileSema.Acquire(ctx, 1); err != nil {
-			return err
-		}
-		for len(absent) > 0 {
-			limitToNewChunks(absent, p.downloaded)
-
-			var err error
-			absent, err = p.sinkDBCS.HasMany(ctx, absent)
+		for {
+			toFetch, hasMore, err := tracker.GetChunksToFetch()
 			if err != nil {
 				return err
 			}
+			if !hasMore {
+				return p.rd.CloseSend()
+			}
 
-			if len(absent) > 0 {
-				leaves, absent, err = p.getCmp(ctx, leaves, absent, completedTables)
-				if err != nil {
-					return err
-				}
+			atomic.AddUint64(&p.stats.totalSourceChunks, uint64(len(toFetch)))
+			err = p.rd.Get(ctx, toFetch)
+			if err != nil {
+				return err
 			}
 		}
-
-		if p.wr != nil && p.wr.Size() > 0 {
-			select {
-			case completedTables <- FilledWriters{p.wr}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		close(completedTables)
-		return nil
 	})
 
-	return eg.Wait()
-}
-
-func limitToNewChunks(absent hash.HashSet, downloaded hash.HashSet) {
-	smaller := absent
-	longer := downloaded
-	if len(absent) > len(downloaded) {
-		smaller = downloaded
-		longer = absent
-	}
-
-	for k := range smaller {
-		if longer.Has(k) {
-			absent.Remove(k)
-		}
-	}
-}
-
-func (p *Puller) getCmp(ctx context.Context, leaves, batch hash.HashSet, completedTables chan FilledWriters) (hash.HashSet, hash.HashSet, error) {
-	found := make(chan nbs.CompressedChunk, 4096)
-	processed := make(chan CmpChnkAndRefs, 4096)
-
-	atomic.AddUint64(&p.stats.totalSourceChunks, uint64(len(batch)))
-	eg, ctx := errgroup.WithContext(ctx)
+	// One thread reads the received chunks, walks their addresses and writes them to the table file.
 	eg.Go(func() error {
-		err := p.srcChunkStore.GetManyCompressed(ctx, batch, func(ctx context.Context, c nbs.CompressedChunk) {
-			atomic.AddUint64(&p.stats.fetchedSourceBytes, uint64(len(c.FullCompressedChunk)))
+		for {
+			cChk, err := p.rd.Recv(ctx)
+			if err == io.EOF {
+				// This means the requesting thread
+				// successfully saw all chunk addresses and
+				// called CloseSend and that all requested
+				// chunks were successfully delivered to this
+				// thread. Calling wr.Close() here will block
+				// on uploading any table files and will write
+				// the new table files to the destination's
+				// manifest.
+				return p.wr.Close()
+			}
+			if err != nil {
+				return err
+			}
+			if len(cChk.FullCompressedChunk) == 0 {
+				return errors.New("failed to get all chunks.")
+			}
+
+			atomic.AddUint64(&p.stats.fetchedSourceBytes, uint64(len(cChk.FullCompressedChunk)))
 			atomic.AddUint64(&p.stats.fetchedSourceChunks, uint64(1))
-			select {
-			case found <- c:
-			case <-ctx.Done():
-			}
-		})
-		if err != nil {
-			return err
-		}
-		close(found)
-		return nil
-	})
 
-	eg.Go(func() error {
-	LOOP:
-		for {
-			select {
-			case cmpChnk, ok := <-found:
-				if !ok {
-					break LOOP
-				}
-				p.downloaded.Insert(cmpChnk.H)
-				if leaves.Has(cmpChnk.H) {
-					select {
-					case processed <- CmpChnkAndRefs{cmpChnk: cmpChnk}:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-				} else {
-					chnk, err := cmpChnk.ToChunk()
-					if err != nil {
-						return err
-					}
-					refs := make(map[hash.Hash]bool)
-					err = p.waf(chnk, func(h hash.Hash, isleaf bool) error {
-						refs[h] = isleaf
-						return nil
-					})
-					if err != nil {
-						return err
-					}
-					select {
-					case processed <- CmpChnkAndRefs{cmpChnk: cmpChnk, refs: refs}:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-				}
-			case <-ctx.Done():
-				return ctx.Err()
+			chnk, err := cChk.ToChunk()
+			if err != nil {
+				return err
+			}
+			err = p.waf(chnk, func(h hash.Hash, _ bool) error {
+				tracker.Seen(h)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			tracker.TickProcessed()
+
+			err = p.wr.AddCompressedChunk(ctx, cChk)
+			if err != nil {
+				return err
 			}
 		}
-
-		close(processed)
-		return nil
 	})
 
-	batchSize := len(batch)
-	nextLeaves := make(hash.HashSet, batchSize)
-	nextLevel := make(hash.HashSet, batchSize)
-
-	eg.Go(func() error {
-		var seen int
-	LOOP:
-		for {
-			select {
-			case cmpAndRef, ok := <-processed:
-				if !ok {
-					break LOOP
-				}
-				seen++
-
-				err := p.wr.AddCmpChunk(cmpAndRef.cmpChnk)
-				if err != nil {
-					return err
-				}
-
-				atomic.AddUint64(&p.stats.bufferedSendBytes, uint64(len(cmpAndRef.cmpChnk.FullCompressedChunk)))
-
-				if p.wr.Size() >= p.chunksPerTF {
-					select {
-					case completedTables <- FilledWriters{p.wr}:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-					p.wr = nil
-
-					if err := p.tablefileSema.Acquire(ctx, 1); err != nil {
-						return err
-					}
-					p.wr, err = nbs.NewCmpChunkTableWriter(p.tempDir)
-					if err != nil {
-						return err
-					}
-				}
-
-				for h, isleaf := range cmpAndRef.refs {
-					nextLevel.Insert(h)
-					if isleaf {
-						nextLeaves.Insert(h)
-					}
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		if seen != len(batch) {
-			return errors.New("failed to get all chunks.")
-		}
-		return nil
-	})
-
-	err := eg.Wait()
-	if err != nil {
-		return nil, nil, err
-	}
-	return nextLeaves, nextLevel, nil
+	// Always close the reader outside of the errgroup threads above.
+	// Closing the reader will cause Get() to start returning errors, and
+	// we don't need to deliver that error to the Get thread. Both threads
+	// should exit and return any errors they encounter, after which the
+	// errgroup will report the error.
+	wErr := eg.Wait()
+	rErr := p.rd.Close()
+	return errors.Join(wErr, rErr)
 }

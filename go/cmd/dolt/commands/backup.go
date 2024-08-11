@@ -17,11 +17,8 @@ package commands
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
-	"github.com/dolthub/dolt/go/store/datas/pull"
 	"github.com/dolthub/dolt/go/store/types"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
@@ -29,7 +26,9 @@ import (
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
+	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"github.com/dolthub/dolt/go/store/datas/pull"
 )
 
 var backupDocs = cli.CommandDocumentationContent{
@@ -48,6 +47,7 @@ aws-creds-type specifies the means by which credentials should be retrieved in o
 	role: Use the credentials installed for the current user
 	env: Looks for environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 	file: Uses the credentials file specified by the parameter aws-creds-file
+
 	
 GCP backup urls should be of the form gs://gcs-bucket/database and will use the credentials setup using the gcloud command line available from Google.
 
@@ -57,10 +57,11 @@ The local filesystem can be used as a backup by providing a repository url in th
 Remove the backup named {{.LessThan}}name{{.GreaterThan}}. All configuration settings for the backup are removed. The contents of the backup are not affected.
 
 {{.EmphasisLeft}}restore{{.EmphasisRight}}
-Restore a Dolt database from a given {{.LessThan}}url{{.GreaterThan}} into a specified directory {{.LessThan}}url{{.GreaterThan}}.
+Restore a Dolt database from a given {{.LessThan}}url{{.GreaterThan}} into a specified directory {{.LessThan}}name{{.GreaterThan}}. This will fail if {{.LessThan}}name{{.GreaterThan}} is already a Dolt database unless '--force' is provided, in which case the existing database will be overwritten with the contents of the restored backup.
 
 {{.EmphasisLeft}}sync{{.EmphasisRight}}
 Snapshot the database and upload to the backup {{.LessThan}}name{{.GreaterThan}}. This includes branches, tags, working sets, and remote tracking refs.
+
 	
 {{.EmphasisLeft}}sync-url{{.EmphasisRight}}
 Snapshot the database and upload the backup to {{.LessThan}}url{{.GreaterThan}}. Like sync, this includes branches, tags, working sets, and remote tracking refs, but it does not require you to create a named backup`,
@@ -69,7 +70,7 @@ Snapshot the database and upload the backup to {{.LessThan}}url{{.GreaterThan}}.
 		"[-v | --verbose]",
 		"add [--aws-region {{.LessThan}}region{{.GreaterThan}}] [--aws-creds-type {{.LessThan}}creds-type{{.GreaterThan}}] [--aws-creds-file {{.LessThan}}file{{.GreaterThan}}] [--aws-creds-profile {{.LessThan}}profile{{.GreaterThan}}] {{.LessThan}}name{{.GreaterThan}} {{.LessThan}}url{{.GreaterThan}}",
 		"remove {{.LessThan}}name{{.GreaterThan}}",
-		"restore {{.LessThan}}url{{.GreaterThan}} {{.LessThan}}name{{.GreaterThan}}",
+		"restore [--force] {{.LessThan}}url{{.GreaterThan}} {{.LessThan}}name{{.GreaterThan}}",
 		"sync {{.LessThan}}name{{.GreaterThan}}",
 		"sync-url [--aws-region {{.LessThan}}region{{.GreaterThan}}] [--aws-creds-type {{.LessThan}}creds-type{{.GreaterThan}}] [--aws-creds-file {{.LessThan}}file{{.GreaterThan}}] [--aws-creds-profile {{.LessThan}}profile{{.GreaterThan}}] {{.LessThan}}url{{.GreaterThan}}",
 	},
@@ -91,10 +92,6 @@ func (cmd BackupCmd) RequiresRepo() bool {
 	return false
 }
 
-func (cmd BackupCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
-}
-
 func (cmd BackupCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
 	return cli.NewCommandDocumentation(backupDocs, ap)
@@ -110,12 +107,19 @@ func (cmd BackupCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd BackupCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd BackupCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, backupDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	var verr errhand.VerboseError
+
+	// All the sub commands except `restore` require a valid environment
+	if apr.NArg() == 0 || apr.Arg(0) != cli.RestoreBackupId {
+		if !cli.CheckEnvIsValid(dEnv) {
+			return 2
+		}
+	}
 
 	switch {
 	case apr.NArg() == 0:
@@ -181,8 +185,8 @@ func addBackup(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) errhand.Verbos
 		return errhand.VerboseErrorFromError(err)
 	}
 
-	r := env.NewRemote(backupName, backupUrl, params, dEnv)
-	err = dEnv.AddBackup(r.Name, r.Url, r.FetchSpecs, r.Params)
+	r := env.NewRemote(backupName, backupUrl, params)
+	err = dEnv.AddBackup(r)
 
 	switch err {
 	case nil:
@@ -206,8 +210,8 @@ func printBackups(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) errhand.Ver
 		return errhand.BuildDError("Unable to get backups from the local directory").AddCause(err).Build()
 	}
 
-	for _, r := range backups {
-		if apr.Contains(verboseFlag) {
+	for _, r := range backups.Snapshot() {
+		if apr.Contains(cli.VerboseFlag) {
 			paramStr := make([]byte, 0)
 			if len(r.Params) > 0 {
 				paramStr, _ = json.Marshal(r.Params)
@@ -238,7 +242,7 @@ func syncBackupUrl(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgPar
 		return errhand.VerboseErrorFromError(err)
 	}
 
-	b := env.NewRemote("__temp__", backupUrl, params, dEnv)
+	b := env.NewRemote("__temp__", backupUrl, params)
 	return backup(ctx, dEnv, b)
 }
 
@@ -254,7 +258,7 @@ func syncBackup(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgParseR
 		return errhand.BuildDError("Unable to get backups from the local directory").AddCause(err).Build()
 	}
 
-	b, ok := backups[backupName]
+	b, ok := backups.Get(backupName)
 	if !ok {
 		return errhand.BuildDError("error: unknown backup: '%s' ", backupName).Build()
 	}
@@ -263,12 +267,23 @@ func syncBackup(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgParseR
 }
 
 func backup(ctx context.Context, dEnv *env.DoltEnv, b env.Remote) errhand.VerboseError {
-	destDb, err := b.GetRemoteDB(ctx, dEnv.DoltDB.ValueReadWriter().Format())
+	metadata, err := env.GetMultiEnvStorageMetadata(dEnv.FS)
+	if err != nil {
+		return nil
+	}
+	if metadata.ArchiveFilesPresent() {
+		return errhand.BuildDError("error: archive files present. Please revert them with the --revert flag before running this command.").Build()
+	}
+
+	destDb, err := b.GetRemoteDB(ctx, dEnv.DoltDB.ValueReadWriter().Format(), dEnv)
 	if err != nil {
 		return errhand.BuildDError("error: unable to open destination.").AddCause(err).Build()
 	}
-
-	err = actions.SyncRoots(ctx, dEnv.DoltDB, destDb, dEnv.TempTableFilesDir(), buildProgStarter(defaultLanguage), stopProgFuncs)
+	tmpDir, err := dEnv.TempTableFilesDir()
+	if err != nil {
+		return errhand.BuildDError("error: ").AddCause(err).Build()
+	}
+	err = actions.SyncRoots(ctx, dEnv.DoltDB, destDb, tmpDir, buildProgStarter(defaultLanguage), stopProgFuncs)
 
 	switch err {
 	case nil:
@@ -293,13 +308,15 @@ func restoreBackup(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgPar
 		return errhand.BuildDError("").SetPrintUsage().Build()
 	}
 	apr.Args = apr.Args[1:]
-	dir, urlStr, verr := parseArgs(apr)
+	restoredDB, urlStr, verr := parseArgs(apr)
 	if verr != nil {
 		return verr
 	}
 
-	// second return value isDir is relevant but handled by library functions
-	userDirExists, _ := dEnv.FS.Exists(dir)
+	// For error recovery, record whether EnvForClone created the directory, or just `.dolt/noms` within the directory.
+	userDirExisted, _ := dEnv.FS.Exists(restoredDB)
+
+	force := apr.Contains(cli.ForceFlag)
 
 	scheme, remoteUrl, err := env.GetAbsRemoteUrl(dEnv.FS, dEnv.Config, urlStr)
 	if err != nil {
@@ -312,37 +329,72 @@ func restoreBackup(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgPar
 		return verr
 	}
 
-	r := env.NewRemote("", remoteUrl, params, dEnv)
-	srcDb, err := r.GetRemoteDB(ctx, types.Format_Default)
+	r := env.NewRemote("", remoteUrl, params)
+	srcDb, err := r.GetRemoteDB(ctx, types.Format_Default, dEnv)
 	if err != nil {
 		return errhand.VerboseErrorFromError(err)
 	}
 
-	// make .dolt dir whith env.NoRemote to avoid origin upstream
-	dEnv, err = actions.EnvForClone(ctx, srcDb.ValueReadWriter().Format(), env.NoRemote, dir, dEnv.FS, dEnv.Version, env.GetCurrentUserHomeDir)
+	mrEnv, err := env.MultiEnvForDirectory(ctx, dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
 	if err != nil {
-		return errhand.VerboseErrorFromError(err)
+		return errhand.BuildDError("error: Unable to list databases").AddCause(err).Build()
 	}
-
-	// still make empty repo state
-	_, err = env.CreateRepoState(dEnv.FS, env.DefaultInitBranch)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-
-	err = actions.SyncRoots(ctx, srcDb, dEnv.DoltDB, dEnv.TempTableFilesDir(), buildProgStarter(downloadLanguage), stopProgFuncs)
-	if err != nil {
-		// If we're cloning into a directory that already exists do not erase it. Otherwise
-		// make best effort to delete the directory we created.
-		if userDirExists {
-			// Set the working dir to the parent of the .dolt folder so we can delete .dolt
-			_ = os.Chdir(dir)
-			_ = dEnv.FS.Delete(dbfactory.DoltDir, true)
-		} else {
-			_ = os.Chdir("../")
-			_ = dEnv.FS.Delete(dir, true)
+	var existingDEnv *env.DoltEnv
+	err = mrEnv.Iter(func(dbName string, dEnv *env.DoltEnv) (stop bool, err error) {
+		if dbName == restoredDB {
+			existingDEnv = dEnv
+			return true, nil
 		}
-		return errhand.VerboseErrorFromError(err)
+		return false, nil
+	})
+	if err != nil {
+		return errhand.BuildDError("error: Unable to list databases").AddCause(err).Build()
+	}
+
+	if existingDEnv != nil {
+		if !force {
+			return errhand.BuildDError("error: cannot restore backup into " + restoredDB + ". A database with that name already exists. Did you mean to supply --force?").Build()
+		}
+
+		tmpDir, err := existingDEnv.TempTableFilesDir()
+		if err != nil {
+			return errhand.VerboseErrorFromError(err)
+		}
+
+		err = actions.SyncRoots(ctx, srcDb, existingDEnv.DoltDB, tmpDir, buildProgStarter(downloadLanguage), stopProgFuncs)
+		if err != nil {
+			return errhand.VerboseErrorFromError(err)
+		}
+	} else {
+		// Create a new Dolt env for the clone; use env.NoRemote to avoid origin upstream
+		clonedEnv, err := actions.EnvForClone(ctx, srcDb.ValueReadWriter().Format(), env.NoRemote, restoredDB, dEnv.FS, dEnv.Version, env.GetCurrentUserHomeDir)
+		if err != nil {
+			return errhand.VerboseErrorFromError(err)
+		}
+
+		// Nil out the old Dolt env so we don't accidentally use the wrong database
+		dEnv = nil
+
+		// still make empty repo state
+		_, err = env.CreateRepoState(clonedEnv.FS, env.DefaultInitBranch)
+		if err != nil {
+			return errhand.VerboseErrorFromError(err)
+		}
+		tmpDir, err := clonedEnv.TempTableFilesDir()
+		if err != nil {
+			return errhand.VerboseErrorFromError(err)
+		}
+		err = actions.SyncRoots(ctx, srcDb, clonedEnv.DoltDB, tmpDir, buildProgStarter(downloadLanguage), stopProgFuncs)
+		if err != nil {
+			// If we're cloning into a directory that already exists do not erase it. Otherwise
+			// make best effort to delete the directory we created.
+			if userDirExisted {
+				_ = clonedEnv.FS.Delete(dbfactory.DoltDir, true)
+			} else {
+				_ = clonedEnv.FS.Delete(".", true)
+			}
+			return errhand.VerboseErrorFromError(err)
+		}
 	}
 
 	return nil

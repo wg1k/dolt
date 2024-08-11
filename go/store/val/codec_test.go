@@ -240,14 +240,21 @@ func TestCompare(t *testing.T) {
 			l:   encStr("b"), r: encStr("a"),
 			cmp: 1,
 		},
+		// z-address
+		{
+			typ: Type{Enc: StringEnc},
+			l:   encCell(Cell{}),
+			r:   encCell(Cell{}),
+			cmp: 0,
+		},
 	}
 
 	for _, test := range tests {
 		act := compare(test.typ, test.l, test.r)
 		assert.Equal(t, test.cmp, act, "expected %s %s %s ",
-			formatValue(test.typ.Enc, test.l),
+			TupleDesc{}.formatValue(test.typ.Enc, 0, test.l),
 			fmtComparator(test.cmp),
-			formatValue(test.typ.Enc, test.r))
+			TupleDesc{}.formatValue(test.typ.Enc, 0, test.r))
 	}
 }
 
@@ -294,6 +301,12 @@ func encDecimal(d decimal.Decimal) []byte {
 func encStr(s string) []byte {
 	buf := make([]byte, len(s)+1)
 	writeString(buf, s)
+	return buf
+}
+
+func encCell(c Cell) []byte {
+	buf := make([]byte, cellSize)
+	writeCell(buf, c)
 	return buf
 }
 
@@ -426,8 +439,8 @@ func roundTripUints(t *testing.T) {
 	uintegers = append(uintegers, math.MaxUint16)
 	for _, value := range uintegers {
 		exp := uint16(value)
-		writeUint16(buf, exp)
-		assert.Equal(t, exp, readUint16(buf))
+		WriteUint16(buf, exp)
+		assert.Equal(t, exp, ReadUint16(buf))
 		zero(buf)
 	}
 

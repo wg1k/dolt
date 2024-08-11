@@ -2,11 +2,7 @@
 load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
-    REPO_NAME="dolt_repo_$$"
-    mkdir $REPO_NAME
-    cd $REPO_NAME
-
-    dolt init
+    setup_common
 }
 
 teardown() {
@@ -92,7 +88,7 @@ SQL
 
     run dolt sql -q "SELECT trigger_name, event_object_table, action_statement, definer FROM information_schema.triggers" -r csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "tt,mytable,SET NEW.v1 = NEW.v1 * 11,\`root\`@\`localhost\`" ]] || false
+    [[ "$output" =~ "tt,mytable,SET NEW.v1 = NEW.v1 * 11,root@localhost" ]] || false
 }
 
 @test "import-mysqldump: database with procedure dumped with --routines flag" {
@@ -114,11 +110,10 @@ SQL
 
     run dolt sql -q "SHOW PROCEDURE STATUS" -r csv
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new_proc,PROCEDURE,\`root\`@\`localhost\`" ]] || false
+    [[ "$output" =~ "new_proc,PROCEDURE,root@localhost" ]] || false
 }
 
 @test "import-mysqldump: a table with all types with DEFAULT NULL dump" {
-    skip_nbf_dolt_1
     run dolt sql <<SQL
 CREATE TABLE all_types (
   pk int NOT NULL,
@@ -169,7 +164,6 @@ SQL
 }
 
 @test "import-mysqldump: a table with all types with DEFAULT not-null VALUE dump" {
-    skip_nbf_dolt_1
     run dolt sql <<SQL
 CREATE TABLE types_default (
   pk int NOT NULL,

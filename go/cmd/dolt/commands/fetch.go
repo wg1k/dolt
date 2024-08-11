@@ -16,16 +16,17 @@ package commands
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"time"
 
-	"github.com/dolthub/dolt/go/store/types"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
-	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 )
 
@@ -55,10 +56,6 @@ func (cmd FetchCmd) Description() string {
 	return "Update the database from a remote data repository."
 }
 
-func (cmd FetchCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
-}
-
 // EventType returns the type of the event to log
 func (cmd FetchCmd) EventType() eventsapi.ClientEventType {
 	return eventsapi.ClientEventType_FETCH
@@ -73,28 +70,97 @@ func (cmd FetchCmd) ArgParser() *argparser.ArgParser {
 	return cli.CreateFetchArgParser()
 }
 
+func (cmd FetchCmd) RequiresRepo() bool {
+	return false
+}
+
 // Exec executes the command
-func (cmd FetchCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd FetchCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cli.CreateFetchArgParser()
 	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, fetchDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	r, refSpecs, err := env.NewFetchOpts(apr.Args, dEnv.RepoStateReader())
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.PrintErrln(err)
+		return 1
 	}
-	updateMode := ref.UpdateMode{Force: apr.Contains(cli.ForceFlag)}
+	if closeFunc != nil {
+		defer closeFunc()
+	}
 
-	err = actions.FetchRefSpecs(ctx, dEnv.DbData(), refSpecs, r, updateMode, buildProgStarter(downloadLanguage), stopProgFuncs)
-	switch err {
-	case doltdb.ErrUpToDate:
-		return HandleVErrAndExitCode(nil, usage)
-	case actions.ErrCantFF:
-		verr := errhand.BuildDError("error: fetch failed, can't fast forward remote tracking ref").AddCause(err).Build()
-		return HandleVErrAndExitCode(verr, usage)
-	}
+	query, err := constructInterpolatedDoltFetchQuery(apr)
 	if err != nil {
 		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
 	}
-	return HandleVErrAndExitCode(nil, usage)
+
+	errChan := make(chan error)
+	go func() {
+		defer close(errChan)
+		_, _, _, err = queryist.Query(sqlCtx, query)
+		if err != nil {
+			errChan <- err
+			return
+		}
+	}()
+
+	spinner := TextSpinner{}
+	if !apr.Contains(cli.SilentFlag) {
+		cli.Print(spinner.next() + " Fetching...")
+		defer func() {
+			cli.DeleteAndPrint(len(" Fetching...")+1, "")
+		}()
+	}
+
+	for {
+		select {
+		case err := <-errChan:
+			return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		case <-ctx.Done():
+			if ctx.Err() != nil {
+				switch ctx.Err() {
+				case context.DeadlineExceeded:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("timeout exceeded")), usage)
+				case context.Canceled:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("fetch cancelled by force")), usage)
+				default:
+					return HandleVErrAndExitCode(errhand.VerboseErrorFromError(errors.New("error cancelling context: "+ctx.Err().Error())), usage)
+				}
+			}
+			return HandleVErrAndExitCode(nil, usage)
+		case <-time.After(time.Millisecond * 50):
+			if !apr.Contains(cli.SilentFlag) {
+				cli.DeleteAndPrint(len(" Fetching...")+1, spinner.next()+" Fetching...")
+			}
+		}
+	}
+}
+
+// constructInterpolatedDoltFetchQuery constructs the sql query necessary to call the DOLT_FETCH() function.
+// Also interpolates this query to prevent sql injection.
+func constructInterpolatedDoltFetchQuery(apr *argparser.ArgParseResults) (string, error) {
+	var params []interface{}
+	var args []string
+
+	if apr.Contains(cli.PruneFlag) {
+		args = append(args, "'--prune'")
+	}
+	if user, hasUser := apr.GetValue(cli.UserFlag); hasUser {
+		args = append(args, "'--user'")
+		args = append(args, "?")
+		params = append(params, user)
+	}
+	for _, arg := range apr.Args {
+		args = append(args, "?")
+		params = append(params, arg)
+	}
+
+	query := "call dolt_fetch(" + strings.Join(args, ", ") + ")"
+
+	interpolatedQuery, err := dbr.InterpolateForDialect(query, params, dialect.MySQL)
+	if err != nil {
+		return "", err
+	}
+
+	return interpolatedQuery, nil
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 include "encoding.fbs";
+include "collation.fbs";
 
 namespace serial;
 
@@ -22,6 +23,13 @@ table TableSchema {
   clustered_index:Index (required);
   secondary_indexes:[Index];
   checks:[CheckConstraint];
+  collation:Collation;
+
+  // this field is necessary because older dolt clients weren't using TryAccessor for Columns, but are in TableSchemas
+  has_features_after_try_accessors:bool;
+
+  // table comment
+  comment:string;
 }
 
 table Column {
@@ -31,7 +39,7 @@ table Column {
   // sql column type
   sql_type:string;
 
-  // sql default value
+  // sql default value. For generated columns, this is the generated expression rather than the default.
   default_value:string;
 
   // sql comment
@@ -40,9 +48,7 @@ table Column {
   // sql display order
   display_order:int16;
 
-  // todo(andy): ideally we'd resolve column identity
-  //  without using tags, but the current implementation
-  //  of schema.Schema is tightly coupled to tags.
+  // column tag
   tag: uint64;
 
   // storage encoding
@@ -55,6 +61,9 @@ table Column {
   hidden:bool;
   generated:bool;
   virtual:bool;
+
+  // sql on update value
+  on_update_value:string;
 }
 
 table Index {
@@ -88,6 +97,24 @@ table Index {
   primary_key:bool;
   unique_key:bool;
   system_defined:bool;
+
+  prefix_lengths:[uint16];
+  spatial_key:bool;
+
+  // fulltext information
+  fulltext_key:bool;
+  fulltext_info:FulltextInfo;
+}
+
+table FulltextInfo {
+  config_table:string;
+  position_table:string;
+  doc_count_table:string;
+  global_count_table:string;
+  row_count_table:string;
+  key_type:uint8;
+  key_name:string;
+  key_positions:[uint16];
 }
 
 table CheckConstraint {
