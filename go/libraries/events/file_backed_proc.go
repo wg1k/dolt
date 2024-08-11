@@ -23,7 +23,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 	filesys "github.com/dolthub/dolt/go/libraries/utils/filesys"
@@ -98,7 +98,7 @@ func newEventsDataDir(fs filesys.Filesys, homeDir string, doltDir string) *event
 	return &eventsDataDir{fs: fs, path: path}
 }
 
-//  MakeEventsDir creates a new events data dir in the main dolt dir
+// MakeEventsDir creates a new events data dir in the main dolt dir
 func (evd *eventsDataDir) MakeEventsDir() error {
 	if exists, _ := evd.fs.Exists(evd.path); !exists {
 		if err := evd.fs.MkDirs(evd.path); err != nil {
@@ -134,7 +134,7 @@ func NewFileBackedProc(fs filesys.Filesys, userHomeDir string, doltDir string, n
 	exists, _ := fs.Exists(lp)
 
 	if !exists {
-		if err := fs.WriteFile(lp, []byte("lockfile for dolt \n")); err != nil {
+		if err := fs.WriteFile(lp, []byte("lockfile for dolt \n"), os.ModePerm); err != nil {
 			panic(err)
 		}
 	}
@@ -210,7 +210,7 @@ func (fbp *FileBackedProc) WriteEvents(version string, evts []*eventsapi.ClientE
 			Version:   version,
 			Platform:  plat,
 			Events:    evts,
-			App:       eventsapi.AppID_APP_DOLT,
+			App:       Application,
 		}
 
 		data, err := proto.Marshal(req)

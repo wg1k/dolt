@@ -42,7 +42,7 @@ func (s String) Equals(other Value) bool {
 	return s == other
 }
 
-func (s String) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (s String) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if s2, ok := other.(String); ok {
 		return s < s2, nil
 	}
@@ -57,11 +57,7 @@ func (s String) isPrimitive() bool {
 	return true
 }
 
-func (s String) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
-func (s String) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (s String) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 

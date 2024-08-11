@@ -30,7 +30,6 @@ import (
 
 	"github.com/dolthub/dolt/go/store/cmd/noms/util"
 	"github.com/dolthub/dolt/go/store/config"
-	"github.com/dolthub/dolt/go/store/d"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/util/verbose"
 )
@@ -60,23 +59,21 @@ func runDs(ctx context.Context, args []string) int {
 		util.CheckError(err)
 		defer db.Close()
 
-		oldCommitRef, errBool, err := set.MaybeHeadRef()
-		d.PanicIfError(err)
-
+		oldCommitAddr, errBool := set.MaybeHeadAddr()
 		if !errBool {
 			util.CheckError(fmt.Errorf("Dataset %v not found", set.ID()))
 		}
 
-		_, err = set.Database().Delete(ctx, set)
+		_, err = set.Database().Delete(ctx, set, "")
 		util.CheckError(err)
 
-		fmt.Printf("Deleted %v (was #%v)\n", toDelete, oldCommitRef.TargetHash().String())
+		fmt.Printf("Deleted %v (was #%v)\n", toDelete, oldCommitAddr.String())
 	} else {
 		dbSpec := ""
 		if len(args) >= 1 {
 			dbSpec = args[0]
 		}
-		store, _, err := cfg.GetDatabase(ctx, dbSpec)
+		store, _, _, err := cfg.GetDatabase(ctx, dbSpec)
 		util.CheckError(err)
 		defer store.Close()
 

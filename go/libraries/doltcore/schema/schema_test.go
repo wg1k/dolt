@@ -17,7 +17,7 @@ package schema
 import (
 	"fmt"
 	"reflect"
-	"strings"
+	strings "strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,24 +42,46 @@ const (
 	reservedColTag  = 50
 )
 
-var lnVal = types.String("astley")
-var fnVal = types.String("rick")
-var addrVal = types.String("123 Fake St")
-var ageVal = types.Uint(53)
-var titleVal = types.NullValue
-
 var pkCols = []Column{
-	{lnColName, lnColTag, types.StringKind, true, typeinfo.StringDefaultType, "", false, "", nil},
-	{fnColName, fnColTag, types.StringKind, true, typeinfo.StringDefaultType, "", false, "", nil},
+	{Name: lnColName, Tag: lnColTag, Kind: types.StringKind, IsPartOfPK: true, TypeInfo: typeinfo.StringDefaultType},
+	{Name: fnColName, Tag: fnColTag, Kind: types.StringKind, IsPartOfPK: true, TypeInfo: typeinfo.StringDefaultType},
 }
 var nonPkCols = []Column{
-	{addrColName, addrColTag, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil},
-	{ageColName, ageColTag, types.UintKind, false, typeinfo.FromKind(types.UintKind), "", false, "", nil},
-	{titleColName, titleColTag, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil},
-	{reservedColName, reservedColTag, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil},
+	{Name: addrColName, Tag: addrColTag, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType},
+	{Name: ageColName, Tag: ageColTag, Kind: types.UintKind, TypeInfo: typeinfo.FromKind(types.UintKind)},
+	{Name: titleColName, Tag: titleColTag, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType},
+	{Name: reservedColName, Tag: reservedColTag, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType},
 }
 
 var allCols = append(append([]Column(nil), pkCols...), nonPkCols...)
+
+func TestNewSchema(t *testing.T) {
+	allColColl := NewColCollection(allCols...)
+	pkColColl := NewColCollection()
+
+	indexCol := NewIndexCollection(allColColl, pkColColl)
+
+	checkCol := NewCheckCollection()
+	_, err := checkCol.AddCheck("chk_age", "age > 0", true)
+	require.NoError(t, err)
+
+	// Nil ordinals
+	sch, err := NewSchema(allColColl, nil, Collation_Default, indexCol, checkCol)
+	require.NoError(t, err)
+	require.Equal(t, []int{0, 1}, sch.GetPkOrdinals())
+	require.Equal(t, Collation_Default, sch.GetCollation())
+	require.True(t, sch.Indexes().Equals(indexCol))
+	require.True(t, sch.Checks().Equals(checkCol))
+
+	// Set ordinals explicitly
+	indexCol.(*indexCollectionImpl).pks = []uint64{fnColTag, lnColTag}
+	sch, err = NewSchema(allColColl, []int{1, 0}, Collation_Default, indexCol, checkCol)
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 0}, sch.GetPkOrdinals())
+	require.Equal(t, Collation_Default, sch.GetCollation())
+	require.True(t, sch.Indexes().Equals(indexCol))
+	require.True(t, sch.Checks().Equals(checkCol))
+}
 
 func TestSchema(t *testing.T) {
 	colColl := NewColCollection(allCols...)
@@ -103,6 +125,47 @@ func TestGetSharedCols(t *testing.T) {
 	assert.Equal(t, expected, res)
 }
 
+func TestSetPkOrder(t *testing.T) {
+
+	// GetPkCols() should always return columns in ordinal order
+	// GetAllCols() should always return columns in the defined schema's order
+	t.Run("returns the correct GetPkCols() order", func(t *testing.T) {
+		allColColl := NewColCollection(allCols...)
+		pkColColl := NewColCollection(pkCols...)
+		sch, err := SchemaFromCols(allColColl)
+		require.NoError(t, err)
+
+		require.Equal(t, allColColl, sch.GetAllCols())
+		require.Equal(t, pkColColl, sch.GetPKCols())
+
+		err = sch.SetPkOrdinals([]int{1, 0})
+		require.NoError(t, err)
+
+		expectedPkColColl := NewColCollection(pkCols[1], pkCols[0])
+		require.Equal(t, expectedPkColColl, sch.GetPKCols())
+		require.Equal(t, allColColl, sch.GetAllCols())
+	})
+
+	t.Run("Can round-trip", func(t *testing.T) {
+		allColColl := NewColCollection(allCols...)
+		pkColColl := NewColCollection(pkCols...)
+		sch, err := SchemaFromCols(allColColl)
+		require.NoError(t, err)
+
+		require.Equal(t, allColColl, sch.GetAllCols())
+		require.Equal(t, pkColColl, sch.GetPKCols())
+
+		err = sch.SetPkOrdinals([]int{1, 0})
+		require.NoError(t, err)
+
+		err = sch.SetPkOrdinals([]int{0, 1})
+		require.NoError(t, err)
+
+		require.Equal(t, allColColl, sch.GetAllCols())
+		require.Equal(t, pkColColl, sch.GetPKCols())
+	})
+}
+
 func mustGetCol(collection *ColCollection, name string) Column {
 	col, ok := collection.GetByName(name)
 	if !ok {
@@ -135,7 +198,7 @@ func TestValidateForInsert(t *testing.T) {
 	})
 
 	t.Run("Name collision", func(t *testing.T) {
-		cols := append(allCols, Column{titleColName, 100, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil})
+		cols := append(allCols, Column{Name: titleColName, Tag: 100, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType})
 		colColl := NewColCollection(cols...)
 
 		err := ValidateForInsert(colColl)
@@ -144,7 +207,7 @@ func TestValidateForInsert(t *testing.T) {
 	})
 
 	t.Run("Case insensitive collision", func(t *testing.T) {
-		cols := append(allCols, Column{strings.ToUpper(titleColName), 100, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil})
+		cols := append(allCols, Column{Name: strings.ToUpper(titleColName), Tag: 100, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType})
 		colColl := NewColCollection(cols...)
 
 		err := ValidateForInsert(colColl)
@@ -153,13 +216,143 @@ func TestValidateForInsert(t *testing.T) {
 	})
 
 	t.Run("Tag collision", func(t *testing.T) {
-		cols := append(allCols, Column{"newCol", lnColTag, types.StringKind, false, typeinfo.StringDefaultType, "", false, "", nil})
+		cols := append(allCols, Column{Name: "newCol", Tag: lnColTag, Kind: types.StringKind, TypeInfo: typeinfo.StringDefaultType})
 		colColl := NewColCollection(cols...)
 
 		err := ValidateForInsert(colColl)
 		assert.Error(t, err)
 		assert.Equal(t, err, ErrColTagCollision)
 	})
+}
+
+func TestArePrimaryKeySetsDiffable(t *testing.T) {
+	tests := []struct {
+		Name     string
+		From     Schema
+		To       Schema
+		Diffable bool
+		KeyMap   []int
+	}{
+		{
+			Name: "Basic",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.IntKind, true))),
+			Diffable: true,
+			KeyMap:   []int{0},
+		},
+		{
+			Name: "PK-Column renames",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 1, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk2", 1, types.IntKind, true))),
+			Diffable: true,
+			KeyMap:   []int{0},
+		},
+		{
+			Name: "Only pk ordering should matter for diffability",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("col1", 0, types.IntKind, false),
+				NewColumn("pk", 1, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 1, types.IntKind, true))),
+			Diffable: true,
+			KeyMap:   []int{0},
+		},
+		{
+			Name: "Only pk ordering should matter for diffability - inverse",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 1, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("col1", 2, types.IntKind, false),
+				NewColumn("pk", 1, types.IntKind, true))),
+			Diffable: true,
+			KeyMap:   []int{0},
+		},
+		{
+			Name: "Only pk ordering should matter for diffability - compound",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk1", 0, types.IntKind, true),
+				NewColumn("col1", 1, types.IntKind, false),
+				NewColumn("pk2", 2, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk1", 0, types.IntKind, true),
+				NewColumn("pk2", 2, types.IntKind, true))),
+			Diffable: true,
+			KeyMap:   []int{0, 1},
+		},
+		{
+			Name: "Tag mismatches",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 1, types.IntKind, true))),
+			Diffable: false,
+		},
+		{
+			Name: "PK Ordinal mismatches",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk1", 0, types.IntKind, true),
+				NewColumn("pk2", 1, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk2", 1, types.IntKind, true),
+				NewColumn("pk1", 0, types.IntKind, true))),
+			Diffable: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			d := ArePrimaryKeySetsDiffable(types.Format_Default, test.From, test.To)
+			require.Equal(t, test.Diffable, d)
+
+			// If they are diffable then we should be able to map their schemas from one to another.
+			if d {
+				keyMap, _, err := MapSchemaBasedOnTagAndName(test.From, test.To)
+				require.NoError(t, err)
+				require.Equal(t, test.KeyMap, keyMap)
+			}
+		})
+	}
+}
+
+func TestArePrimaryKeySetsDiffableTypeChanges(t *testing.T) {
+	// New format compares underlying SQL types
+	tests := []struct {
+		Name     string
+		From     Schema
+		To       Schema
+		Diffable bool
+		Format   *types.NomsBinFormat
+	}{
+		{
+			Name: "Int -> String (New Format)",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.StringKind, true))),
+			Diffable: false,
+			Format:   types.Format_DOLT,
+		},
+		{
+			Name: "Int -> String (Old Format)",
+			From: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.IntKind, true))),
+			To: MustSchemaFromCols(NewColCollection(
+				NewColumn("pk", 0, types.StringKind, true))),
+			Diffable: true,
+			Format:   types.Format_LD_1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			d := ArePrimaryKeySetsDiffable(test.Format, test.From, test.To)
+			require.Equal(t, test.Diffable, d)
+		})
+	}
 }
 
 func testSchema(method string, sch Schema, t *testing.T) {

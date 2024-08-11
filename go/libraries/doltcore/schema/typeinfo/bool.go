@@ -21,17 +21,18 @@ import (
 	"strconv"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 type boolType struct {
-	sqlBitType sql.BitType
+	sqlBitType gmstypes.BitType
 }
 
 var _ TypeInfo = (*boolType)(nil)
 
-var BoolType TypeInfo = &boolType{sql.MustCreateBitType(1)}
+var BoolType TypeInfo = &boolType{gmstypes.MustCreateBitType(1)}
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *boolType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
@@ -173,7 +174,7 @@ func (ti *boolType) String() string {
 
 // ToSqlType implements TypeInfo interface.
 func (ti *boolType) ToSqlType() sql.Type {
-	return ti.sqlBitType
+	return gmstypes.Boolean
 }
 
 // boolTypeConverter is an internal function for GetTypeConverter that handles the specific type as the source TypeInfo.
@@ -215,6 +216,10 @@ func boolTypeConverter(ctx context.Context, src *boolType, destTi TypeInfo) (tc 
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return func(ctx context.Context, vrw types.ValueReadWriter, v types.Value) (types.Value, error) {
 			if v == nil || v == types.NullValue {
@@ -232,6 +237,12 @@ func boolTypeConverter(ctx context.Context, src *boolType, destTi TypeInfo) (tc 
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

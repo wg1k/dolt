@@ -15,186 +15,282 @@
 package skip
 
 import (
+	"hash/maphash"
 	"math"
-	"math/rand"
 )
 
 const (
-	maxCount = math.MaxUint32 - 1
-
-	maxHeight = uint8(5)
-	highest   = maxHeight - 1
-
+	maxHeight  = 9
+	maxCount   = math.MaxInt32 - 1
 	sentinelId = nodeId(0)
+	initSize   = 8
 )
 
-type List struct {
-	head  skipPointer
-	nodes []skipNode
-	cmp   ValueCmp
-	src   rand.Source
-}
+// A KeyOrder determines the ordering of two keys |l| and |r|.
+type KeyOrder func(l, r []byte) (cmp int)
 
-type ValueCmp func(left, right []byte) int
+// A SeekFn facilitates seeking into a List. It returns true
+// if the seek operation should advance past |key|.
+type SeekFn func(key []byte) (advance bool)
+
+// List is an in-memory skip-list.
+type List struct {
+	// nodes contains all skipNode's in the List.
+	// skipNode's are assigned ascending id's and
+	// are stored in the order they were created,
+	// i.e. skipNode.id stores its index in |nodes|
+	nodes []skipNode
+
+	// count stores the current number of items in
+	// the list (updates are not made in-place)
+	count uint32
+
+	// checkpoint stores the nodeId of the last
+	// checkpoint made. All nodes created after this
+	// point will be discarded on a Revert()
+	checkpoint nodeId
+
+	// keyOrder determines the ordering of items
+	keyOrder KeyOrder
+
+	// seed is hash salt
+	seed maphash.Seed
+}
 
 type nodeId uint32
 
-type skipPointer [maxHeight]nodeId
+// tower is a multi-level skipNode pointer.
+type tower [maxHeight + 1]nodeId
 
 type skipNode struct {
-	id       nodeId
 	key, val []byte
-
-	height uint8
-	next   skipPointer
-	prev   nodeId
+	id       nodeId
+	next     tower
+	prev     nodeId
+	height   uint8
 }
 
-func NewSkipList(cmp ValueCmp) (l *List) {
-	l = &List{
-		// todo(andy): buffer pool
-		nodes: make([]skipNode, 1, 128),
-		cmp:   cmp,
-		src:   rand.NewSource(0),
-	}
+// NewSkipList returns a new skip.List.
+func NewSkipList(order KeyOrder) *List {
+	nodes := make([]skipNode, 0, initSize)
 
 	// initialize sentinel node
-	l.nodes[sentinelId] = skipNode{
-		id:  sentinelId,
-		key: nil, val: nil,
+	nodes = append(nodes, skipNode{
+		id:     sentinelId,
 		height: maxHeight,
-		next:   skipPointer{},
 		prev:   sentinelId,
+	})
+
+	return &List{
+		nodes:      nodes,
+		checkpoint: nodeId(1),
+		keyOrder:   order,
+		seed:       maphash.MakeSeed(),
 	}
-
-	return
 }
 
+// Checkpoint records a checkpoint that can be reverted to.
+func (l *List) Checkpoint() {
+	l.checkpoint = l.nextNodeId()
+}
+
+func (l *List) HasCheckpoint() bool {
+	return l.checkpoint > nodeId(1)
+}
+
+// Revert reverts to the last recorded checkpoint.
+func (l *List) Revert() {
+	cp := l.checkpoint
+	keepers := l.nodes[1:cp]
+	l.Truncate()
+	for _, nd := range keepers {
+		l.Put(nd.key, nd.val)
+	}
+	l.checkpoint = cp
+}
+
+// Truncate deletes all entries from the list.
+func (l *List) Truncate() {
+	l.nodes = l.nodes[:1]
+	// point sentinel.prev at itself
+	s := l.nodePtr(sentinelId)
+	s.next = tower{}
+	s.prev = sentinelId
+	l.checkpoint = nodeId(1)
+	l.count = 0
+}
+
+// Count returns the number of items in the list.
 func (l *List) Count() int {
-	return len(l.nodes) - 1
+	return int(l.count)
 }
 
+// Has returns true if |key| is a member of the list.
 func (l *List) Has(key []byte) (ok bool) {
 	_, ok = l.Get(key)
 	return
 }
 
+// Get returns the value associated with |key| and true
+// if |key| is a member of the list, otherwise it returns
+// nil and false.
 func (l *List) Get(key []byte) (val []byte, ok bool) {
-	node := l.seek(key)
+	var id nodeId
+	next, prev := l.headTower(), sentinelId
+	for lvl := maxHeight; lvl >= 0; {
+		nd := l.nodePtr(next[lvl])
+		// descend if we can't advance at |lvl|
+		if l.compareKeys(key, nd.key) < 0 {
+			id = prev
+			lvl--
+			continue
+		}
+		// advance
+		next = &nd.next
+		prev = nd.id
+	}
+	node := l.nodePtr(id)
 	if l.compareKeys(key, node.key) == 0 {
 		val, ok = node.val, true
 	}
 	return
 }
 
+// Put adds |key| and |values| to the list.
 func (l *List) Put(key, val []byte) {
 	if key == nil {
 		panic("key must be non-nil")
-	}
-	if l.Count() >= maxCount {
+	} else if len(l.nodes) >= maxCount {
 		panic("list has no capacity")
 	}
 
-	var curr, prev skipNode
-	var next, history skipPointer
-
-	next = l.head
-	for h := int(highest); h >= 0; h-- {
-
-		// for each skip level, advance until
-		//   prev.key < key <= curr.key
-		curr = l.getNode(next[h])
-		for l.compareKeys(key, curr.key) > 0 {
-			prev = curr
-			next = curr.next
-			curr = l.getNode(next[h])
-		}
-
-		if l.compareKeys(key, curr.key) == 0 {
-			// in-place update
-			curr.val = val
-			l.updateNode(curr)
-			return
-		}
-
-		// save our steps
-		history[h] = prev.id
-	}
-
-	insert := l.makeNode(key, val)
-	l.splice(insert, history)
-
-	return
-}
-
-func (l *List) splice(nd skipNode, history skipPointer) {
-	for h := uint8(0); h <= nd.height; h++ {
-		// if |node.key| is the smallest key for
-		// level |h| then update |l.head|
-		first := l.getNode(l.head[h])
-		if l.compare(nd, first) < 0 {
-			l.head[h] = nd.id
-			nd.next[h] = first.id
+	// find the path to the greatest
+	// existing node key less than |key|
+	var path tower
+	next, prev := l.headTower(), sentinelId
+	for h := maxHeight; h >= 0; {
+		curr := l.nodePtr(next[h])
+		// descend if we can't advance at |lvl|
+		if l.compareKeys(key, curr.key) <= 0 {
+			path[h] = prev
+			h--
 			continue
 		}
-
-		// otherwise, splice in |node| using |history|
-		prevNd := l.getNode(history[h])
-		nd.next[h] = prevNd.next[h]
-		prevNd.next[h] = nd.id
-		l.updateNode(prevNd)
+		// advance
+		next = &curr.next
+		prev = curr.id
 	}
 
-	// set back pointers for level 0
-	nextNd := l.getNode(nd.next[0])
-	nd.prev = nextNd.prev
-	nextNd.prev = nd.id
-	l.updateNode(nextNd)
-	l.updateNode(nd)
+	// check if |key| exists in |l|
+	node := l.nodePtr(path[0])
+	node = l.nodePtr(node.next[0])
+
+	if l.compareKeys(key, node.key) == 0 {
+		l.overwrite(key, val, &path, node)
+	} else {
+		l.insert(key, val, &path)
+		l.count++
+	}
+}
+
+func (l *List) Copy() *List {
+	copies := make([]skipNode, len(l.nodes))
+	copy(copies, l.nodes)
+	return &List{
+		nodes:      copies,
+		count:      l.count,
+		checkpoint: l.checkpoint,
+		keyOrder:   l.keyOrder,
+		seed:       l.seed,
+	}
+}
+
+func (l *List) insert(key, value []byte, path *tower) {
+	id := l.nextNodeId()
+	l.nodes = append(l.nodes, skipNode{
+		key:    key,
+		val:    value,
+		id:     id,
+		height: l.rollHeight(key),
+	})
+	novel := l.nodePtr(id)
+	for h := uint8(0); h <= novel.height; h++ {
+		// set forward pointers
+		n := l.nodePtr(path[h])
+		novel.next[h] = n.next[h]
+		n.next[h] = novel.id
+	}
+	// set back pointers
+	n := l.nodePtr(novel.next[0])
+	novel.prev = n.prev
+	n.prev = novel.id
+}
+
+func (l *List) overwrite(key, value []byte, path *tower, old *skipNode) {
+	id := l.nextNodeId()
+	l.nodes = append(l.nodes, skipNode{
+		key:    key,
+		val:    value,
+		id:     id,
+		next:   old.next,
+		prev:   old.prev,
+		height: old.height,
+	})
+	for h := uint8(0); h <= old.height; h++ {
+		// set forward pointers
+		n := l.nodePtr(path[h])
+		n.next[h] = id
+	}
+	// set back pointer
+	n := l.nodePtr(old.next[0])
+	n.prev = id
 }
 
 type ListIter struct {
-	curr skipNode
+	curr *skipNode
 	list *List
 }
 
-func (it *ListIter) Count() int {
-	return it.list.Count()
-}
-
+// Current returns the current key and value of the iterator.
 func (it *ListIter) Current() (key, val []byte) {
 	return it.curr.key, it.curr.val
 }
 
+// Advance advances the iterator.
 func (it *ListIter) Advance() {
-	it.curr = it.list.getNode(it.curr.next[0])
+	it.curr = it.list.nodePtr(it.curr.next[0])
 	return
 }
 
+// Retreat retreats the iterator.
 func (it *ListIter) Retreat() {
-	it.curr = it.list.getNode(it.curr.prev)
+	it.curr = it.list.nodePtr(it.curr.prev)
 	return
 }
 
+// GetIterAt creates an iterator starting at the first item
+// of the list whose key is greater than or equal to |key|.
 func (l *List) GetIterAt(key []byte) (it *ListIter) {
-	return l.GetIterAtWithFn(key, l.cmp)
+	return l.GetIterFromSeekFn(func(nodeKey []byte) bool {
+		return l.compareKeys(key, nodeKey) > 0
+	})
 }
 
-func (l *List) GetIterAtWithFn(key []byte, cmp ValueCmp) (it *ListIter) {
+// GetIterFromSeekFn creates an iterator using a SeekFn.
+func (l *List) GetIterFromSeekFn(fn SeekFn) (it *ListIter) {
 	it = &ListIter{
-		curr: l.seekWithFn(key, cmp),
+		curr: l.seekWithFn(fn),
 		list: l,
 	}
-
 	if it.curr.id == sentinelId {
 		// try to keep |it| in bounds if |key| is
 		// greater than the largest key in |l|
 		it.Retreat()
 	}
-
 	return
 }
 
+// IterAtStart creates an iterator at the start of the list.
 func (l *List) IterAtStart() *ListIter {
 	return &ListIter{
 		curr: l.firstNode(),
@@ -202,6 +298,7 @@ func (l *List) IterAtStart() *ListIter {
 	}
 }
 
+// IterAtEnd creates an iterator at the end of the list.
 func (l *List) IterAtEnd() *ListIter {
 	return &ListIter{
 		curr: l.lastNode(),
@@ -210,90 +307,72 @@ func (l *List) IterAtEnd() *ListIter {
 }
 
 // seek returns the skipNode with the smallest key >= |key|.
-func (l *List) seek(key []byte) skipNode {
-	return l.seekWithFn(key, l.cmp)
+func (l *List) seek(key []byte) *skipNode {
+	return l.seekWithFn(func(curr []byte) (advance bool) {
+		return l.compareKeys(key, curr) > 0
+	})
 }
 
-func (l *List) seekWithFn(key []byte, cmp ValueCmp) (node skipNode) {
-	ptr := l.head
-	for h := int64(highest); h >= 0; h-- {
-		node = l.getNode(ptr[h])
-		for l.compareKeysWithFn(key, node.key, cmp) > 0 {
-			ptr = node.next
-			node = l.getNode(ptr[h])
+func (l *List) seekWithFn(cb SeekFn) (node *skipNode) {
+	ptr := l.headTower()
+	for h := int64(maxHeight); h >= 0; h-- {
+		node = l.nodePtr(ptr[h])
+		for cb(node.key) {
+			ptr = &node.next
+			node = l.nodePtr(ptr[h])
 		}
 	}
 	return
 }
 
-func (l *List) firstNode() skipNode {
-	return l.getNode(l.head[0])
+func (l *List) headTower() *tower {
+	return &l.nodes[0].next
 }
 
-func (l *List) lastNode() skipNode {
-	s := l.getNode(sentinelId)
-	return l.getNode(s.prev)
+func (l *List) firstNode() *skipNode {
+	return l.nodePtr(l.nodes[0].next[0])
 }
 
-func (l *List) getNode(id nodeId) skipNode {
-	return l.nodes[id]
+func (l *List) lastNode() *skipNode {
+	s := l.nodePtr(sentinelId)
+	return l.nodePtr(s.prev)
 }
 
-func (l *List) updateNode(node skipNode) {
-	l.nodes[node.id] = node
+func (l *List) nodePtr(id nodeId) *skipNode {
+	return &l.nodes[id]
 }
 
-func (l *List) compare(left, right skipNode) int {
-	return l.compareKeys(left.key, right.key)
+func (l *List) nextNodeId() nodeId {
+	return nodeId(len(l.nodes))
 }
 
 func (l *List) compareKeys(left, right []byte) int {
-	return l.compareKeysWithFn(left, right, l.cmp)
-}
-
-func (l *List) compareKeysWithFn(left, right []byte, cmp ValueCmp) int {
 	if right == nil {
 		return -1 // |right| is sentinel key
 	}
-	return cmp(left, right)
+	return l.keyOrder(left, right)
 }
 
-func (l *List) makeNode(key, val []byte) (n skipNode) {
-	n = skipNode{
-		id:     nodeId(len(l.nodes)),
-		key:    key,
-		val:    val,
-		height: rollHeight(l.src),
-		next:   skipPointer{},
-		prev:   sentinelId,
-	}
-	l.nodes = append(l.nodes, n)
-
-	return
-}
-
-const (
-	pattern0 = uint64(1<<3 - 1)
-	pattern1 = uint64(1<<6 - 1)
-	pattern2 = uint64(1<<9 - 1)
-	pattern3 = uint64(1<<12 - 1)
+var (
+	// Precompute the skiplist probabilities so that the optimal
+	// p-value can be used (inverse of Euler's number).
+	//
+	// https://github.com/andy-kimball/arenaskl/blob/master/skl.go
+	probabilities = [maxHeight]uint32{}
 )
 
-func rollHeight(r rand.Source) (h uint8) {
-	roll := r.Int63()
-	patterns := []uint64{
-		pattern0,
-		pattern1,
-		pattern2,
-		pattern3,
+func init() {
+	p := float64(1.0)
+	for i := uint8(0); i < maxHeight; i++ {
+		p /= math.E
+		probabilities[i] = uint32(float64(math.MaxUint32) * p)
 	}
+}
 
-	for _, pat := range patterns {
-		if uint64(roll)&pat != pat {
-			break
-		}
+func (l *List) rollHeight(key []byte) (h uint8) {
+	rnd := maphash.Bytes(l.seed, key)
+	for h < maxHeight && uint32(rnd) <= probabilities[h] {
 		h++
 	}
-
 	return
 }

@@ -46,7 +46,7 @@ func (v Null) Equals(other Value) bool {
 	return other == nil || other.Kind() == NullKind
 }
 
-func (v Null) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v Null) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	return NullKind < other.Kind(), nil
 }
 
@@ -58,11 +58,7 @@ func (v Null) isPrimitive() bool {
 	return true
 }
 
-func (v Null) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
-func (v Null) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (v Null) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 

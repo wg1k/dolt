@@ -37,7 +37,7 @@ func (tvs TupleVals) Value(ctx context.Context) (types.Value, error) {
 	return types.NewTuple(tvs.nbf, tvs.vs...)
 }
 
-func (tvs TupleVals) Less(nbf *types.NomsBinFormat, other types.LesserValuable) (bool, error) {
+func (tvs TupleVals) Less(ctx context.Context, nbf *types.NomsBinFormat, other types.LesserValuable) (bool, error) {
 	if other.Kind() == types.TupleKind {
 		if otherTVs, ok := other.(TupleVals); ok {
 			for i, val := range tvs.vs {
@@ -49,7 +49,7 @@ func (tvs TupleVals) Less(nbf *types.NomsBinFormat, other types.LesserValuable) 
 				otherVal := otherTVs.vs[i]
 
 				if !val.Equals(otherVal) {
-					return val.Less(nbf, otherVal)
+					return val.Less(ctx, nbf, otherVal)
 				}
 			}
 
@@ -263,7 +263,9 @@ func (tt TaggedValues) String() string {
 
 // CountCellDiffs returns the number of fields that are different between two
 // tuples and does not panic if tuples are different lengths.
-func CountCellDiffs(from, to types.Tuple) (uint64, error) {
+func CountCellDiffs(from, to types.Tuple, fromSch, toSch schema.Schema) (uint64, error) {
+	fromColLen := len(fromSch.GetAllCols().GetColumns())
+	toColLen := len(toSch.GetAllCols().GetColumns())
 	changed := 0
 	f, err := ParseTaggedValues(from)
 	if err != nil {
@@ -277,7 +279,8 @@ func CountCellDiffs(from, to types.Tuple) (uint64, error) {
 
 	for i, v := range f {
 		ov, ok := t[i]
-		if !ok || !v.Equals(ov) {
+		// !ok means t[i] has NULL value, and it is not cell modify if it was from drop column or add column
+		if (!ok && fromColLen == toColLen) || (ok && !v.Equals(ov)) {
 			changed++
 		}
 	}

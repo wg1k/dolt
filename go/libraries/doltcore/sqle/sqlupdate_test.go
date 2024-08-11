@@ -19,16 +19,15 @@ import (
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
-	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
-	"github.com/dolthub/dolt/go/store/types"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/json"
 )
 
 // Set to the name of a single test to run just that test, useful for debugging
@@ -326,11 +325,6 @@ var BasicUpdateTests = []UpdateTest{
 		ExpectedErr: "Type mismatch",
 	},
 	{
-		Name:        "type mismatch int -> uuid",
-		UpdateQuery: `update people set uuid = 0 where id = 0`,
-		ExpectedErr: "Type mismatch",
-	},
-	{
 		Name:        "type mismatch string -> int",
 		UpdateQuery: `update people set age = "pretty old" where id = 0`,
 		ExpectedErr: "Type mismatch",
@@ -343,16 +337,6 @@ var BasicUpdateTests = []UpdateTest{
 	{
 		Name:        "type mismatch string -> uint",
 		UpdateQuery: `update people set num_episodes = "all of them" where id = 0`,
-		ExpectedErr: "Type mismatch",
-	},
-	{
-		Name:        "type mismatch string -> uuid",
-		UpdateQuery: `update people set uuid = "not a uuid string" where id = 0`,
-		ExpectedErr: "Type mismatch",
-	},
-	{
-		Name:        "type mismatch bool -> uuid",
-		UpdateQuery: `update people set uuid = false where id = 0`,
 		ExpectedErr: "Type mismatch",
 	},
 }
@@ -376,45 +360,21 @@ func TestExecuteUpdateSystemTables(t *testing.T) {
 var systemTableUpdateTests = []UpdateTest{
 	{
 		Name: "update dolt_docs",
-		AdditionalSetup: CreateTableFn("dolt_docs",
-			doltdocs.DocsSchema,
-			NewRow(types.String("LICENSE.md"), types.String("A license"))),
-		UpdateQuery: "update dolt_docs set doc_text = 'Some text')",
-		ExpectedErr: "cannot insert into table",
+		AdditionalSetup: CreateTableFn("dolt_docs", doltdb.DocsSchema,
+			"INSERT INTO dolt_docs VALUES ('LICENSE.md','A license')"),
+		UpdateQuery:    "update dolt_docs set doc_text = 'Some text';",
+		SelectQuery:    "select * from dolt_docs",
+		ExpectedRows:   []sql.Row{{"LICENSE.md", "Some text"}},
+		ExpectedSchema: CompressSchema(doltdb.DocsSchema),
 	},
 	{
 		Name: "update dolt_query_catalog",
-		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName,
-			dtables.DoltQueryCatalogSchema,
-			NewRowWithSchema(dtables.DoltQueryCatalogSchema,
-				types.String("abc123"),
-				types.Uint(1),
-				types.String("example"),
-				types.String("select 2+2 from dual"),
-				types.String("description"),
-			)),
-		UpdateQuery: "update dolt_query_catalog set display_order = display_order + 1",
-		SelectQuery: "select * from dolt_query_catalog",
-		ExpectedRows: ToSqlRows(CompressSchema(dtables.DoltQueryCatalogSchema),
-			NewRow(types.String("abc123"), types.Uint(2), types.String("example"), types.String("select 2+2 from dual"), types.String("description"))),
+		AdditionalSetup: CreateTableFn(doltdb.DoltQueryCatalogTableName, dtables.DoltQueryCatalogSchema,
+			"INSERT INTO dolt_query_catalog VALUES ('abc123', 1, 'example', 'select 2+2 from dual', 'description')"),
+		UpdateQuery:    "update dolt_query_catalog set display_order = display_order + 1",
+		SelectQuery:    "select * from dolt_query_catalog",
+		ExpectedRows:   []sql.Row{{"abc123", uint64(2), "example", "select 2+2 from dual", "description"}},
 		ExpectedSchema: CompressSchema(dtables.DoltQueryCatalogSchema),
-	},
-	{
-		Name: "update dolt_schemas",
-		AdditionalSetup: CreateTableFn(doltdb.SchemasTableName,
-			SchemasTableSchema(),
-			NewRowWithSchema(SchemasTableSchema(),
-				types.String("view"),
-				types.String("name"),
-				types.String("select 2+2 from dual"),
-				types.Int(1),
-			)),
-		UpdateQuery: "update dolt_schemas set type = 'not a view'",
-		SelectQuery: "select * from dolt_schemas",
-		ExpectedRows: ToSqlRows(CompressSchema(SchemasTableSchema()),
-			NewRow(types.String("not a view"), types.String("name"), types.String("select 2+2 from dual"), types.Int(1)),
-		),
-		ExpectedSchema: CompressSchema(SchemasTableSchema()),
 	},
 }
 
@@ -429,14 +389,14 @@ func testUpdateQuery(t *testing.T, test UpdateTest) {
 		t.Skip("Skipping tests until " + singleUpdateQueryTest)
 	}
 
-	dEnv := dtestutils.CreateTestEnv()
-	CreateTestDatabase(dEnv, t)
+	dEnv, err := CreateTestDatabase()
+	require.NoError(t, err)
+	defer dEnv.DoltDB.Close()
 
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
 	}
 
-	var err error
 	root, _ := dEnv.WorkingRoot(context.Background())
 	root, err = executeModify(t, context.Background(), dEnv, root, test.UpdateQuery)
 	if len(test.ExpectedErr) > 0 {
@@ -449,7 +409,20 @@ func testUpdateQuery(t *testing.T, test UpdateTest) {
 	actualRows, sch, err := executeSelect(t, context.Background(), dEnv, root, test.SelectQuery)
 	require.NoError(t, err)
 
-	assert.Equal(t, test.ExpectedRows, actualRows)
+	assert.Equal(t, len(test.ExpectedRows), len(actualRows))
+	for i := 0; i < len(test.ExpectedRows); i++ {
+		assert.Equal(t, len(test.ExpectedRows[i]), len(actualRows[i]))
+		for j := 0; j < len(test.ExpectedRows[i]); j++ {
+			if _, ok := actualRows[i][j].(json.NomsJSON); ok {
+				cmp, err := gmstypes.CompareJSON(actualRows[i][j].(json.NomsJSON), test.ExpectedRows[i][j].(json.NomsJSON))
+				assert.NoError(t, err)
+				assert.Equal(t, 0, cmp)
+			} else {
+				assert.Equal(t, test.ExpectedRows[i][j], actualRows[i][j])
+			}
+		}
+	}
+
 	sqlSchema := mustSqlSchema(test.ExpectedSchema)
 	assertSchemasEqual(t, sqlSchema, sch)
 }

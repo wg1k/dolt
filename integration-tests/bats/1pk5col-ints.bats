@@ -21,21 +21,27 @@ teardown() {
     teardown_common
 }
 
-# Create a single primary key table and do stuff
-@test "1pk5col-ints: create a table with a schema file and examine repo" {
+@test "1pk5col-ints: empty table" {
     run dolt ls
     [ "$status" -eq 0 ]
     [[ "${lines[1]}" =~ "test" ]] || false
+    run dolt ls --verbose
+    [ "$status" -eq 0 ]
+    [[ "${lines[1]}" =~ "0 rows" ]] || false
+
     run dolt sql -q "select * from test"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ pk[[:space:]]+\|[[:space:]]+c1[[:space:]]+\|[[:space:]]+c2[[:space:]]+\|[[:space:]]+c3[[:space:]]+\|[[:space:]]+c4[[:space:]]+\|[[:space:]]+c5 ]] || false
+    [ "${#lines[@]}" -eq 0 ]
+    [[ ! "$output" =~ 'pk' ]] || false
+
     run dolt diff
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "diff --dolt a/test b/test" ]
     [ "${lines[1]}" = "added table" ]
+    
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Untracked files" ]]
+    [[ "$output" =~ "Untracked tables" ]] || false
     [[ "$output" =~ new[[:space:]]table:[[:space:]]+test ]] || false
 }
 
@@ -45,21 +51,21 @@ teardown() {
     [ "$output" = "" ]
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Changes to be committed" ]]
+    [[ "$output" =~ "Changes to be committed" ]] || false
     [[ "$output" =~ "new table:" ]] || false
     run dolt reset test
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Untracked files" ]]
+    [[ "$output" =~ "Untracked tables" ]] || false
     [[ "$output" =~ "new table:" ]] || false
     run dolt add .
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Changes to be committed" ]]
+    [[ "$output" =~ "Changes to be committed" ]] || false
     [[ "$output" =~ "new table:" ]] || false
     run dolt commit -m "test commit"
     [ "$status" -eq 0 ]
@@ -102,7 +108,7 @@ teardown() {
     [[ "$output" =~ "Field 'pk' doesn't have a default value" ]] || false
     run dolt sql -q "insert into test (pk,c1,c2,c3,c4,c5,c6) values (10,1,1,1,1,1,1)"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "invalid column name c6" ]] || false
+    [[ "$output" =~ "Unknown column 'c6' in 'test'" ]] || false
     run dolt sql -q "insert into test (pk,c1,c2,c3,c4,c5) values (0,6,6,6,6,6)"
     [ "$status" -eq 1 ]
     [[ "$output" =~ "duplicate primary key" ]] || false
@@ -111,7 +117,7 @@ teardown() {
 @test "1pk5col-ints: dolt sql insert same column twice" {
     run dolt sql -q "insert into test (pk,c1,c1) values (3,1,2)"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "duplicate column name c1" ]] || false
+    [[ "$output" =~ "column 'c1' specified twice" ]] || false
 }
 
 @test "1pk5col-ints: dolt sql insert no columns specified" {
@@ -129,7 +135,7 @@ teardown() {
     dolt sql -q "insert into test (pk,c1,c2,c3,c4,c5) values (0,6,6,6,6,6)"
     run dolt sql -q "insert ignore into test (pk,c1,c2,c3,c4,c5) values (0,6,6,6,6,6),(11,111,111,111,111,111)"
     [ "$status" -eq 0 ]
-    [[ "$output" = "Query OK, 1 row affected" ]] || false
+    [[ "$output" =~ "Query OK, 1 row affected" ]] || false
     run dolt sql -q "select * from test"
     [[ "$output" =~ "111" ]] || false
 }
@@ -187,7 +193,7 @@ teardown() {
     [[ "$output" =~ "column \"c10\" could not be found in any table in scope" ]] || false
     run dolt sql -q "select * from test where c2=147"
     [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -eq 4 ]
+    [ "${#lines[@]}" -eq 0 ]
 }
 
 @test "1pk5col-ints: dolt sql select as" {
@@ -280,7 +286,7 @@ teardown() {
     [[ "$output" =~ "column \"c12\" could not be found in any table in scope" ]] || false
     run dolt sql -q "update test set c1='foo' where pk=0"
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "error: 'foo' is not a valid value for 'BIGINT'" ]] || false
+    [[ "$output" =~ "error: 'foo' is not a valid value for 'bigint'" ]] || false
     run dolt sql -q "update test set c1=100,c2=100,c3=100,c4=100,c5=100 where pk>0"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Query OK, 3 rows affected" ]] || false
@@ -399,9 +405,9 @@ teardown() {
     dolt add test
     dolt commit -m "added conflicting test row"
     dolt checkout main
-    run dolt merge test-branch
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ "CONFLICT (content)" ]]
+    run dolt merge test-branch --no-commit
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content)" ]] || false
     run dolt conflicts cat test
     [ "$status" -eq 0 ]
     [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+ours[[:space:]] ]] || false
@@ -431,6 +437,49 @@ teardown() {
     [[ "$output" =~ "Merge:" ]] || false
 }
 
+@test "1pk5col-ints: generate a merge conflict and resolve with ours using stored procedure" {
+    dolt add test
+    dolt commit -m "added test table"
+    dolt branch test-branch
+    dolt sql -q "insert into test values (0, 1, 2, 3, 4, 5)"
+    dolt add test
+    dolt commit -m "added test row"
+    dolt checkout test-branch
+    dolt sql -q "insert into test values (0, 1, 2, 3, 4, 6)"
+    dolt add test
+    dolt commit -m "added conflicting test row"
+    dolt checkout main
+    run dolt merge test-branch --no-commit
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content)" ]] || false
+    run dolt conflicts cat test
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+ours[[:space:]] ]] || false
+    [[ "$output" =~ \+[[:space:]]+\|[[:space:]]+theirs[[:space:]] ]] || false
+
+    EXPECTED=$(echo -e "table,num_conflicts\ntest,1")
+    run dolt sql -r csv -q 'SELECT * FROM dolt_conflicts'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "$EXPECTED" ]] || false
+
+    run dolt sql -q "call dolt_conflicts_resolve('--ours', 'test')"
+    [ "$status" -eq 0 ]
+    run dolt sql -q "select * from test"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ \|[[:space:]]+5 ]] || false
+    [[ ! "$output" =~ \|[[:space:]]+6 ]] || false
+    run dolt conflicts cat test
+    [[ ! "$output" =~ "ours" ]] || false
+    [[ ! "$output" =~ "theirs" ]] || false
+    dolt add test
+    dolt commit -m "merged and resolved conflict"
+    run dolt log
+    [[ "$output" =~ "added test row" ]] || false
+    [[ "$output" =~ "added conflicting test row" ]] || false
+    [[ "$output" =~ "merged and resolved conflict" ]] || false
+    [[ "$output" =~ "Merge:" ]] || false
+}
+
 @test "1pk5col-ints: generate a merge conflict and try to roll back using dolt merge --abort" {
     dolt add test
     dolt commit -m "added test table"
@@ -443,17 +492,16 @@ teardown() {
     dolt add test
     dolt commit -m "added conflicting test row"
     dolt checkout main
-    dolt merge test-branch
-    run dolt checkout test
-    [ "$status" -eq 0 ]
-    [ "$output" = "" ]
+    run dolt merge test-branch
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content)" ]] || false
     run dolt sql -q "select * from test"
     [[ "$output" =~ \|[[:space:]]+5 ]] || false
     run dolt conflicts cat test
-    [[ ! "$output" =~ "ours" ]] || false
-    [[ ! "$output" =~ "theirs" ]] || false
+    [[ "$output" =~ "ours" ]] || false
+    [[ "$output" =~ "theirs" ]] || false
     run dolt status
-    [[ "$output" =~ "All conflicts and constraint violations fixed but you are still merging." ]] || false
+    [[ "$output" =~ "You have unmerged tables" ]] || false
     run dolt merge --abort
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
@@ -474,10 +522,34 @@ teardown() {
     dolt add test
     dolt commit -m "added conflicting test row"
     dolt checkout main
-    dolt merge test-branch
+    run dolt merge test-branch
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content)" ]] || false
     run dolt conflicts resolve --theirs test
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
+    run dolt sql -q "select * from test"
+    [[ "$output" =~ \|[[:space:]]+6 ]] || false
+    [[ ! "$output" =~ "|5" ]] || false
+}
+
+@test "1pk5col-ints: generate a merge conflict and resolve with theirs using stored procedure" {
+    dolt add test
+    dolt commit -m "added test table"
+    dolt branch test-branch
+    dolt sql -q "insert into test values (0, 1, 2, 3, 4, 5)"
+    dolt add test
+    dolt commit -m "added test row"
+    dolt checkout test-branch
+    dolt sql -q "insert into test values (0, 1, 2, 3, 4, 6)"
+    dolt add test
+    dolt commit -m "added conflicting test row"
+    dolt checkout main
+    run dolt merge test-branch
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content)" ]] || false
+    run dolt sql -q "call dolt_conflicts_resolve('--theirs', 'test')"
+    [ "$status" -eq 0 ]
     run dolt sql -q "select * from test"
     [[ "$output" =~ \|[[:space:]]+6 ]] || false
     [[ ! "$output" =~ "|5" ]] || false
@@ -510,12 +582,13 @@ pk,c1,c2,c3,c4,c5
 1,1,2,3,4,5
 2
 DELIM
+
     run dolt table import test -u badline.csv
     [ "$status" -eq 1 ]
-    [[ "${lines[0]}" =~ "Additions" ]] || false
-    [[ "${lines[1]}" =~ "A bad row was encountered" ]] || false
-    [[ "${lines[2]}" =~ "expects 6 fields" ]] || false
-    [[ "${lines[2]}" =~ "line only has 1 value" ]] || false
+    echo $output
+    [[ "${lines[0]}" =~ "Additions: 2" ]] || false
+    [[ "$output" =~ "row values" ]] || false
+    [[ "$output" =~ "CSV reader expected 6 values, but saw 1" ]] || false
 }
 
 @test "1pk5col-ints: import data from a csv file with a bad header" {
@@ -607,7 +680,7 @@ DELIM
     [[ "$output" =~ "PRIMARY KEY (\`pk\`)" ]] || false
 }
 
-@test "1pk5col-ints: dolt schema show on non existant table" {
+@test "1pk5col-ints: dolt schema show on non existent table" {
     run dolt schema show foo
     [ "$status" -eq 0 ]
     [ "$output" = "foo not found" ]
@@ -663,13 +736,13 @@ DELIM
     dolt branch test-branch-m
     dolt branch test-branch-alt
     dolt checkout test-branch-m
-    dolt merge test-branch
+    dolt merge test-branch --no-commit
     dolt checkout test-branch-alt
     dolt sql -q "CREATE TABLE test_alt (pk BIGINT NOT NULL, c1 BIGINT, PRIMARY KEY (pk));"
     dolt add test_alt
     dolt commit -m 'add test_alt'
     dolt checkout test-branch-m
-    dolt merge test-branch-alt
+    dolt merge test-branch-alt --no-commit
     dolt add test_alt
     dolt commit -m 'merge test_alt'
     dolt checkout test-branch
@@ -677,11 +750,10 @@ DELIM
     dolt add test
     dolt commit -m "added row to test"
     dolt checkout test-branch-m
-    run dolt merge test-branch
-    echo $output
+    run dolt merge test-branch -m "merge"
     [ "$status" -eq 0 ]
-    [ "${lines[1]}" = "test | 1 +" ]
-    [ "${lines[2]}" = "1 tables changed, 1 rows added(+), 0 rows modified(*), 0 rows deleted(-)" ]
+    [ "${lines[6]}" = "test | 1 +" ]
+    [ "${lines[7]}" = "1 tables changed, 1 rows added(+), 0 rows modified(*), 0 rows deleted(-)" ]
 }
 
 @test "1pk5col-ints: checkout table with branch of same name" {

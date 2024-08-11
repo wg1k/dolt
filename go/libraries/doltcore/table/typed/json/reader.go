@@ -22,9 +22,12 @@ import (
 
 	"github.com/bcicen/jstream"
 	"github.com/dolthub/go-mysql-server/sql"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -40,6 +43,8 @@ type JSONReader struct {
 	sampleRow  sql.Row
 }
 
+var _ table.SqlTableReader = (*JSONReader)(nil)
+
 func OpenJSONReader(vrw types.ValueReadWriter, path string, fs filesys.ReadableFS, sch schema.Schema) (*JSONReader, error) {
 	r, err := fs.OpenForRead(path)
 	if err != nil {
@@ -49,12 +54,17 @@ func OpenJSONReader(vrw types.ValueReadWriter, path string, fs filesys.ReadableF
 	return NewJSONReader(vrw, r, sch)
 }
 
+// The bytes of the supplied reader are treated as UTF-8. If there is a UTF8,
+// UTF16LE or UTF16BE BOM at the first bytes read, then it is stripped and the
+// remaining contents of the reader are treated as that encoding.
 func NewJSONReader(vrw types.ValueReadWriter, r io.ReadCloser, sch schema.Schema) (*JSONReader, error) {
 	if sch == nil {
 		return nil, errors.New("schema must be provided to JsonReader")
 	}
 
-	decoder := jstream.NewDecoder(r, 2) // extract JSON values at a depth level of 1
+	textReader := transform.NewReader(r, unicode.BOMOverride(unicode.UTF8.NewDecoder()))
+
+	decoder := jstream.NewDecoder(textReader, 2) // extract JSON values at a depth level of 1
 
 	return &JSONReader{vrw: vrw, closer: r, sch: sch, jsonStream: decoder}, nil
 }
@@ -108,7 +118,12 @@ func (r *JSONReader) ReadSqlRow(ctx context.Context) (sql.Row, error) {
 		return nil, io.EOF
 	}
 
-	return r.convToSqlRow(metaRow.Value.(map[string]interface{}))
+	mapVal, ok := metaRow.Value.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected JSON format received, expected format: { \"rows\": [ json_row_objects... ] } ")
+	}
+
+	return r.convToSqlRow(mapVal)
 }
 
 func (r *JSONReader) convToSqlRow(rowMap map[string]interface{}) (sql.Row, error) {
@@ -121,7 +136,7 @@ func (r *JSONReader) convToSqlRow(rowMap map[string]interface{}) (sql.Row, error
 			return nil, fmt.Errorf("column %s not found in schema", k)
 		}
 
-		v, err := col.TypeInfo.ToSqlType().Convert(v)
+		v, _, err := col.TypeInfo.ToSqlType().Convert(v)
 		if err != nil {
 			return nil, err
 		}

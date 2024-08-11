@@ -23,12 +23,12 @@ package spec
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/libraries/utils/file"
 	"github.com/dolthub/dolt/go/store/chunks"
@@ -36,6 +36,7 @@ import (
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -84,7 +85,7 @@ func TestMemDatabaseSpec(t *testing.T) {
 	s := types.String("hello")
 	vrw := spec.GetVRW(context.Background())
 	vrw.WriteValue(context.Background(), s)
-	assert.Equal(s, mustValue(vrw.ReadValue(context.Background(), mustHash(s.Hash(types.Format_7_18)))))
+	assert.Equal(s, mustValue(vrw.ReadValue(context.Background(), mustHash(s.Hash(vrw.Format())))))
 }
 
 func TestMemDatasetSpec(t *testing.T) {
@@ -97,7 +98,6 @@ func TestMemDatasetSpec(t *testing.T) {
 	assert.Equal("mem", spec.Protocol)
 	assert.Equal("", spec.DatabaseName)
 	assert.Equal("test", spec.Path.Dataset)
-	assert.True(spec.Path.Path.IsEmpty())
 
 	ds := spec.GetDataset(context.Background())
 	_, ok, err := spec.GetDataset(context.Background()).MaybeHeadValue()
@@ -119,7 +119,7 @@ func TestMemHashPathSpec(t *testing.T) {
 
 	s := types.String("hello")
 
-	spec, err := ForPath("mem::#" + mustHash(s.Hash(types.Format_7_18)).String())
+	spec, err := ForPath("mem::#" + mustHash(s.Hash(types.Format_Default)).String())
 	assert.NoError(err)
 	defer spec.Close()
 
@@ -131,13 +131,15 @@ func TestMemHashPathSpec(t *testing.T) {
 	// assert.Nil(spec.GetValue())
 
 	spec.GetVRW(context.Background()).WriteValue(context.Background(), s)
-	assert.Equal(s, spec.GetValue(context.Background()))
+	value, err := spec.GetValue(context.Background())
+	assert.NoError(err)
+	assert.Equal(s, value)
 }
 
 func TestMemDatasetPathSpec(t *testing.T) {
 	assert := assert.New(t)
 
-	spec, err := ForPath("mem::test.value[0]")
+	spec, err := ForPath("mem::test")
 	assert.NoError(err)
 	defer spec.Close()
 
@@ -153,7 +155,9 @@ func TestMemDatasetPathSpec(t *testing.T) {
 	_, err = datas.CommitValue(context.Background(), db, ds, mustList(types.NewList(context.Background(), spec.GetVRW(context.Background()), types.Float(42))))
 	assert.NoError(err)
 
-	assert.Equal(types.Float(42), spec.GetValue(context.Background()))
+	value, err := spec.GetValue(context.Background())
+	require.NoError(t, err)
+	assert.NotNil(value)
 }
 
 func TestNBSDatabaseSpec(t *testing.T) {
@@ -170,10 +174,10 @@ func TestNBSDatabaseSpec(t *testing.T) {
 		store1 := filepath.Join(tmpDir, "store1")
 		os.Mkdir(store1, 0777)
 		func() {
-			cs, err := nbs.NewLocalStore(context.Background(), types.Format_Default.VersionString(), store1, 8*(1<<20))
+			cs, err := nbs.NewLocalStore(context.Background(), types.Format_Default.VersionString(), store1, 8*(1<<20), nbs.NewUnlimitedMemQuotaProvider())
 			assert.NoError(err)
 			vrw := types.NewValueStore(cs)
-			db := datas.NewTypesDatabase(vrw)
+			db := datas.NewTypesDatabase(vrw, tree.NewNodeStore(cs))
 			defer db.Close()
 			r, err := vrw.WriteValue(context.Background(), s)
 			assert.NoError(err)
@@ -190,7 +194,9 @@ func TestNBSDatabaseSpec(t *testing.T) {
 		assert.Equal("nbs", spec1.Protocol)
 		assert.Equal(store1, spec1.DatabaseName)
 
-		assert.Equal(s, mustValue(spec1.GetVRW(context.Background()).ReadValue(context.Background(), mustHash(s.Hash(types.Format_7_18)))))
+		vrw := spec1.GetVRW(context.Background())
+
+		assert.Equal(s, mustValue(vrw.ReadValue(context.Background(), mustHash(s.Hash(vrw.Format())))))
 
 		// New databases can be created and read/written from.
 		store2 := filepath.Join(tmpDir, "store2")
@@ -203,7 +209,7 @@ func TestNBSDatabaseSpec(t *testing.T) {
 		assert.Equal(store2, spec2.DatabaseName)
 
 		db := spec2.GetDatabase(context.Background())
-		vrw := spec2.GetVRW(context.Background())
+		vrw = spec2.GetVRW(context.Background())
 		vrw.WriteValue(context.Background(), s)
 		r, err := vrw.WriteValue(context.Background(), s)
 		assert.NoError(err)
@@ -211,7 +217,7 @@ func TestNBSDatabaseSpec(t *testing.T) {
 		assert.NoError(err)
 		_, err = datas.CommitValue(context.Background(), db, ds, r)
 		assert.NoError(err)
-		assert.Equal(s, mustValue(vrw.ReadValue(context.Background(), mustHash(s.Hash(types.Format_7_18)))))
+		assert.Equal(s, mustValue(vrw.ReadValue(context.Background(), mustHash(s.Hash(vrw.Format())))))
 	}
 
 	run("")
@@ -233,14 +239,18 @@ func TestHref(t *testing.T) {
 
 	sp, _ := ForDatabase("aws://table/foo/bar/baz")
 	assert.Equal("aws://table/foo/bar/baz", sp.Href())
+	sp.Close()
 	sp, _ = ForDataset("aws://[table:bucket]/foo/bar/baz::myds")
 	assert.Equal("aws://[table:bucket]/foo/bar/baz", sp.Href())
+	sp.Close()
 	sp, _ = ForPath("aws://[table:bucket]/foo/bar/baz::myds.my.path")
 	assert.Equal("aws://[table:bucket]/foo/bar/baz", sp.Href())
+	sp.Close()
 
 	sp, err := ForPath("mem::myds.my.path")
 	assert.NoError(err)
 	assert.Equal("", sp.Href())
+	sp.Close()
 }
 
 func TestForDatabase(t *testing.T) {
@@ -296,8 +306,6 @@ func TestForDatabase(t *testing.T) {
 }
 
 func TestForDataset(t *testing.T) {
-	assert := assert.New(t)
-
 	badSpecs := []string{
 		"mem",
 		"mem:",
@@ -308,28 +316,24 @@ func TestForDataset(t *testing.T) {
 		"nbs:",
 		"nbs:hello",
 		"aws://[t:b]/db",
-		"mem::foo.value",
 	}
 
 	for _, spec := range badSpecs {
-		_, err := ForDataset(spec)
-		assert.Error(err, spec)
-	}
-
-	invalidDatasetNames := []string{" ", "", "$", "#", ":", "\n", "💩"}
-	for _, s := range invalidDatasetNames {
-		_, err := ForDataset("mem::" + s)
-		assert.Error(err)
+		t.Run(spec, func(t *testing.T) {
+			_, err := ForDataset(spec)
+			assert.Error(t, err, spec)
+		})
 	}
 
 	validDatasetNames := []string{"a", "Z", "0", "/", "-", "_"}
 	for _, s := range validDatasetNames {
-		_, err := ForDataset("mem::" + s)
-		assert.NoError(err)
+		spec, err := ForDataset("mem::" + s)
+		assert.NoError(t, err)
+		spec.Close()
 	}
 
 	tmpDir, err := os.MkdirTemp("", "spec_test")
-	assert.NoError(err)
+	assert.NoError(t, err)
 	defer file.RemoveAll(tmpDir)
 
 	testCases := []struct {
@@ -342,6 +346,7 @@ func TestForDataset(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
+		assert := assert.New(t)
 		spec, err := ForDataset(tc.spec)
 		assert.NoError(err, tc.spec)
 		defer spec.Close()
@@ -404,99 +409,6 @@ func TestForPath(t *testing.T) {
 	}
 }
 
-func TestPinPathSpec(t *testing.T) {
-	assert := assert.New(t)
-
-	unpinned, err := ForPath("mem::foo.value")
-	assert.NoError(err)
-	defer unpinned.Close()
-
-	db := unpinned.GetDatabase(context.Background())
-	ds, err := db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	_, err = datas.CommitValue(context.Background(), db, ds, types.Float(42))
-	assert.NoError(err)
-
-	pinned, ok := unpinned.Pin(context.Background())
-	assert.True(ok)
-	defer pinned.Close()
-
-	ds, err = db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	head, ok := ds.MaybeHead()
-	assert.True(ok)
-
-	assert.Equal(mustHash(head.Hash(types.Format_7_18)), pinned.Path.Hash)
-	assert.Equal(fmt.Sprintf("mem::#%s.value", mustHash(head.Hash(types.Format_7_18)).String()), pinned.String())
-	assert.Equal(types.Float(42), pinned.GetValue(context.Background()))
-	assert.Equal(types.Float(42), unpinned.GetValue(context.Background()))
-
-	ds, err = db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	_, err = datas.CommitValue(context.Background(), db, ds, types.Float(43))
-	assert.NoError(err)
-	assert.Equal(types.Float(42), pinned.GetValue(context.Background()))
-	assert.Equal(types.Float(43), unpinned.GetValue(context.Background()))
-}
-
-func TestPinDatasetSpec(t *testing.T) {
-	assert := assert.New(t)
-
-	unpinned, err := ForDataset("mem::foo")
-	assert.NoError(err)
-	defer unpinned.Close()
-
-	db := unpinned.GetDatabase(context.Background())
-	ds, err := db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	_, err = datas.CommitValue(context.Background(), db, ds, types.Float(42))
-	assert.NoError(err)
-
-	pinned, ok := unpinned.Pin(context.Background())
-	assert.True(ok)
-	defer pinned.Close()
-
-	ds, err = db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	head, ok := ds.MaybeHead()
-	assert.True(ok)
-
-	commitValue := func(val types.Value) types.Value {
-		v, ok, err := val.(types.Struct).MaybeGet(datas.ValueField)
-		d.PanicIfError(err)
-		d.PanicIfFalse(ok)
-		return v
-	}
-
-	assert.Equal(mustHash(head.Hash(types.Format_7_18)), pinned.Path.Hash)
-	assert.Equal(fmt.Sprintf("mem::#%s", mustHash(head.Hash(types.Format_7_18)).String()), pinned.String())
-	assert.Equal(types.Float(42), commitValue(pinned.GetValue(context.Background())))
-	headVal, ok, err := unpinned.GetDataset(context.Background()).MaybeHeadValue()
-	assert.NoError(err)
-	assert.True(ok)
-	assert.Equal(types.Float(42), headVal)
-
-	ds, err = db.GetDataset(context.Background(), "foo")
-	assert.NoError(err)
-	_, err = datas.CommitValue(context.Background(), db, ds, types.Float(43))
-	assert.NoError(err)
-	assert.Equal(types.Float(42), commitValue(pinned.GetValue(context.Background())))
-	headVal, ok, err = unpinned.GetDataset(context.Background()).MaybeHeadValue()
-	assert.NoError(err)
-	assert.True(ok)
-	assert.Equal(types.Float(43), headVal)
-}
-
-func TestAlreadyPinnedPathSpec(t *testing.T) {
-	assert := assert.New(t)
-
-	unpinned, err := ForPath("mem::#imgp9mp1h3b9nv0gna6mri53dlj9f4ql.value")
-	assert.NoError(err)
-	pinned, ok := unpinned.Pin(context.Background())
-	assert.True(ok)
-	assert.Equal(unpinned, pinned)
-}
-
 func TestMultipleSpecsSameNBS(t *testing.T) {
 	assert := assert.New(t)
 
@@ -509,6 +421,8 @@ func TestMultipleSpecsSameNBS(t *testing.T) {
 
 	assert.NoError(err1)
 	assert.NoError(err2)
+	defer spec1.Close()
+	defer spec2.Close()
 
 	s := types.String("hello")
 	db := spec1.GetDatabase(context.Background())
@@ -519,7 +433,7 @@ func TestMultipleSpecsSameNBS(t *testing.T) {
 	assert.NoError(err)
 	_, err = datas.CommitValue(context.Background(), db, ds, r)
 	assert.NoError(err)
-	assert.Equal(s, mustValue(spec2.GetVRW(context.Background()).ReadValue(context.Background(), mustHash(s.Hash(types.Format_7_18)))))
+	assert.Equal(s, mustValue(spec2.GetVRW(context.Background()).ReadValue(context.Background(), mustHash(s.Hash(vrw.Format())))))
 }
 
 func TestAcccessingInvalidSpec(t *testing.T) {
@@ -537,8 +451,6 @@ func TestAcccessingInvalidSpec(t *testing.T) {
 		assert.Panics(func() { sp.Close() })
 		// Spec was created with ForDatabase, so dataset/path related functions
 		// should just fail not panic.
-		_, ok := sp.Pin(context.Background())
-		assert.False(ok)
 		assert.Equal(datas.Dataset{}, sp.GetDataset(context.Background()))
 		assert.Nil(sp.GetValue(context.Background()))
 	}
@@ -563,6 +475,12 @@ func (t *testProtocol) NewDatabase(sp Spec) (datas.Database, error) {
 	return datas.NewDatabase(cs), nil
 }
 
+func noopGetAddrs(c chunks.Chunk) chunks.GetAddrsCb {
+	return func(ctx context.Context, addrs hash.HashSet, _ chunks.PendingRefExists) error {
+		return nil
+	}
+}
+
 func TestExternalProtocol(t *testing.T) {
 	assert := assert.New(t)
 	tp := testProtocol{}
@@ -570,13 +488,14 @@ func TestExternalProtocol(t *testing.T) {
 
 	sp, err := ForDataset("test:foo::bar")
 	assert.NoError(err)
+	defer sp.Close()
 	assert.Equal("test", sp.Protocol)
 	assert.Equal("foo", sp.DatabaseName)
 
 	cs := sp.NewChunkStore(context.Background())
 	assert.Equal("foo", tp.name)
 	c := chunks.NewChunk([]byte("hi!"))
-	err = cs.Put(context.Background(), c)
+	err = cs.Put(context.Background(), c, noopGetAddrs)
 	assert.NoError(err)
 	ok, err := cs.Has(context.Background(), c.Hash())
 	assert.NoError(err)

@@ -27,6 +27,71 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 )
 
+func TestForeignKeyHashOf(t *testing.T) {
+	// Assert that we can get an expected hash for a simple Foreign Key
+	t.Run("HashOf for resolved foreign key", func(t *testing.T) {
+		fk := doltdb.ForeignKey{
+			Name:                   "fk1",
+			TableName:              "table1",
+			TableIndex:             "i1",
+			TableColumns:           []uint64{123},
+			ReferencedTableName:    "parentTable",
+			ReferencedTableIndex:   "i2",
+			ReferencedTableColumns: []uint64{321},
+			OnUpdate:               0,
+			OnDelete:               0,
+			UnresolvedFKDetails:    doltdb.UnresolvedFKDetails{},
+		}
+		hashOf, err := fk.HashOf()
+		assert.NoError(t, err)
+		assert.Equal(t, "65brfkb3fh6n7kgpv8d38mjb6krrc54r", hashOf.String())
+	})
+
+	// Assert that two unresolved Foreign Keys get unique hashes, when only their unresolved FK details are different
+	t.Run("HashOf for unresolved FK uses unresolved fields", func(t *testing.T) {
+		fk1 := doltdb.ForeignKey{
+			Name:                   "",
+			TableName:              "table1",
+			TableIndex:             "i1",
+			TableColumns:           nil,
+			ReferencedTableName:    "parentTable",
+			ReferencedTableIndex:   "i2",
+			ReferencedTableColumns: nil,
+			OnUpdate:               0,
+			OnDelete:               0,
+			UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+				TableColumns:           []string{"col1"},
+				ReferencedTableColumns: []string{"col2"},
+			},
+		}
+		hash1, err := fk1.HashOf()
+		assert.NoError(t, err)
+		assert.Equal(t, "qiv9l4juuk20buqml2unlbohfvo95mcd", hash1.String())
+
+		// Create a second FK that is identical to fk1, except for the unresolved FK details to
+		// assert that the UnresolvedFKDetails fields are used in the hash.
+		fk2 := doltdb.ForeignKey{
+			Name:                   "",
+			TableName:              "table1",
+			TableIndex:             "i1",
+			TableColumns:           nil,
+			ReferencedTableName:    "parentTable",
+			ReferencedTableIndex:   "i2",
+			ReferencedTableColumns: nil,
+			OnUpdate:               0,
+			OnDelete:               0,
+			UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+				TableColumns:           []string{"col2"},
+				ReferencedTableColumns: []string{"col2"},
+			},
+		}
+		hash2, err := fk2.HashOf()
+		assert.NoError(t, err)
+		assert.Equal(t, "cdglg27qlu0dva6k87vriasnn11o2bnn", hash2.String())
+		assert.NotEqual(t, hash1, hash2)
+	})
+}
+
 func TestForeignKeys(t *testing.T) {
 	for _, test := range foreignKeyTests {
 		t.Run(test.name, func(t *testing.T) {
@@ -44,15 +109,18 @@ func TestForeignKeyErrors(t *testing.T) {
 
 	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
+	cliCtx, err := commands.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, err)
 
 	for _, c := range cmds {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
-	exitCode := commands.SqlCmd{}.Exec(ctx, commands.SqlCmd{}.Name(), []string{"-q", `ALTER TABLE test MODIFY v1 INT;`}, dEnv)
+	exitCode := commands.SqlCmd{}.Exec(ctx, commands.SqlCmd{}.Name(), []string{"-q", `ALTER TABLE test MODIFY v1 INT;`}, dEnv, cliCtx)
 	require.Equal(t, 1, exitCode)
-	exitCode = commands.SqlCmd{}.Exec(ctx, commands.SqlCmd{}.Name(), []string{"-q", `ALTER TABLE test2 MODIFY v1 INT;`}, dEnv)
+	exitCode = commands.SqlCmd{}.Exec(ctx, commands.SqlCmd{}.Name(), []string{"-q", `ALTER TABLE test2 MODIFY v1 INT;`}, dEnv, cliCtx)
+
 	require.Equal(t, 1, exitCode)
 }
 
@@ -86,12 +154,15 @@ func testForeignKeys(t *testing.T, test foreignKeyTest) {
 	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
 
+	cliCtx, verr := commands.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, verr)
+
 	for _, c := range fkSetupCommon {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 	for _, c := range test.setup {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
@@ -104,7 +175,7 @@ func testForeignKeys(t *testing.T, test foreignKeyTest) {
 
 	for _, fk := range test.fks {
 		// verify parent index
-		pt, _, ok, err := root.GetTableInsensitive(ctx, fk.ReferencedTableName)
+		pt, _, ok, err := doltdb.GetTableInsensitive(ctx, root, doltdb.TableName{Name: fk.ReferencedTableName})
 		require.NoError(t, err)
 		require.True(t, ok)
 		ps, err := pt.GetSchema(ctx)
@@ -114,7 +185,7 @@ func testForeignKeys(t *testing.T, test foreignKeyTest) {
 		require.Equal(t, fk.ReferencedTableColumns, pi.IndexedColumnTags())
 
 		// verify child index
-		ct, _, ok, err := root.GetTableInsensitive(ctx, fk.TableName)
+		ct, _, ok, err := doltdb.GetTableInsensitive(ctx, root, doltdb.TableName{Name: fk.TableName})
 		require.NoError(t, err)
 		require.True(t, ok)
 		cs, err := ct.GetSchema(ctx)
@@ -142,6 +213,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -162,6 +237,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1v2_idx",
 				ReferencedTableColumns: []uint64{6269, 7947},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1", "v2"},
+					ReferencedTableColumns: []string{"v1", "v2"},
+				},
 			},
 		},
 	},
@@ -184,6 +263,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 			{
 				Name:                   "fk2",
@@ -193,6 +276,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v2_idx",
 				ReferencedTableColumns: []uint64{7947},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v2"},
+					ReferencedTableColumns: []string{"v2"},
+				},
 			},
 		},
 	},
@@ -209,12 +296,16 @@ var foreignKeyTests = []foreignKeyTest{
 			{
 				Name:      "new_fk",
 				TableName: "new_table",
-				// unnamed indexes take the column name
-				TableIndex:             "v1",
+				// FK created indexes use the supplied FK name
+				TableIndex:             "new_fk",
 				TableColumns:           []uint64{7597},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -237,7 +328,11 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_Cascade,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_Cascade,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 			{
 				Name:                   "fk2",
@@ -247,7 +342,11 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v2_idx",
 				ReferencedTableColumns: []uint64{7947},
-				OnDelete:               doltdb.ForeignKeyReferenceOption_SetNull,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_SetNull,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v2"},
+					ReferencedTableColumns: []string{"v2"},
+				},
 			},
 		},
 	},
@@ -267,8 +366,12 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_Cascade,
-				OnDelete:               doltdb.ForeignKeyReferenceOption_Cascade,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_Cascade,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_Cascade,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -299,55 +402,75 @@ var foreignKeyTests = []foreignKeyTest{
 			{
 				Name:                   "fk1",
 				TableName:              "sibling",
-				TableIndex:             "v1",
+				TableIndex:             "fk1",
 				TableColumns:           []uint64{16080},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 			{
 				Name:                   "fk2",
 				TableName:              "sibling",
-				TableIndex:             "v2",
+				TableIndex:             "fk2",
 				TableColumns:           []uint64{7576},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v2_idx",
 				ReferencedTableColumns: []uint64{7947},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_Restrict,
-				OnDelete:               doltdb.ForeignKeyReferenceOption_Restrict,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_Restrict,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_Restrict,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v2"},
+					ReferencedTableColumns: []string{"v2"},
+				},
 			},
 			{
 				Name:                   "fk3",
 				TableName:              "sibling",
-				TableIndex:             "v3",
+				TableIndex:             "fk3",
 				TableColumns:           []uint64{16245},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v3_idx",
 				ReferencedTableColumns: []uint64{5237},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_Cascade,
-				OnDelete:               doltdb.ForeignKeyReferenceOption_Cascade,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_Cascade,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_Cascade,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v3"},
+					ReferencedTableColumns: []string{"v3"},
+				},
 			},
 			{
 				Name:                   "fk4",
 				TableName:              "sibling",
-				TableIndex:             "v4",
+				TableIndex:             "fk4",
 				TableColumns:           []uint64{9036},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v4_idx",
 				ReferencedTableColumns: []uint64{14774},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_SetNull,
-				OnDelete:               doltdb.ForeignKeyReferenceOption_SetNull,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_SetNull,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_SetNull,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v4"},
+					ReferencedTableColumns: []string{"v4"},
+				},
 			},
 			{
 				Name:                   "fk5",
 				TableName:              "sibling",
-				TableIndex:             "v5",
+				TableIndex:             "fk5",
 				TableColumns:           []uint64{11586},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v5_idx",
 				ReferencedTableColumns: []uint64{8125},
-				OnUpdate:               doltdb.ForeignKeyReferenceOption_NoAction,
-				OnDelete:               doltdb.ForeignKeyReferenceOption_NoAction,
+				OnUpdate:               doltdb.ForeignKeyReferentialAction_NoAction,
+				OnDelete:               doltdb.ForeignKeyReferentialAction_NoAction,
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v5"},
+					ReferencedTableColumns: []string{"v5"},
+				},
 			},
 		},
 	},
@@ -360,12 +483,16 @@ var foreignKeyTests = []foreignKeyTest{
 			{
 				Name:      "child_fk",
 				TableName: "child",
-				// unnamed indexes take the column name
-				TableIndex:             "v1",
+				// FK created indexes use the supplied FK name
+				TableIndex:             "child_fk",
 				TableColumns:           []uint64{1215},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -377,13 +504,17 @@ var foreignKeyTests = []foreignKeyTest{
 		},
 		fks: []doltdb.ForeignKey{
 			{
-				Name:                   "19eof0mu",
+				Name:                   "child_ibfk_1",
 				TableName:              "child",
 				TableIndex:             "v1_idx",
 				TableColumns:           []uint64{1215},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -398,7 +529,7 @@ var foreignKeyTests = []foreignKeyTest{
 		},
 		fks: []doltdb.ForeignKey{
 			{
-				Name:      "mv9a59oo",
+				Name:      "new_table_ibfk_1",
 				TableName: "new_table",
 				// unnamed indexes take the column name
 				TableIndex:             "v1",
@@ -406,6 +537,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -420,13 +555,17 @@ var foreignKeyTests = []foreignKeyTest{
 		},
 		fks: []doltdb.ForeignKey{
 			{
-				Name:                   "n4qun7ju",
+				Name:                   "child_ibfk_1",
 				TableName:              "child",
 				TableIndex:             "v1v2_idx",
 				TableColumns:           []uint64{1215, 8734},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1v2_idx",
 				ReferencedTableColumns: []uint64{6269, 7947},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1", "v2"},
+					ReferencedTableColumns: []string{"v1", "v2"},
+				},
 			},
 		},
 	},
@@ -442,22 +581,30 @@ var foreignKeyTests = []foreignKeyTest{
 		},
 		fks: []doltdb.ForeignKey{
 			{
-				Name:                   "19eof0mu",
+				Name:                   "child_ibfk_1",
 				TableName:              "child",
 				TableIndex:             "v1_idx",
 				TableColumns:           []uint64{1215},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 			{
-				Name:                   "p79c8qtq",
+				Name:                   "child_ibfk_2",
 				TableName:              "child",
 				TableIndex:             "v2_idx",
 				TableColumns:           []uint64{8734},
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v2_idx",
 				ReferencedTableColumns: []uint64{7947},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v2"},
+					ReferencedTableColumns: []string{"v2"},
+				},
 			},
 		},
 	},
@@ -484,6 +631,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1_idx",
 				ReferencedTableColumns: []uint64{6269},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1"},
+					ReferencedTableColumns: []string{"v1"},
+				},
 			},
 		},
 	},
@@ -513,6 +664,10 @@ var foreignKeyTests = []foreignKeyTest{
 				ReferencedTableName:    "parent",
 				ReferencedTableIndex:   "v1v2",
 				ReferencedTableColumns: []uint64{6269, 7947},
+				UnresolvedFKDetails: doltdb.UnresolvedFKDetails{
+					TableColumns:           []string{"v1", "v2"},
+					ReferencedTableColumns: []string{"v1", "v2"},
+				},
 			},
 		},
 	},

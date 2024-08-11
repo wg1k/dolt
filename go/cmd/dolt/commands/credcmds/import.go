@@ -32,6 +32,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/doltcore/grpcendpoint"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"github.com/dolthub/dolt/go/libraries/utils/config"
 )
 
 var importDocs = cli.CommandDocumentationContent{
@@ -63,10 +64,9 @@ func (cmd ImportCmd) Description() string {
 	return importDocs.ShortDesc
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd ImportCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd ImportCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, importDocs, ap))
+	return cli.NewCommandDocumentation(importDocs, ap)
 }
 
 // RequiresRepo should return false if this interface is implemented, and the command does not have the requirement
@@ -83,16 +83,16 @@ func (cmd ImportCmd) EventType() eventsapi.ClientEventType {
 const noProfileFlag = "no-profile"
 
 func (cmd ImportCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 1)
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"jwk_filename", "The JWK file. If omitted, import operates on stdin."})
 	ap.SupportsFlag(noProfileFlag, "", "If provided, no attempt will be made to contact doltremoteapi and update user.name and user.email.")
 	return ap
 }
 
 // Exec executes the command
-func (cmd ImportCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd ImportCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, importDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, importDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	credsDir, verr := actions.EnsureCredsDir(dEnv)
@@ -150,37 +150,38 @@ func updateProfileWithCredentials(ctx context.Context, dEnv *env.DoltEnv, c cred
 		panic("Should have global config here...")
 	}
 
-	if _, err := gcfg.GetString(env.UserNameKey); err == nil {
+	if _, err := gcfg.GetString(config.UserNameKey); err == nil {
 		// Already has a name...
 		return nil
 	}
-	if _, err := gcfg.GetString(env.UserEmailKey); err == nil {
+	if _, err := gcfg.GetString(config.UserEmailKey); err == nil {
 		// Already has an email...
 		return nil
 	}
 
-	host := dEnv.Config.GetStringOrDefault(env.RemotesApiHostKey, env.DefaultRemotesApiHost)
-	port := dEnv.Config.GetStringOrDefault(env.RemotesApiHostPortKey, env.DefaultRemotesApiPort)
+	host := dEnv.Config.GetStringOrDefault(config.RemotesApiHostKey, env.DefaultRemotesApiHost)
+	port := dEnv.Config.GetStringOrDefault(config.RemotesApiHostPortKey, env.DefaultRemotesApiPort)
 	hostAndPort := fmt.Sprintf("%s:%s", host, port)
-	endpoint, opts, err := dEnv.GetGRPCDialParams(grpcendpoint.Config{
+	cfg, err := dEnv.GetGRPCDialParams(grpcendpoint.Config{
 		Endpoint: hostAndPort,
-		Creds:    c,
+		Creds:    c.RPCCreds(host),
 	})
 	if err != nil {
 		return fmt.Errorf("error: unable to build dial options server with credentials: %w", err)
 	}
-	conn, err := grpc.Dial(endpoint, opts...)
+	conn, err := grpc.Dial(cfg.Endpoint, cfg.DialOptions...)
 	if err != nil {
 		return fmt.Errorf("error: unable to connect to server with credentials: %w", err)
 	}
+	defer conn.Close()
 	grpcClient := remotesapi.NewCredentialsServiceClient(conn)
 	resp, err := grpcClient.WhoAmI(ctx, &remotesapi.WhoAmIRequest{})
 	if err != nil {
 		return fmt.Errorf("error: unable to call WhoAmI endpoint: %w", err)
 	}
 	userUpdates := map[string]string{
-		env.UserNameKey:  resp.DisplayName,
-		env.UserEmailKey: resp.EmailAddress,
+		config.UserNameKey:  resp.DisplayName,
+		config.UserEmailKey: resp.EmailAddress,
 	}
 	return gcfg.SetStrings(userUpdates)
 }

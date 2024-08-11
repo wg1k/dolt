@@ -19,17 +19,18 @@ import (
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	sqltypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/json"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 type jsonType struct {
-	jsonType sql.JsonType
+	jsonType sqltypes.JsonType
 }
 
 var _ TypeInfo = (*jsonType)(nil)
-var JSONType = &jsonType{sql.JSON}
+var JSONType = &jsonType{sqltypes.JsonType{}}
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *jsonType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
@@ -66,12 +67,12 @@ func (ti *jsonType) ConvertValueToNomsValue(ctx context.Context, vrw types.Value
 		return types.NullValue, nil
 	}
 
-	jsDoc, err := ti.jsonType.Convert(v)
+	jsDoc, _, err := ti.jsonType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
 
-	jsVal, ok := jsDoc.(sql.JSONValue)
+	jsVal, ok := jsDoc.(sql.JSONWrapper)
 	if !ok {
 		return nil, fmt.Errorf(`"%v" cannot convert value "%v" of type "%T" as it is invalid`, ti.String(), v, v)
 	}
@@ -96,7 +97,7 @@ func (ti *jsonType) FormatValue(v types.Value) (*string, error) {
 	}
 	if noms, ok := v.(types.JSON); ok {
 		// TODO(andy) fix context
-		s, err := json.NomsJSON(noms).ToString(sql.NewEmptyContext())
+		s, err := json.NomsJSON(noms).JSONString()
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +138,7 @@ func (ti *jsonType) NomsKind() types.NomsKind {
 
 // Promote implements TypeInfo interface.
 func (ti *jsonType) Promote() TypeInfo {
-	return &jsonType{ti.jsonType.Promote().(sql.JsonType)}
+	return &jsonType{ti.jsonType.Promote().(sqltypes.JsonType)}
 }
 
 // String implements TypeInfo interface.
@@ -167,6 +168,10 @@ func jsonTypeConverter(ctx context.Context, src *jsonType, destTi TypeInfo) (tc 
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *intType:
@@ -174,6 +179,12 @@ func jsonTypeConverter(ctx context.Context, src *jsonType, destTi TypeInfo) (tc 
 	case *jsonType:
 		return wrapIsValid(dest.IsValid, src, dest)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

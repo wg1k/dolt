@@ -51,6 +51,12 @@ const (
 
 	// WorkspaceRefType is a reference to a workspace
 	WorkspaceRefType RefType = "workspaces"
+
+	// StashRefType is a reference to a stash list
+	StashRefType RefType = "stashes"
+
+	// StatsRefType is a reference to a statistics table
+	StatsRefType RefType = "statistics"
 )
 
 // HeadRefTypes are the ref types that point to a HEAD and contain a Commit struct. These are the types that are
@@ -64,6 +70,15 @@ var HeadRefTypes = map[RefType]struct{}{
 	WorkspaceRefType: {},
 }
 
+var StashRefTypes = map[RefType]struct{}{
+	StashRefType: {},
+}
+
+// StatsRefTypes point to a table address hash, not a commit hash.
+var StatsRefTypes = map[RefType]struct{}{
+	StatsRefType: {},
+}
+
 // PrefixForType returns what a reference string for a given type should start with
 func PrefixForType(refType RefType) string {
 	return refPrefix + string(refType) + "/"
@@ -71,10 +86,11 @@ func PrefixForType(refType RefType) string {
 
 type UpdateMode struct {
 	Force bool
+	Prune bool
 }
 
-var ForceUpdate = UpdateMode{true}
-var FastForwardOnly = UpdateMode{false}
+var ForceUpdate = UpdateMode{true, false}
+var FastForwardOnly = UpdateMode{false, false}
 
 // DoltRef is a reference to a commit.
 type DoltRef interface {
@@ -96,6 +112,17 @@ func Equals(dr, other DoltRef) bool {
 	}
 
 	return dr.GetType() == other.GetType() && dr.GetPath() == other.GetPath()
+}
+
+// EqualsCaseInsensitive returns true if two DoltRefs have the same Type and Path, comparing the path case-insensitive
+func EqualsCaseInsensitive(dr, other DoltRef) bool {
+	if dr == nil && other == nil {
+		return true
+	} else if dr == nil || other == nil {
+		return false
+	}
+
+	return dr.GetType() == other.GetType() && strings.ToLower(dr.GetPath()) == strings.ToLower(other.GetPath())
 }
 
 // EqualsStr compares a DoltRef to a reference string to see if they are referring to the same thing
@@ -159,6 +186,23 @@ func Parse(str string) (DoltRef, error) {
 				panic("unknown type " + rType)
 			}
 		}
+	}
+
+	for rType := range StashRefTypes {
+		prefix := PrefixForType(rType)
+		if strings.HasPrefix(str, prefix) {
+			str = str[len(prefix):]
+			switch rType {
+			case StashRefType:
+				return NewStashRef(), nil
+			default:
+				panic("unknown type " + rType)
+			}
+		}
+	}
+
+	if prefix := PrefixForType(StatsRefType); strings.HasPrefix(str, prefix) {
+		return NewStatsRef(str[len(prefix):]), nil
 	}
 
 	return nil, ErrUnknownRefType

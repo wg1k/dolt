@@ -15,15 +15,18 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"strings"
+
+	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	"github.com/dolthub/dolt/go/libraries/doltcore/diff"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
@@ -35,23 +38,28 @@ const (
 )
 
 var resetDocContent = cli.CommandDocumentationContent{
-	ShortDesc: "Resets staged tables to their HEAD state",
-	LongDesc: "Sets the state of a table in the staging area to be that table's value at HEAD\n\n" +
-		"{{.EmphasisLeft}}dolt reset <tables>...{{.EmphasisRight}}" +
+	ShortDesc: "Resets staged or working tables to HEAD or a specified commit",
+	LongDesc: "{{.EmphasisLeft}}dolt reset <tables>...{{.EmphasisRight}}" +
 		"\n\n" +
-		"This form resets the values for all staged {{.LessThan}}tables{{.GreaterThan}} to their values at {{.EmphasisLeft}}HEAD{{.EmphasisRight}}. " +
+		"The default form resets the values for all staged {{.LessThan}}tables{{.GreaterThan}} to their values at {{.EmphasisLeft}}HEAD{{.EmphasisRight}}. " +
 		"It does not affect the working tree or the current branch." +
 		"\n\n" +
 		"This means that {{.EmphasisLeft}}dolt reset <tables>{{.EmphasisRight}} is the opposite of {{.EmphasisLeft}}dolt add <tables>{{.EmphasisRight}}." +
 		"\n\n" +
 		"After running {{.EmphasisLeft}}dolt reset <tables>{{.EmphasisRight}} to update the staged tables, you can use {{.EmphasisLeft}}dolt checkout{{.EmphasisRight}} to check the contents out of the staged tables to the working tables." +
 		"\n\n" +
+		"{{.EmphasisLeft}}dolt reset [--hard | --soft] <revision>{{.EmphasisRight}}" +
+		"\n\n" +
+		"This form resets all tables to values in the specified revision (i.e. commit, tag, working set). " +
+		"The --soft option resets HEAD to a revision without changing the current working set. " +
+		" The --hard option resets all three HEADs to a revision, deleting all uncommitted changes in the current working set." +
+		"\n\n" +
 		"{{.EmphasisLeft}}dolt reset .{{.EmphasisRight}}" +
 		"\n\n" +
 		"This form resets {{.EmphasisLeft}}all{{.EmphasisRight}} staged tables to their values at HEAD. It is the opposite of {{.EmphasisLeft}}dolt add .{{.EmphasisRight}}",
 	Synopsis: []string{
 		"{{.LessThan}}tables{{.GreaterThan}}...",
-		"[--hard | --soft]",
+		"[--hard | --soft] {{.LessThan}}revision{{.GreaterThan}}",
 	},
 }
 
@@ -67,73 +75,113 @@ func (cmd ResetCmd) Description() string {
 	return "Remove table changes from the list of staged table changes."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd ResetCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd ResetCmd) Docs() *cli.CommandDocumentation {
 	ap := cli.CreateResetArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, resetDocContent, ap))
+	return cli.NewCommandDocumentation(resetDocContent, ap)
 }
 
 func (cmd ResetCmd) ArgParser() *argparser.ArgParser {
 	return cli.CreateResetArgParser()
 }
 
-// Exec executes the command
-func (cmd ResetCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
-	ap := cli.CreateResetArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, resetDocContent, ap))
-	apr := cli.ParseArgsOrDie(ap, args, help)
+func (cmd ResetCmd) RequiresRepo() bool {
+	return false
+}
 
-	if apr.ContainsArg(doltdb.DocTableName) {
-		return HandleDocTableVErrAndExitCode()
+// Exec executes the command
+func (cmd ResetCmd) Exec(ctx context.Context, commandStr string, args []string, _ *env.DoltEnv, cliCtx cli.CliContext) int {
+	ap := cli.CreateResetArgParser()
+	apr, usage, terminate, status := ParseArgsOrPrintHelp(ap, commandStr, args, resetDocContent)
+	if terminate {
+		return status
 	}
 
-	roots, err := dEnv.Roots(ctx)
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Println(err.Error())
+		return 1
+	}
+	if closeFunc != nil {
+		defer closeFunc()
 	}
 
 	if apr.ContainsAll(HardResetParam, SoftResetParam) {
 		verr := errhand.BuildDError("error: --%s and --%s are mutually exclusive options.", HardResetParam, SoftResetParam).Build()
-		HandleVErrAndExitCode(verr, usage)
-	} else if apr.Contains(HardResetParam) {
-		arg := ""
-		if apr.NArg() > 1 {
-			return handleResetError(fmt.Errorf("--hard supports at most one additional param"), usage)
-		} else if apr.NArg() == 1 {
-			arg = apr.Arg(0)
-		}
-
-		err = actions.ResetHard(ctx, dEnv, arg, roots)
-	} else {
-		// Check whether the input argument is a ref.
-		if apr.NArg() == 1 {
-			argToCheck := apr.Arg(0)
-
-			ok := actions.ValidateIsRef(ctx, argToCheck, dEnv.DoltDB, dEnv.RepoStateReader())
-
-			// This is a valid ref
-			if ok {
-				err = actions.ResetSoftToRef(ctx, dEnv.DbData(), apr.Arg(0))
-				return handleResetError(err, usage)
-			}
-		}
-
-		tables := apr.Args
-
-		roots, err = actions.ResetSoft(ctx, dEnv.DbData(), tables, roots)
-		if err != nil {
-			return handleResetError(err, usage)
-		}
-
-		err = dEnv.UpdateRoots(ctx, roots)
-		if err != nil {
-			return handleResetError(err, usage)
-		}
-
-		printNotStaged(ctx, dEnv, roots.Staged)
+		return HandleVErrAndExitCode(verr, usage)
+	} else if apr.Contains(HardResetParam) && apr.NArg() > 1 {
+		return handleResetError(fmt.Errorf("--hard supports at most one additional param"), usage)
+	} else if apr.Contains(SoftResetParam) && apr.NArg() > 1 {
+		return handleResetError(fmt.Errorf("--soft supports at most one additional param"), usage)
 	}
 
-	return handleResetError(err, usage)
+	// process query through prepared statement to prevent sql injection
+	query, err := constructInterpolatedDoltResetQuery(apr)
+	_, _, _, err = queryist.Query(sqlCtx, query)
+	if err != nil {
+		return handleResetError(err, usage)
+	}
+
+	printNotStaged(sqlCtx, queryist)
+
+	return 0
+}
+
+// constructInterpolatedDoltResetQuery generates the sql query necessary to call the DOLT_RESET() stored procedure.
+// Also interpolates this query to prevent sql injection.
+func constructInterpolatedDoltResetQuery(apr *argparser.ArgParseResults) (string, error) {
+	var params []interface{}
+	var param bool
+
+	var buffer bytes.Buffer
+	var first bool
+	first = true
+	buffer.WriteString("CALL DOLT_RESET(")
+
+	writeToBuffer := func(s string) {
+		if !first {
+			buffer.WriteString(", ")
+		}
+		if !param {
+			buffer.WriteString("'")
+		}
+		buffer.WriteString(s)
+		if !param {
+			buffer.WriteString("'")
+		}
+		first = false
+		param = false
+	}
+
+	if apr.Contains(HardResetParam) {
+		writeToBuffer("--hard")
+		if apr.NArg() == 1 {
+			param = true
+			writeToBuffer("?")
+			params = append(params, apr.Arg(0))
+		}
+	} else if apr.Contains(SoftResetParam) {
+		writeToBuffer("--soft")
+		if apr.NArg() == 1 {
+			param = true
+			writeToBuffer("?")
+			params = append(params, apr.Arg(0))
+		}
+	} else {
+		for _, input := range apr.Args {
+			param = true
+			writeToBuffer("?")
+			params = append(params, input)
+		}
+	}
+
+	buffer.WriteString(")")
+
+	interpolatedQuery, err := dbr.InterpolateForDialect(buffer.String(), params, dialect.MySQL)
+	if err != nil {
+		return "", err
+	}
+
+	return interpolatedQuery, nil
 }
 
 var tblDiffTypeToShortLabel = map[diff.TableDiffType]string{
@@ -142,62 +190,58 @@ var tblDiffTypeToShortLabel = map[diff.TableDiffType]string{
 	diff.AddedTable:    "N",
 }
 
-var docDiffTypeToShortLabel = map[diff.DocDiffType]string{
-	diff.ModifiedDoc: "M",
-	diff.RemovedDoc:  "D",
-	diff.AddedDoc:    "N",
+type StatRow struct {
+	tableName string
+	status    string
 }
 
-func printNotStaged(ctx context.Context, dEnv *env.DoltEnv, staged *doltdb.RootValue) {
+func buildStatRows(rows []sql.Row) []StatRow {
+	statRows := make([]StatRow, 0, len(rows))
+	for _, row := range rows {
+		statRows = append(statRows, StatRow{row[0].(string), row[1].(string)})
+	}
+	return statRows
+}
+
+func printNotStaged(sqlCtx *sql.Context, queryist cli.Queryist) {
 	// Printing here is best effort.  Fail silently
-	working, err := dEnv.WorkingRoot(ctx)
-
+	_, rowIter, _, err := queryist.Query(sqlCtx, "select table_name,status from dolt_status where staged = false")
 	if err != nil {
 		return
 	}
-
-	notStagedTbls, err := diff.GetTableDeltas(ctx, staged, working)
+	rows, err := sql.RowIterToRows(sqlCtx, rowIter)
 	if err != nil {
 		return
 	}
-
-	notStagedDocs, err := diff.NewDocDiffs(ctx, working, nil, nil)
-	if err != nil {
+	if rows == nil {
 		return
 	}
+	tranRow := buildStatRows(rows)
 
 	removeModified := 0
-	for _, td := range notStagedTbls {
-		if !td.IsAdd() {
+	for _, row := range tranRow {
+		if row.status != "new table" {
 			removeModified++
 		}
 	}
 
-	if removeModified+notStagedDocs.NumRemoved+notStagedDocs.NumModified > 0 {
+	if removeModified > 0 {
 		cli.Println("Unstaged changes after reset:")
 
 		var lines []string
-		for _, td := range notStagedTbls {
-			if td.IsAdd() {
+		for _, row := range tranRow {
+			if row.status == "new table" {
 				//  per Git, unstaged new tables are untracked
 				continue
-			} else if td.IsDrop() {
-				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.RemovedTable], td.CurName()))
-			} else if td.IsRename() {
+			} else if row.status == "deleted" {
+				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.RemovedTable], row.tableName))
+			} else if row.status == "renamed" {
 				// per Git, unstaged renames are shown as drop + add
-				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.RemovedTable], td.FromName))
+				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.RemovedTable], row.tableName))
 			} else {
-				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.ModifiedTable], td.CurName()))
+				lines = append(lines, fmt.Sprintf("%s\t%s", tblDiffTypeToShortLabel[diff.ModifiedTable], row.tableName))
 			}
 		}
-
-		for _, docName := range notStagedDocs.Docs {
-			ddt := notStagedDocs.DocToType[docName]
-			if ddt != diff.AddedDoc {
-				lines = append(lines, fmt.Sprintf("%s\t%s", docDiffTypeToShortLabel[ddt], docName))
-			}
-		}
-
 		cli.Println(strings.Join(lines, "\n"))
 	}
 }
@@ -225,26 +269,4 @@ func handleResetError(err error, usage cli.UsagePrinter) int {
 	}
 
 	return HandleVErrAndExitCode(verr, usage)
-}
-
-func getAllRoots(ctx context.Context, dEnv *env.DoltEnv) (*doltdb.RootValue, *doltdb.RootValue, *doltdb.RootValue, errhand.VerboseError) {
-	workingRoot, err := dEnv.WorkingRoot(ctx)
-
-	if err != nil {
-		return nil, nil, nil, errhand.BuildDError("Unable to get staged.").AddCause(err).Build()
-	}
-
-	stagedRoot, err := dEnv.StagedRoot(ctx)
-
-	if err != nil {
-		return nil, nil, nil, errhand.BuildDError("Unable to get staged.").AddCause(err).Build()
-	}
-
-	headRoot, err := dEnv.HeadRoot(ctx)
-
-	if err != nil {
-		return nil, nil, nil, errhand.BuildDError("Unable to get at HEAD.").AddCause(err).Build()
-	}
-
-	return workingRoot, stagedRoot, headRoot, nil
 }

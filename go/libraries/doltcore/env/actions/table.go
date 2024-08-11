@@ -17,17 +17,16 @@ package actions
 import (
 	"context"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/diff"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/utils/set"
 )
 
 // MoveTablesBetweenRoots copies tables with names in tbls from the src RootValue to the dest RootValue.
 // It matches tables between roots by column tags.
-func MoveTablesBetweenRoots(ctx context.Context, tbls []string, src, dest *doltdb.RootValue) (*doltdb.RootValue, error) {
-	tblSet := set.NewStrSet(tbls)
+func MoveTablesBetweenRoots(ctx context.Context, tbls []doltdb.TableName, src, dest doltdb.RootValue) (doltdb.RootValue, error) {
+	tblSet := doltdb.NewTableNameSet(tbls)
 
 	stagedFKs, err := dest.GetForeignKeyCollection(ctx)
 	if err != nil {
@@ -39,7 +38,37 @@ func MoveTablesBetweenRoots(ctx context.Context, tbls []string, src, dest *doltd
 		return nil, err
 	}
 
-	tblsToDrop := set.NewStrSet(nil)
+	// We want to include all Full-Text tables for every move
+	for _, td := range tblDeltas {
+		var ftIndexes []schema.Index
+		if tblSet.Contains(td.ToName) && td.ToSch.Indexes().ContainsFullTextIndex() {
+			for _, idx := range td.ToSch.Indexes().AllIndexes() {
+				if !idx.IsFullText() {
+					continue
+				}
+				ftIndexes = append(ftIndexes, idx)
+			}
+		} else if tblSet.Contains(td.FromName) && td.FromSch.Indexes().ContainsFullTextIndex() {
+			for _, idx := range td.FromSch.Indexes().AllIndexes() {
+				if !idx.IsFullText() {
+					continue
+				}
+				ftIndexes = append(ftIndexes, idx)
+			}
+		}
+		for _, ftIndex := range ftIndexes {
+			props := ftIndex.FullTextProperties()
+			tblSet.Add(
+				doltdb.TableName{Name: props.ConfigTable},
+				doltdb.TableName{Name: props.PositionTable},
+				doltdb.TableName{Name: props.DocCountTable},
+				doltdb.TableName{Name: props.GlobalCountTable},
+				doltdb.TableName{Name: props.RowCountTable},
+			)
+		}
+	}
+
+	tblsToDrop := doltdb.NewTableNameSet(nil)
 
 	for _, td := range tblDeltas {
 		if td.IsDrop() {
@@ -76,16 +105,6 @@ func MoveTablesBetweenRoots(ctx context.Context, tbls []string, src, dest *doltd
 			if err != nil {
 				return nil, err
 			}
-
-			ss, _, err := src.GetSuperSchema(ctx, td.ToName)
-			if err != nil {
-				return nil, err
-			}
-
-			dest, err = dest.PutSuperSchema(ctx, td.ToName, ss)
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -95,7 +114,7 @@ func MoveTablesBetweenRoots(ctx context.Context, tbls []string, src, dest *doltd
 	}
 
 	// RemoveTables also removes that table's ForeignKeys
-	dest, err = dest.RemoveTables(ctx, false, tblsToDrop.AsSlice()...)
+	dest, err = dest.RemoveTables(ctx, false, false, tblsToDrop.AsSlice()...)
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +122,8 @@ func MoveTablesBetweenRoots(ctx context.Context, tbls []string, src, dest *doltd
 	return dest, nil
 }
 
-func validateTablesExist(ctx context.Context, currRoot *doltdb.RootValue, unknown []string) error {
-	notExist := []string{}
+func validateTablesExist(ctx context.Context, currRoot doltdb.RootValue, unknown []doltdb.TableName) error {
+	var notExist []doltdb.TableName
 	for _, tbl := range unknown {
 		if has, err := currRoot.HasTable(ctx, tbl); err != nil {
 			return err
@@ -114,7 +133,7 @@ func validateTablesExist(ctx context.Context, currRoot *doltdb.RootValue, unknow
 	}
 
 	if len(notExist) > 0 {
-		return NewTblNotExistError(notExist)
+		return NewTblNotExistError(summarizeTableNames(notExist))
 	}
 
 	return nil
@@ -129,23 +148,4 @@ func RemoveDocsTable(tbls []string) []string {
 		}
 	}
 	return result
-}
-
-// GetRemoteBranchRef returns the ref of a branch and ensures it matched with name. It will also return boolean value
-// representing whether there is not match or not and an error if there is one.
-func GetRemoteBranchRef(ctx context.Context, ddb *doltdb.DoltDB, name string) (ref.DoltRef, bool, error) {
-	remoteRefFilter := map[ref.RefType]struct{}{ref.RemoteRefType: {}}
-	refs, err := ddb.GetRefsOfType(ctx, remoteRefFilter)
-
-	if err != nil {
-		return nil, false, err
-	}
-
-	for _, rf := range refs {
-		if remRef, ok := rf.(ref.RemoteRef); ok && remRef.GetBranch() == name {
-			return rf, true, nil
-		}
-	}
-
-	return nil, false, nil
 }

@@ -22,6 +22,7 @@ import (
 	"unicode"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/sqltypes"
 
 	"github.com/dolthub/dolt/go/store/types"
@@ -48,16 +49,21 @@ type varStringType struct {
 var _ TypeInfo = (*varStringType)(nil)
 
 var (
-	LegacyStringDefaultType = &varStringType{sql.CreateLongText(sql.Collation_Default)}
-	StringDefaultType       = &varStringType{sql.MustCreateStringWithDefaults(sqltypes.VarChar, 16383)}
+	MaxVarcharLength = int64(16383)
+	// StringDefaultType is sized to 1k, which allows up to 16 fields per row
+	StringDefaultType = &varStringType{gmstypes.MustCreateStringWithDefaults(sqltypes.VarChar, MaxVarcharLength/16)}
 )
+
+func CreateVarStringTypeFromSqlType(stringType sql.StringType) TypeInfo {
+	return &varStringType{stringType}
+}
 
 func CreateVarStringTypeFromParams(params map[string]string) (TypeInfo, error) {
 	var length int64
-	var collation sql.Collation
+	var collation sql.CollationID
 	var err error
 	if collationStr, ok := params[varStringTypeParam_Collate]; ok {
-		collation, err = sql.ParseCollation(nil, &collationStr, false)
+		collation, err = sql.ParseCollation("", collationStr, false)
 		if err != nil {
 			return nil, err
 		}
@@ -77,11 +83,11 @@ func CreateVarStringTypeFromParams(params map[string]string) (TypeInfo, error) {
 		var sqlType sql.StringType
 		switch sqlStr {
 		case varStringTypeParam_SQL_Char:
-			sqlType, err = sql.CreateString(sqltypes.Char, length, collation)
+			sqlType, err = gmstypes.CreateString(sqltypes.Char, length, collation)
 		case varStringTypeParam_SQL_VarChar:
-			sqlType, err = sql.CreateString(sqltypes.VarChar, length, collation)
+			sqlType, err = gmstypes.CreateString(sqltypes.VarChar, length, collation)
 		case varStringTypeParam_SQL_Text:
-			sqlType, err = sql.CreateString(sqltypes.Text, length, collation)
+			sqlType, err = gmstypes.CreateString(sqltypes.Text, length, collation)
 		default:
 			return nil, fmt.Errorf(`create varstring type info has "%v" param with value "%v"`, varStringTypeParam_SQL, sqlStr)
 		}
@@ -138,7 +144,7 @@ func (ti *varStringType) ConvertValueToNomsValue(ctx context.Context, vrw types.
 	if v == nil {
 		return types.NullValue, nil
 	}
-	strVal, err := ti.sqlStringType.Convert(v)
+	strVal, _, err := ti.sqlStringType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +213,7 @@ func (ti *varStringType) GetTypeParams() map[string]string {
 // IsValid implements TypeInfo interface.
 func (ti *varStringType) IsValid(v types.Value) bool {
 	if val, ok := v.(types.String); ok {
-		_, err := ti.sqlStringType.Convert(string(val))
+		_, _, err := ti.sqlStringType.Convert(string(val))
 		if err != nil {
 			return false
 		}
@@ -291,6 +297,10 @@ func varStringTypeConverter(ctx context.Context, src *varStringType, destTi Type
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geometryType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *intType:
@@ -298,6 +308,12 @@ func varStringTypeConverter(ctx context.Context, src *varStringType, destTi Type
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

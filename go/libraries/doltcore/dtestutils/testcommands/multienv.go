@@ -20,28 +20,30 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
+	cmd "github.com/dolthub/dolt/go/cmd/dolt/commands"
+	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dprocedures"
+	"github.com/dolthub/dolt/go/libraries/utils/config"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb/durable"
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/editor"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
+	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
 const (
-	repoPrefix   = "repo_*"
-	remotePrefix = "remote_*"
-	homePrefix   = "home"
+	homePrefix = "home"
 )
 
 type MultiRepoTestSetup struct {
-	MrEnv   env.MultiRepoEnv
+	envs    map[string]*env.DoltEnv
 	Remote  string
 	DoltDBs map[string]*doltdb.DoltDB
 	DbNames []string
@@ -58,7 +60,6 @@ const (
 	defaultBranch = "main"
 )
 
-// TODO this is not a proper builder, dbs need to be added before remotes
 func NewMultiRepoTestSetup(errhand func(args ...interface{})) *MultiRepoTestSetup {
 	dir, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -71,7 +72,7 @@ func NewMultiRepoTestSetup(errhand func(args ...interface{})) *MultiRepoTestSetu
 	}
 
 	return &MultiRepoTestSetup{
-		MrEnv:   env.MultiRepoEnv{},
+		envs:    make(map[string]*env.DoltEnv),
 		Remotes: make(map[string]env.Remote),
 		DoltDBs: make(map[string]*doltdb.DoltDB, 0),
 		DbNames: make([]string, 0),
@@ -82,8 +83,21 @@ func NewMultiRepoTestSetup(errhand func(args ...interface{})) *MultiRepoTestSetu
 	}
 }
 
+func (mr *MultiRepoTestSetup) GetEnv(dbName string) *env.DoltEnv {
+	return mr.envs[dbName]
+}
+
 func (mr *MultiRepoTestSetup) homeProv() (string, error) {
 	return mr.Home, nil
+}
+
+func (mr *MultiRepoTestSetup) Close() {
+	for _, db := range mr.DoltDBs {
+		err := db.Close()
+		if err != nil {
+			mr.Errhand(err)
+		}
+	}
 }
 
 func (mr *MultiRepoTestSetup) Cleanup(dbName string) {
@@ -108,8 +122,8 @@ func (mr *MultiRepoTestSetup) NewDB(dbName string) {
 	}
 	cfg, _ := dEnv.Config.GetConfig(env.GlobalConfig)
 	cfg.SetStrings(map[string]string{
-		env.UserNameKey:  name,
-		env.UserEmailKey: email,
+		config.UserNameKey:  name,
+		config.UserEmailKey: email,
 	})
 	err = dEnv.InitRepo(context.Background(), types.Format_Default, name, email, defaultBranch)
 	if err != nil {
@@ -123,7 +137,7 @@ func (mr *MultiRepoTestSetup) NewDB(dbName string) {
 
 	dEnv = env.Load(context.Background(), mr.homeProv, filesys.LocalFS, doltdb.LocalDirDoltDB, "test")
 
-	mr.MrEnv.AddEnv(dbName, dEnv)
+	mr.envs[dbName] = dEnv
 	mr.DoltDBs[dbName] = ddb
 	mr.DbNames = append(mr.DbNames, dbName)
 	mr.DbPaths[dbName] = repo
@@ -134,29 +148,33 @@ func (mr *MultiRepoTestSetup) NewRemote(remoteName string) {
 	os.Mkdir(remote, os.ModePerm)
 	remotePath := fmt.Sprintf("file:///%s", remote)
 
-	dEnv := mr.MrEnv.GetEnv(mr.DbNames[0])
-	rem := env.NewRemote(remoteName, remotePath, nil, dEnv)
+	rem := env.NewRemote(remoteName, remotePath, nil)
 
-	mr.MrEnv.Iter(func(name string, dEnv *env.DoltEnv) (stop bool, err error) {
+	for _, dEnv := range mr.envs {
 		dEnv.RepoState.AddRemote(rem)
 		dEnv.RepoState.Save(filesys.LocalFS)
-		return false, nil
-	})
+	}
 
 	mr.Remotes[remoteName] = rem
 }
 
 func (mr *MultiRepoTestSetup) NewBranch(dbName, branchName string) {
-	dEnv := mr.MrEnv.GetEnv(dbName)
-	err := actions.CreateBranchWithStartPt(context.Background(), dEnv.DbData(), branchName, "head", false)
+	dEnv := mr.envs[dbName]
+	err := actions.CreateBranchWithStartPt(context.Background(), dEnv.DbData(), branchName, "head", false, nil)
 	if err != nil {
 		mr.Errhand(err)
 	}
 }
 
 func (mr *MultiRepoTestSetup) CheckoutBranch(dbName, branchName string) {
-	dEnv := mr.MrEnv.GetEnv(dbName)
-	err := actions.CheckoutBranch(context.Background(), dEnv, branchName, false)
+	dEnv := mr.envs[dbName]
+	cliCtx, _ := cmd.NewArgFreeCliContext(context.Background(), dEnv)
+	_, sqlCtx, closeFunc, err := cliCtx.QueryEngine(context.Background())
+	if err != nil {
+		mr.Errhand(err)
+	}
+	defer closeFunc()
+	err = dprocedures.MoveWorkingSetToBranch(sqlCtx, branchName, false, false)
 	if err != nil {
 		mr.Errhand(err)
 	}
@@ -167,7 +185,10 @@ func (mr *MultiRepoTestSetup) CloneDB(fromRemote, dbName string) {
 	cloneDir := filepath.Join(mr.Root, dbName)
 
 	r := mr.GetRemote(fromRemote)
-	srcDB, err := r.GetRemoteDB(ctx, types.Format_Default)
+	srcDB, err := r.GetRemoteDB(ctx, types.Format_Default, mr.envs[dbName])
+	if err != nil {
+		mr.Errhand(err)
+	}
 
 	dEnv := env.Load(context.Background(), mr.homeProv, filesys.LocalFS, doltdb.LocalDirDoltDB, "test")
 	dEnv, err = actions.EnvForClone(ctx, srcDB.Format(), r, cloneDir, dEnv.FS, dEnv.Version, mr.homeProv)
@@ -175,7 +196,7 @@ func (mr *MultiRepoTestSetup) CloneDB(fromRemote, dbName string) {
 		mr.Errhand(err)
 	}
 
-	err = actions.CloneRemote(ctx, srcDB, r.Name, "", dEnv)
+	err = actions.CloneRemote(ctx, srcDB, r.Name, "", false, -1, dEnv)
 	if err != nil {
 		mr.Errhand(err)
 	}
@@ -184,16 +205,15 @@ func (mr *MultiRepoTestSetup) CloneDB(fromRemote, dbName string) {
 	if err != nil {
 		mr.Errhand(err)
 	}
-	os.Chdir(cloneDir)
-	defer os.Chdir(wd)
-	ddb, err := doltdb.LoadDoltDB(ctx, types.Format_Default, doltdb.LocalDirDoltDB, filesys.LocalFS)
+	err = os.Chdir(cloneDir)
 	if err != nil {
-		mr.Errhand("Failed to initialize environment:" + err.Error())
+		mr.Errhand(err)
 	}
+	defer os.Chdir(wd)
 
-	dEnv = env.Load(context.Background(), mr.homeProv, filesys.LocalFS, doltdb.LocalDirDoltDB, "test")
+	ddb := dEnv.DoltDB
 
-	mr.MrEnv.AddEnv(dbName, dEnv)
+	mr.envs[dbName] = dEnv
 	mr.DoltDBs[dbName] = ddb
 	mr.DbNames = append(mr.DbNames, dbName)
 	mr.DbPaths[dbName] = cloneDir
@@ -217,7 +237,7 @@ func (mr *MultiRepoTestSetup) GetDB(dbName string) *doltdb.DoltDB {
 
 func (mr *MultiRepoTestSetup) CommitWithWorkingSet(dbName string) *doltdb.Commit {
 	ctx := context.Background()
-	dEnv := mr.MrEnv.GetEnv(dbName)
+	dEnv := mr.envs[dbName]
 	ws, err := dEnv.WorkingSet(ctx)
 	if err != nil {
 		panic("couldn't get working set: " + err.Error())
@@ -233,10 +253,12 @@ func (mr *MultiRepoTestSetup) CommitWithWorkingSet(dbName string) *doltdb.Commit
 		mergeParentCommits = []*doltdb.Commit{ws.MergeState().Commit()}
 	}
 
-	t := doltdb.CommitNowFunc()
+	t := datas.CommitterDate()
 	roots, err := dEnv.Roots(ctx)
-
-	pendingCommit, err := actions.GetCommitStaged(ctx, roots, ws.MergeActive(), mergeParentCommits, dEnv.DbData(), actions.CommitStagedProps{
+	if err != nil {
+		panic("couldn't get roots: " + err.Error())
+	}
+	pendingCommit, err := actions.GetCommitStaged(ctx, roots, ws, mergeParentCommits, dEnv.DbData().Ddb, actions.CommitStagedProps{
 		Message:    "auto commit",
 		Date:       t,
 		AllowEmpty: true,
@@ -248,14 +270,20 @@ func (mr *MultiRepoTestSetup) CommitWithWorkingSet(dbName string) *doltdb.Commit
 		panic("pending commit error: " + err.Error())
 	}
 
+	headRef, err := dEnv.RepoStateReader().CWBHeadRef()
+	if err != nil {
+		panic("couldn't get working set: " + err.Error())
+	}
+
 	commit, err := dEnv.DoltDB.CommitWithWorkingSet(
 		ctx,
-		dEnv.RepoStateReader().CWBHeadRef(),
+		headRef,
 		ws.Ref(),
 		pendingCommit,
 		ws.WithStagedRoot(pendingCommit.Roots.Staged).WithWorkingRoot(pendingCommit.Roots.Working).ClearMerge(),
 		prevHash,
 		doltdb.TodoWorkingSetMeta(),
+		nil,
 	)
 	if err != nil {
 		panic("couldn't commit: " + err.Error())
@@ -263,10 +291,28 @@ func (mr *MultiRepoTestSetup) CommitWithWorkingSet(dbName string) *doltdb.Commit
 	return commit
 }
 
-func (mr *MultiRepoTestSetup) CreateTable(dbName, tblName string) {
-	dEnv := mr.MrEnv.GetEnv(dbName)
+func createTestDataTable(ctx context.Context, ddb *doltdb.DoltDB) (*table.InMemTable, schema.Schema) {
+	rows, sch, err := dtestutils.RowsAndSchema()
+	if err != nil {
+		panic(err)
+	}
 
-	imt, sch := dtestutils.CreateTestDataTable(true)
+	imt := table.NewInMemTable(sch)
+
+	for _, r := range rows {
+		err := imt.AppendRow(ctx, ddb.ValueReadWriter(), r)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return imt, sch
+}
+
+func (mr *MultiRepoTestSetup) CreateTable(ctx context.Context, dbName, tblName string) {
+	dEnv := mr.envs[dbName]
+
+	imt, sch := createTestDataTable(ctx, dEnv.DoltDB)
 	rows := make([]row.Row, imt.NumRows())
 	for i := 0; i < imt.NumRows(); i++ {
 		r, err := imt.GetRow(i)
@@ -275,11 +321,13 @@ func (mr *MultiRepoTestSetup) CreateTable(dbName, tblName string) {
 		}
 		rows[i] = r
 	}
-	createTestTable(dEnv, tblName, sch, mr.Errhand, rows...)
+	if err := createTestTable(dEnv, tblName, sch); err != nil {
+		mr.Errhand(err)
+	}
 }
 
 func (mr *MultiRepoTestSetup) StageAll(dbName string) {
-	dEnv := mr.MrEnv.GetEnv(dbName)
+	dEnv := mr.envs[dbName]
 
 	ctx := context.Background()
 	roots, err := dEnv.Roots(ctx)
@@ -287,7 +335,10 @@ func (mr *MultiRepoTestSetup) StageAll(dbName string) {
 		mr.Errhand(fmt.Sprintf("Failed to get roots: %s", dbName))
 	}
 
-	roots, err = actions.StageAllTables(ctx, roots, dEnv.Docs)
+	roots, err = actions.StageAllTables(ctx, roots, true)
+	if err != nil {
+		mr.Errhand(fmt.Sprintf("Failed to stage tables: %s", dbName))
+	}
 	err = dEnv.UpdateRoots(ctx, roots)
 	if err != nil {
 		mr.Errhand(fmt.Sprintf("Failed to update roots: %s", dbName))
@@ -296,83 +347,70 @@ func (mr *MultiRepoTestSetup) StageAll(dbName string) {
 
 func (mr *MultiRepoTestSetup) PushToRemote(dbName, remoteName, branchName string) {
 	ctx := context.Background()
-	dEnv := mr.MrEnv.GetEnv(dbName)
+	dEnv := mr.envs[dbName]
 
 	ap := cli.CreatePushArgParser()
 	apr, err := ap.Parse([]string{remoteName, branchName})
 	if err != nil {
 		mr.Errhand(fmt.Sprintf("Failed to push remote: %s", err.Error()))
 	}
-	opts, err := env.NewPushOpts(ctx, apr, dEnv.RepoStateReader(), dEnv.DoltDB, false, false)
+	targets, remote, err := env.NewPushOpts(ctx, apr, dEnv.RepoStateReader(), dEnv.DoltDB, false, false, false, false)
 	if err != nil {
 		mr.Errhand(fmt.Sprintf("Failed to push remote: %s", err.Error()))
 	}
-	err = actions.DoPush(ctx, dEnv.RepoStateReader(), dEnv.RepoStateWriter(), dEnv.DoltDB, dEnv.TempTableFilesDir(), opts, actions.NoopRunProgFuncs, actions.NoopStopProgFuncs)
+
+	remoteDB, err := remote.GetRemoteDB(ctx, dEnv.DoltDB.ValueReadWriter().Format(), mr.envs[dbName])
+	if err != nil {
+		mr.Errhand(actions.HandleInitRemoteStorageClientErr(remote.Name, remote.Url, err))
+	}
+
+	tmpDir, err := dEnv.TempTableFilesDir()
+	if err != nil {
+		mr.Errhand(fmt.Sprintf("Failed to access .dolt directory: %s", err.Error()))
+	}
+
+	pushOptions := &env.PushOptions{
+		Targets: targets,
+		Remote:  remote,
+		Rsr:     dEnv.RepoStateReader(),
+		Rsw:     dEnv.RepoStateWriter(),
+		SrcDb:   dEnv.DoltDB,
+		DestDb:  remoteDB,
+		TmpDir:  tmpDir,
+	}
+	_, err = actions.DoPush(ctx, pushOptions, actions.NoopRunProgFuncs, actions.NoopStopProgFuncs)
 	if err != nil {
 		mr.Errhand(fmt.Sprintf("Failed to push remote: %s", err.Error()))
 	}
 }
 
 // createTestTable creates a new test table with the name, schema, and rows given.
-func createTestTable(dEnv *env.DoltEnv, tableName string, sch schema.Schema, errhand func(args ...interface{}), rs ...row.Row) {
+func createTestTable(dEnv *env.DoltEnv, tableName string, sch schema.Schema) error {
 	ctx := context.Background()
 	vrw := dEnv.DoltDB.ValueReadWriter()
+	ns := dEnv.DoltDB.NodeStore()
 
-	rowMap, err := types.NewMap(ctx, vrw)
-	if err != nil {
-		errhand(err)
-	}
-
-	me := rowMap.Edit()
-	for _, r := range rs {
-		k, v := r.NomsMapKey(sch), r.NomsMapValue(sch)
-		me.Set(k, v)
-	}
-	rowMap, err = me.Map(ctx)
-	if err != nil {
-		errhand(err)
-	}
-
-	tbl, err := doltdb.NewNomsTable(ctx, vrw, sch, rowMap, nil, nil)
-	if err != nil {
-		errhand(err)
-	}
-	tbl, err = editor.RebuildAllIndexes(ctx, tbl, editor.TestEditorOptions(vrw))
-	if err != nil {
-		errhand(err)
-	}
-
-	sch, err = tbl.GetSchema(ctx)
-	if err != nil {
-		errhand(err)
-	}
-	rows, err := tbl.GetNomsRowData(ctx)
-	if err != nil {
-		errhand(err)
-	}
-	indexes, err := tbl.GetIndexSet(ctx)
-	if err != nil {
-		errhand(err)
-	}
-	err = putTableToWorking(ctx, dEnv, sch, rows, indexes, tableName, nil)
-	if err != nil {
-		errhand(err)
-	}
-}
-
-func putTableToWorking(ctx context.Context, dEnv *env.DoltEnv, sch schema.Schema, rows types.Map, indexData durable.IndexSet, tableName string, autoVal types.Value) error {
-	root, err := dEnv.WorkingRoot(ctx)
-	if err != nil {
-		return doltdb.ErrNomsIO
-	}
-
-	vrw := dEnv.DoltDB.ValueReadWriter()
-	tbl, err := doltdb.NewNomsTable(ctx, vrw, sch, rows, indexData, autoVal)
+	idx, err := durable.NewEmptyIndex(ctx, vrw, ns, sch)
 	if err != nil {
 		return err
 	}
 
-	newRoot, err := root.PutTable(ctx, tableName, tbl)
+	tbl, err := doltdb.NewTable(ctx, vrw, ns, sch, idx, nil, nil)
+	if err != nil {
+		return err
+	}
+
+	sch, err = tbl.GetSchema(ctx)
+	if err != nil {
+		return err
+	}
+
+	root, err := dEnv.WorkingRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", doltdb.ErrNomsIO, err)
+	}
+
+	newRoot, err := root.PutTable(ctx, doltdb.TableName{Name: tableName}, tbl)
 	if err != nil {
 		return err
 	}
@@ -389,6 +427,5 @@ func putTableToWorking(ctx context.Context, dEnv *env.DoltEnv, sch schema.Schema
 	if rootHash == newRootHash {
 		return nil
 	}
-
 	return dEnv.UpdateWorkingRoot(ctx, newRoot)
 }

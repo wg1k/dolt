@@ -3,6 +3,7 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
+
     dolt sql <<SQL
 CREATE TABLE onepk (
   pk1 BIGINT PRIMARY KEY,
@@ -17,11 +18,31 @@ CREATE TABLE twopk (
   PRIMARY KEY(pk1, pk2)
 );
 SQL
+    dolt add .
 }
 
 teardown() {
     assert_feature_version
     teardown_common
+}
+
+@test "index: rebuild smoke test" {
+    dolt sql -q "CREATE TABLE t (pk int PRIMARY KEY, col1 int UNIQUE);"
+    dolt sql -q "INSERT INTO t VALUES (1, 100);"
+    run dolt index cat t col1 -r csv
+    [ "$status" -eq "0" ]
+    [[ "${lines[0]}" =~ "col1,pk" ]] || false
+    [[ "${lines[1]}" =~ "100,1" ]] || false
+    [[ "${#lines[@]}" == "2" ]] || false
+
+    run dolt index rebuild t col1
+    [ "$status" -eq "0" ]
+
+    run dolt index cat t col1 -r csv
+    [ "$status" -eq "0" ]
+    [[ "${lines[0]}" =~ "col1,pk" ]] || false
+    [[ "${lines[1]}" =~ "100,1" ]] || false
+    [[ "${#lines[@]}" == "2" ]] || false
 }
 
 @test "index: Permissive index names" {
@@ -117,11 +138,11 @@ SQL
     run dolt index ls test
     [ "$status" -eq "0" ]
     [[ "$output" =~ "v1(v1)" ]] || false
-    [[ "$output" =~ "v1v2(v1, v2)" ]] || false
+    [[ "$output" =~ "v1_2(v1, v2)" ]] || false
     run dolt schema show test
     [ "$status" -eq "0" ]
     [[ "$output" =~ 'KEY `v1` (`v1`)' ]] || false
-    [[ "$output" =~ 'KEY `v1v2` (`v1`,`v2`)' ]] || false
+    [[ "$output" =~ 'KEY `v1_2` (`v1`,`v2`)' ]] || false
 }
 
 @test "index: CREATE INDEX then INSERT" {
@@ -1653,38 +1674,6 @@ SQL
     [[ "${#lines[@]}" = "1" ]] || false
 }
 
-@test "index: EXPLAIN SELECT = IndexedJoin" {
-    dolt sql <<SQL
-CREATE INDEX idx_v1 ON onepk(v1);
-CREATE INDEX idx_v ON twopk(v2, v1);
-INSERT INTO onepk VALUES (1, 11, 111), (2, 22, 222), (3, 33, 333), (4, 44, 444), (5, 55, 555);
-INSERT INTO twopk VALUES (5, 95, 222, 11), (4, 4, 333, 55), (3, 93, 444, 33), (2, 92, 111, 22), (1, 91, 555, 44);
-SQL
-    run dolt sql -q "SELECT * FROM onepk JOIN twopk ON onepk.v1 = twopk.v2;" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "pk1,v1,v2,pk1,pk2,v1,v2" ]] || false
-    [[ "$output" =~ "1,11,111,5,95,222,11" ]] || false
-    [[ "$output" =~ "2,22,222,2,92,111,22" ]] || false
-    [[ "$output" =~ "3,33,333,3,93,444,33" ]] || false
-    [[ "$output" =~ "4,44,444,1,91,555,44" ]] || false
-    [[ "$output" =~ "5,55,555,4,4,333,55" ]] || false
-    [[ "${#lines[@]}" = "6" ]] || false
-    run dolt sql -q "EXPLAIN SELECT * FROM onepk JOIN twopk ON onepk.v1 = twopk.v2;"
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "IndexedJoin(onepk.v1 = twopk.v2)" ]] || false
-    run dolt sql -q "SELECT * FROM onepk JOIN twopk ON onepk.pk1 = twopk.pk1;" -r=csv
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "1,11,111,1,91,555,44" ]] || false
-    [[ "$output" =~ "2,22,222,2,92,111,22" ]] || false
-    [[ "$output" =~ "3,33,333,3,93,444,33" ]] || false
-    [[ "$output" =~ "4,44,444,4,4,333,55" ]] || false
-    [[ "$output" =~ "5,55,555,5,95,222,11" ]] || false
-    [[ "${#lines[@]}" = "6" ]] || false
-    run dolt sql -q "EXPLAIN SELECT * FROM onepk JOIN twopk ON onepk.pk1 = twopk.pk1;"
-    [ "$status" -eq "0" ]
-    [[ "$output" =~ "IndexedJoin(onepk.pk1 = twopk.pk1)" ]] || false
-}
-
 @test "index: ALTER TABLE ADD COLUMN" {
     dolt sql <<SQL
 CREATE INDEX idx_v1 ON onepk(v1);
@@ -1977,6 +1966,7 @@ SQL
 }
 
 @test "index: UNIQUE INSERT, UPDATE, REPLACE" {
+
     dolt sql <<SQL
 CREATE UNIQUE INDEX idx_v1 ON onepk(v1);
 INSERT INTO onepk VALUES (1, 99, 51), (2, 11, 55), (3, 88, 52), (4, 22, 54), (5, 77, 53);
@@ -2120,6 +2110,7 @@ SQL
 }
 
 @test "index: UNIQUE dolt table import -r" {
+
     dolt sql <<SQL
 CREATE UNIQUE INDEX idx_v1 ON onepk(v1);
 INSERT INTO onepk VALUES (1, 98, 50), (2, 10, 54), (3, 87, 51), (4, 21, 53), (5, 76, 52);
@@ -2165,7 +2156,7 @@ SQL
     dolt add -A
     dolt commit -m "other changes"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge"
     run dolt index ls onepk
     [ "$status" -eq "0" ]
     [[ "$output" =~ "idx_v1(v1)" ]] || false
@@ -2205,7 +2196,9 @@ SQL
     dolt add -A
     dolt commit -m "other changes"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
     run dolt index cat onepk idx_v1 -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "v1,pk1" ]] || false
@@ -2227,6 +2220,7 @@ SQL
 }
 
 @test "index: Merge resolving all OURS" {
+
     dolt sql -q "CREATE INDEX idx_v1 ON onepk(v1);"
     dolt add -A
     dolt commit -m "baseline commit"
@@ -2240,7 +2234,9 @@ SQL
     dolt add -A
     dolt commit -m "other changes"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
     dolt conflicts resolve --ours onepk
     run dolt index cat onepk idx_v1 -r=csv
     [ "$status" -eq "0" ]
@@ -2253,7 +2249,7 @@ SQL
     [[ "${#lines[@]}" = "6" ]] || false
 }
 
-@test "index: Merge resolving all THEIRS" {
+@test "index: Merge resolving all OURS with stored procedure" {
     dolt sql -q "CREATE INDEX idx_v1 ON onepk(v1);"
     dolt add -A
     dolt commit -m "baseline commit"
@@ -2267,7 +2263,39 @@ SQL
     dolt add -A
     dolt commit -m "other changes"
     dolt checkout main
-    dolt merge other
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
+    dolt sql -q "call dolt_conflicts_resolve('--ours', 'onepk')"
+    run dolt index cat onepk idx_v1 -r=csv
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "v1,pk1" ]] || false
+    [[ "$output" =~ "-55,5" ]] || false
+    [[ "$output" =~ "-33,3" ]] || false
+    [[ "$output" =~ "11,1" ]] || false
+    [[ "$output" =~ "22,2" ]] || false
+    [[ "$output" =~ "44,4" ]] || false
+    [[ "${#lines[@]}" = "6" ]] || false
+}
+
+@test "index: Merge resolving all THEIRS" {
+
+    dolt sql -q "CREATE INDEX idx_v1 ON onepk(v1);"
+    dolt add -A
+    dolt commit -m "baseline commit"
+    dolt checkout -b other
+    dolt checkout main
+    dolt sql -q "INSERT INTO onepk VALUES (1, 11, 101), (2, 22, 202), (3, -33, 33), (4, 44, 404)"
+    dolt add -A
+    dolt commit -m "main changes"
+    dolt checkout other
+    dolt sql -q "INSERT INTO onepk VALUES (1, -11, 11), (2, -22, 22), (3, -33, 33), (4, -44, 44), (5, -55, 55)"
+    dolt add -A
+    dolt commit -m "other changes"
+    dolt checkout main
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
     dolt conflicts resolve --theirs onepk
     run dolt index cat onepk idx_v1 -r=csv
     [ "$status" -eq "0" ]
@@ -2280,7 +2308,7 @@ SQL
     [[ "${#lines[@]}" = "6" ]] || false
 }
 
-@test "index: Merge individually resolving OURS/THEIRS" {
+@test "index: Merge resolving all THEIRS with stored procedure" {
     dolt sql -q "CREATE INDEX idx_v1 ON onepk(v1);"
     dolt add -A
     dolt commit -m "baseline commit"
@@ -2294,8 +2322,43 @@ SQL
     dolt add -A
     dolt commit -m "other changes"
     dolt checkout main
-    dolt merge other
-    dolt conflicts resolve onepk 4
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
+    dolt sql -q "call dolt_conflicts_resolve('--theirs', 'onepk')"
+    run dolt index cat onepk idx_v1 -r=csv
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "v1,pk1" ]] || false
+    [[ "$output" =~ "-55,5" ]] || false
+    [[ "$output" =~ "-44,4" ]] || false
+    [[ "$output" =~ "-33,3" ]] || false
+    [[ "$output" =~ "-22,2" ]] || false
+    [[ "$output" =~ "-11,1" ]] || false
+    [[ "${#lines[@]}" = "6" ]] || false
+}
+
+@test "index: Merge individually resolving OURS/THEIRS" {
+
+    dolt sql -q "CREATE INDEX idx_v1 ON onepk(v1);"
+    dolt add -A
+    dolt commit -m "baseline commit"
+    dolt checkout -b other
+    dolt checkout main
+    dolt sql -q "INSERT INTO onepk VALUES (1, 11, 101), (2, 22, 202), (3, -33, 33), (4, 44, 404)"
+    dolt add -A
+    dolt commit -m "main changes"
+    dolt checkout other
+    dolt sql -q "INSERT INTO onepk VALUES (1, -11, 11), (2, -22, 22), (3, -33, 33), (4, -44, 44), (5, -55, 55)"
+    dolt add -A
+    dolt commit -m "other changes"
+    dolt checkout main
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONFLICT (content):" ]] || false
+    run dolt sql <<SQL
+SET dolt_allow_commit_conflicts = on;
+DELETE from dolt_conflicts_onepk where our_pk1 = 4;
+SQL
     dolt sql  <<SQL
 set autocommit = off;
 UPDATE onepk SET v1 = -11, v2 = 11 WHERE pk1 = 1;
@@ -2315,24 +2378,28 @@ SQL
 }
 
 @test "index: Merge violates UNIQUE" {
+
     dolt sql -q "CREATE UNIQUE INDEX idx_v1 ON onepk(v1);"
-    dolt add -A
-    dolt commit -m "baseline commit"
-    dolt checkout -b other
-    dolt checkout main
+    dolt commit -am "baseline commit"
+    dolt branch other
     dolt sql -q "INSERT INTO onepk VALUES (1, 11, 101), (2, 22, 202), (3, 33, 303), (4, 44, 404)"
-    dolt add -A
-    dolt commit -m "main changes"
+    dolt commit -am "main changes"
+
     dolt checkout other
     dolt sql -q "INSERT INTO onepk VALUES (1, 11, 101), (2, 22, 202), (3, 33, 303), (5, 44, 505)"
-    dolt add -A
-    dolt commit -m "other changes"
+    dolt commit -am "other changes"
+
     dolt checkout main
-    dolt merge other
+
+    run dolt merge other -m "merge"
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "CONSTRAINT VIOLATION (content):" ]] || false
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
-    [[ "$output" =~ "onepk,1" ]] || false
+
+    skip_nbf_dolt "__DOLT__ documents all matching rows for any unique key violations"
+    [[ "$output" =~ "onepk,2" ]] || false
 }
 
 @test "index: Merge into branch with index from branch without index" {
@@ -2354,7 +2421,7 @@ SQL
     dolt sql -q "CREATE INDEX abc ON test (v1)"
     dolt add -A
     dolt commit -m "added index"
-    dolt merge main
+    dolt merge main -m "merge"
     run dolt sql -q "select * from test where v1 = 2" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1,v2" ]] || false
@@ -2388,7 +2455,7 @@ SQL
     dolt add -A
     dolt commit -m "added index"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge"
     run dolt sql -q "select * from test where v1 = 2" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "pk,v1,v2" ]] || false
@@ -2403,6 +2470,7 @@ SQL
 }
 
 @test "index: Overwriting index auto-generated by foreign key" {
+
     dolt sql <<SQL
 CREATE TABLE parent (
   pk bigint PRIMARY KEY,
@@ -2447,7 +2515,7 @@ SQL
     dolt sql -q "CREATE UNIQUE INDEX abc_unq ON child_unq (parent_value);"
     run dolt sql -q "CREATE UNIQUE INDEX abc_non_unq ON child_non_unq (parent_value);"
     [ "$status" -eq "1" ]
-    [[ "$output" =~ "UNIQUE constraint violation" ]] || false
+    [[ "$output" =~ "duplicate unique key given" ]] || false
 
     # Verify correct index present in schema
     run dolt schema show child
@@ -2513,12 +2581,13 @@ SQL
 }
 
 @test "index: INSERT IGNORE INTO with unique key violations ignores correctly" {
-    dolt sql -q "CREATE TABLE mytable(pk int PRIMARY KEY, name varchar(20) UNIQUE)"
 
-    dolt sql -q "INSERT INTO mytable values (1,'jon')"
+    dolt sql -q "CREATE TABLE mytable(pk int PRIMARY KEY, col1 int UNIQUE)"
+
+    dolt sql -q "INSERT INTO mytable values (1,1)"
 
     # Try the repeat and assert an error
-    run dolt sql -q "INSERT INTO mytable values (2,'jon')"
+    run dolt sql -q "INSERT INTO mytable values (2,1)"
     [ "$status" -eq "1" ]
     [[ "$output" =~ "duplicate unique key given: [1]" ]] || false
 
@@ -2527,19 +2596,19 @@ SQL
     [[ "$output" =~ "1" ]] || false
 
     run dolt sql -r csv -q "SELECT * FROM mytable"
-    [[ "$output" =~ "1,jon" ]] || false
-    ! [[ "$output" =~ "2,jon" ]] || false
+    [[ "$output" =~ "1,1" ]] || false
+    ! [[ "$output" =~ "2,1" ]] || false
 
     # try with ignore
     run dolt sql << SQL
-INSERT IGNORE INTO mytable values (2,'jon');
+INSERT IGNORE INTO mytable values (2,1);
 SHOW WARNINGS;
 SQL
     [ "$status" -eq "0" ]
     [[ "$output" =~ '1062' ]] || false # First Validate the correct code
 
     # Now try again to assert the 0 rows affected
-    run dolt sql -q "INSERT IGNORE INTO mytable values (2,'jon');"
+    run dolt sql -q "INSERT IGNORE INTO mytable values (2,1);"
     [ "$status" -eq "0" ]
     [[ "$output" =~ 'Query OK, 0 rows affected' ]] || false
 
@@ -2548,8 +2617,8 @@ SQL
     [[ "$output" =~ "1" ]] || false
 
     run dolt sql -r csv -q "SELECT * FROM mytable"
-    [[ "$output" =~ "1,jon" ]] || false
-    ! [[ "$output" =~ "2,jon" ]] || false
+    [[ "$output" =~ "1,1" ]] || false
+    ! [[ "$output" =~ "2,1" ]] || false
 }
 
 @test "index: indexes should not be used when functions modify the column" {
@@ -2609,4 +2678,47 @@ SQL
     run dolt sql -q "show create table public.test"
     [ $status -eq 0 ]
     [[ "$output" =~ "KEY \`index_test_c1_idx\`" ]] || false
+}
+
+@test "index: multiddl alter statement" {
+     dolt sql <<SQL
+INSERT INTO onepk VALUES (1, 99, 51), (2, 11, 55), (3, 88, 52), (4, 22, 54), (5, 77, 53);
+ALTER TABLE onepk ADD INDEX idx_v1 (v1);
+ALTER TABLE onepk DROP INDEX idx_v1, ADD INDEX myidx (v1)
+SQL
+    run dolt index ls onepk
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "myidx(v1)" ]] || false
+    run dolt index cat onepk myidx -r=csv
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "v1,pk1" ]] || false
+    [[ "$output" =~ "11,2" ]] || false
+    [[ "$output" =~ "22,4" ]] || false
+    [[ "$output" =~ "77,5" ]] || false
+    [[ "$output" =~ "88,3" ]] || false
+    [[ "$output" =~ "99,1" ]] || false
+    [[ "${#lines[@]}" = "6" ]] || false
+    run dolt schema show onepk
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ 'KEY `myidx` (`v1`)' ]] || false
+    run dolt sql -q "SELECT pk1 FROM onepk WHERE v1 = 77" -r=csv
+    [ "$status" -eq "0" ]
+    [[ "$output" =~ "pk1" ]] || false
+    [[ "$output" =~ "5" ]] || false
+    [[ "${#lines[@]}" = "2" ]] || false
+}
+
+@test "index: multiddl drop column add index fails" {
+  run dolt sql <<SQL
+    CREATE TABLE t(pk int primary key, v1 int);
+    ALTER TABLE t DROP COLUMN v1, ADD INDEX myidx (v1);
+SQL
+
+    [[ "$output" =~ "key column 'v1' doesn't exist in table" ]] || false
+    [ "$status" -eq "1" ]
+
+    run dolt schema show t
+    [ "$status" -eq "0" ]
+    # column should still exist
+    [[ "$output" =~ '`v1` int' ]] || false
 }

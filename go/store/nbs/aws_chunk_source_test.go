@@ -39,24 +39,18 @@ func TestAWSChunkSource(t *testing.T) {
 	require.NoError(t, err)
 
 	s3 := makeFakeS3(t)
-	ddb := makeFakeDDB(t)
 
 	s3or := &s3ObjectReader{s3, "bucket", nil, ""}
-	dts := &ddbTableStore{ddb, "table", nil, nil}
 
-	makeSrc := func(chunkMax int, ic *indexCache) chunkSource {
+	makeSrc := func(chunkMax int) chunkSource {
 		cs, err := newAWSChunkSource(
 			context.Background(),
-			dts,
 			s3or,
-			awsLimits{itemMax: maxDynamoItemSize, chunkMax: uint32(chunkMax)},
+			awsLimits{},
 			h,
 			uint32(len(chunks)),
-			ic,
+			NewUnlimitedMemQuotaProvider(),
 			&Stats{},
-			func(bs []byte) (tableIndex, error) {
-				return parseTableIndex(bs)
-			},
 		)
 
 		require.NoError(t, err)
@@ -64,51 +58,13 @@ func TestAWSChunkSource(t *testing.T) {
 		return cs
 	}
 
-	t.Run("Dynamo", func(t *testing.T) {
-		ddb.putData(fmtTableName(h), tableData)
-
-		t.Run("NoIndexCache", func(t *testing.T) {
-			src := makeSrc(len(chunks)+1, nil)
-			assertChunksInReader(chunks, src, assert.New(t))
-		})
-
-		t.Run("WithIndexCache", func(t *testing.T) {
-			assert := assert.New(t)
-			index, err := parseTableIndexByCopy(tableData)
-			require.NoError(t, err)
-			cache := newIndexCache(1024)
-			cache.put(h, index)
-
-			baseline := ddb.NumGets()
-			src := makeSrc(len(chunks)+1, cache)
-
-			// constructing the table reader shouldn't have resulted in any reads
-			assert.Zero(ddb.NumGets() - baseline)
-			assertChunksInReader(chunks, src, assert)
-		})
-	})
-
 	t.Run("S3", func(t *testing.T) {
 		s3.data[h.String()] = tableData
 
-		t.Run("NoIndexCache", func(t *testing.T) {
-			src := makeSrc(len(chunks)-1, nil)
+		t.Run("Has Chunks", func(t *testing.T) {
+			src := makeSrc(len(chunks) - 1)
 			assertChunksInReader(chunks, src, assert.New(t))
-		})
-
-		t.Run("WithIndexCache", func(t *testing.T) {
-			assert := assert.New(t)
-			index, err := parseTableIndexByCopy(tableData)
-			require.NoError(t, err)
-			cache := newIndexCache(1024)
-			cache.put(h, index)
-
-			baseline := s3.getCount
-			src := makeSrc(len(chunks)-1, cache)
-
-			// constructing the table reader shouldn't have resulted in any reads
-			assert.Zero(s3.getCount - baseline)
-			assertChunksInReader(chunks, src, assert)
+			src.close()
 		})
 	})
 }

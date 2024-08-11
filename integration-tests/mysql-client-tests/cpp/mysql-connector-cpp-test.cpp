@@ -3,7 +3,6 @@
 #include <sstream>
 #include <stdexcept>
 
-
 #include "mysql_driver.h"
 #include "mysql_connection.h"
 #include "mysql_error.h"
@@ -33,14 +32,14 @@ std::string queries[QUERIES_SIZE] =
    "select * from test",
    "insert into test (pk, `value`) values (0,0)",
    "select * from test",
-   "select dolt_add('-A');",
-   "select dolt_commit('-m', 'my commit')",
+   "call dolt_add('-A');",
+   "call dolt_commit('-m', 'my commit')",
    "select COUNT(*) FROM dolt_log",
-   "select dolt_checkout('-b', 'mybranch')",
+   "call dolt_checkout('-b', 'mybranch')",
    "insert into test (pk, `value`) values (1,1)",
-   "select dolt_commit('-a', '-m', 'my commit2')",
-   "select dolt_checkout('main')",
-   "select dolt_merge('mybranch')",
+   "call dolt_commit('-a', '-m', 'my commit2')",
+   "call dolt_checkout('main')",
+   "call dolt_merge('mybranch')",
    "select COUNT(*) FROM dolt_log",
   };
 
@@ -64,10 +63,19 @@ int main(int argc, char **argv) {
       sql::Statement *stmt = con->createStatement();
 
       if ( is_update[i] ) {
-	int affected_rows = stmt->executeUpdate(queries[i]);
+        int affected_rows = stmt->executeUpdate(queries[i]);
       } else {
-	sql::ResultSet *res = stmt->executeQuery(queries[i]);
-	delete res;
+        sql::ResultSet *res = stmt->executeQuery(queries[i]);
+
+        // Assert that all columns have colum name metadata populated
+        sql::ResultSetMetaData* metadata = res->getMetaData();
+        const uint columnCount = metadata->getColumnCount();
+        for (uint columnIndex = 1; columnIndex <= columnCount; ++columnIndex) {
+            sql::SQLString columnName = metadata->getColumnName(columnIndex);
+            assert(columnName.length() > 0);
+        }
+
+        delete res;
       }
     
       delete stmt;

@@ -16,30 +16,45 @@ package cnfcmds
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
+
+	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/merge"
-	"github.com/dolthub/dolt/go/libraries/doltcore/row"
-	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/pipeline"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/untyped"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/untyped/fwt"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/untyped/nullprinter"
+	"github.com/dolthub/dolt/go/libraries/doltcore/table/untyped/tabular"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 	"github.com/dolthub/dolt/go/libraries/utils/iohelp"
 )
 
+type mergeStatus struct {
+	isMerging      bool
+	source         string
+	sourceCommit   string
+	target         string
+	unmergedTables []string
+}
+
+var conflictColsToIgnore = map[string]bool{
+	"from_root_ish":    true,
+	"our_diff_type":    true,
+	"their_diff_type":  true,
+	"dolt_conflict_id": true,
+}
+
 var catDocs = cli.CommandDocumentationContent{
 	ShortDesc: "print conflicts",
-	LongDesc:  `The dolt conflicts cat command reads table conflicts and writes them to the standard output.`,
+	LongDesc:  `The dolt conflicts cat command reads table conflicts from the working set and writes them to the standard output.`,
 	Synopsis: []string{
-		"[{{.LessThan}}commit{{.GreaterThan}}] {{.LessThan}}table{{.GreaterThan}}...",
+		"{{.LessThan}}table{{.GreaterThan}}...",
 	},
 }
 
@@ -55,10 +70,9 @@ func (cmd CatCmd) Description() string {
 	return "Writes out the table conflicts."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd CatCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd CatCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, catDocs, ap))
+	return cli.NewCommandDocumentation(catDocs, ap)
 }
 
 // EventType returns the type of the event to log
@@ -67,16 +81,16 @@ func (cmd CatCmd) EventType() eventsapi.ClientEventType {
 }
 
 func (cmd CatCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithVariableArgs(cmd.Name())
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"table", "List of tables to be printed. '.' can be used to print conflicts for all tables."})
 
 	return ap
 }
 
 // Exec executes the command
-func (cmd CatCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd CatCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, catDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, catDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 	args = apr.Args
 
@@ -87,140 +101,254 @@ func (cmd CatCmd) Exec(ctx context.Context, commandStr string, args []string, dE
 		return 1
 	}
 
-	root, verr := commands.GetWorkingWithVErr(dEnv)
-	if verr != nil {
-		return exitWithVerr(verr)
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
+	if err != nil {
+		return commands.HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+	if closeFunc != nil {
+		defer closeFunc()
 	}
 
-	cm, verr := commands.MaybeGetCommitWithVErr(dEnv, args[0])
-	if verr != nil {
-		return exitWithVerr(verr)
-	}
-
-	// If no commit was resolved from the first argument, assume the args are all table names and print the conflicts
-	if cm == nil {
-		if verr := printConflicts(ctx, root, args); verr != nil {
-			return exitWithVerr(verr)
-		}
-
-		return 0
-	}
-
-	tblNames := args[1:]
+	tblNames := args
 	if len(tblNames) == 0 {
 		cli.Println("No tables specified")
 		usage()
 		return 1
 	}
 
-	root, err := cm.GetRootValue()
-	if err != nil {
-		return exitWithVerr(errhand.BuildDError("unable to get the root value").AddCause(err).Build())
+	if err := printConflicts(queryist, sqlCtx, tblNames); err != nil {
+		return commands.HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
 	}
-
-	if verr = printConflicts(ctx, root, tblNames); verr != nil {
-		return exitWithVerr(verr)
-	}
-
 	return 0
 }
 
-func exitWithVerr(verr errhand.VerboseError) int {
-	cli.PrintErrln(verr.Verbose())
-	return 1
-}
+func printConflicts(queryist cli.Queryist, sqlCtx *sql.Context, tblNames []string) error {
+	stdOut := iohelp.NopWrCloser(cli.CliOut)
 
-func printConflicts(ctx context.Context, root *doltdb.RootValue, tblNames []string) errhand.VerboseError {
+	mergeStatus, err := getMergeStatus(queryist, sqlCtx)
+	if err != nil {
+		return fmt.Errorf("error: failed to get merge status: %w", err)
+	}
+	schemaConflictsExist, err := getSchemaConflictsExist(queryist, sqlCtx)
+	if err != nil {
+		return fmt.Errorf("error: failed to determine if schema conflicts exist: %w", err)
+	}
+
+	// if no tables were specified, set tblNames to all the unmerged tables
 	if len(tblNames) == 1 && tblNames[0] == "." {
-		var err error
-		tblNames, err = doltdb.UnionTableNames(ctx, root)
+		tblNames = mergeStatus.unmergedTables
+	}
 
-		if err != nil {
-			return errhand.BuildDError("unable to read tables").AddCause(err).Build()
+	// first print schema conflicts
+	if mergeStatus.isMerging && schemaConflictsExist {
+		for _, table := range tblNames {
+			err = printSchemaConflicts(queryist, sqlCtx, stdOut, table)
+			if err != nil {
+				return fmt.Errorf("error: failed to print schema conflicts for table '%s': %w", table, err)
+			}
 		}
 	}
 
-	for _, tblName := range tblNames {
-		verr := func() errhand.VerboseError {
-			if has, err := root.HasTable(ctx, tblName); err != nil {
-				return errhand.BuildDError("error: unable to read database").AddCause(err).Build()
-			} else if !has {
-				return errhand.BuildDError("error: unknown table '%s'", tblName).Build()
-			}
+	// next print data conflicts
+	for _, tblName := range mergeStatus.unmergedTables {
+		shouldShowTable := isStringInArray(tblName, tblNames)
+		if !shouldShowTable {
+			continue
+		}
 
-			tbl, _, err := root.GetTable(ctx, tblName)
+		dataConflictsExist, err := getTableDataConflictsExist(queryist, sqlCtx, tblName)
+		if err != nil {
+			return fmt.Errorf("error: failed to determine if data conflicts exist for table '%s': %w", tblName, err)
+		} else if !dataConflictsExist {
+			continue
+		}
 
-			if err != nil {
-				return errhand.BuildDError("error: unable to read database").AddCause(err).Build()
-			}
+		q, err := dbr.InterpolateForDialect("SELECT * from ?", []interface{}{dbr.I("dolt_conflicts_" + tblName)}, dialect.MySQL)
+		if err != nil {
+			return fmt.Errorf("error: failed to interpolate query for table '%s': %w", tblName, err)
+		}
 
-			has, err := root.HasConflicts(ctx)
-			if err != nil {
-				return errhand.BuildDError("failed to read conflicts").AddCause(err).Build()
-			}
-			if !has {
-				return nil
-			}
+		confSqlSch, rowItr, _, err := queryist.Query(sqlCtx, q)
+		if err != nil {
+			return fmt.Errorf("error: failed to get conflict rows for table '%s': %w", tblName, err)
+		}
 
-			cnfRd, err := merge.NewConflictReader(ctx, tbl)
+		sqlTargetSch, err := getUnionSchemaFromConflictsSchema(confSqlSch)
+		if err != nil {
+			return fmt.Errorf("error: failed to get union schema for table '%s': %w", tblName, err)
+		}
 
-			if err != nil {
-				return errhand.BuildDError("failed to read conflicts").AddCause(err).Build()
-			}
+		tw := tabular.NewFixedWidthConflictTableWriter(sqlTargetSch, stdOut, 100)
 
-			defer cnfRd.Close()
-
-			splitter, err := merge.NewConflictSplitter(ctx, tbl.ValueReadWriter(), cnfRd.GetJoiner())
-
-			if err != nil {
-				return errhand.BuildDError("error: unable to handle schemas").AddCause(err).Build()
-			}
-
-			cnfWr, err := merge.NewConflictSink(iohelp.NopWrCloser(cli.CliOut), splitter.GetSchema(), " | ")
-			defer cnfWr.Close()
-
-			if err != nil {
-				return errhand.BuildDError("error: unable to read database").AddCause(err).Build()
-			}
-
-			nullPrinter := nullprinter.NewNullPrinter(splitter.GetSchema())
-			fwtTr := fwt.NewAutoSizingFWTTransformer(splitter.GetSchema(), fwt.HashFillWhenTooLong, 1000)
-			transforms := pipeline.NewTransformCollection(
-				pipeline.NewNamedTransform("split", splitter.SplitConflicts),
-				pipeline.NewNamedTransform(nullprinter.NullPrintingStage, nullPrinter.ProcessRow),
-				pipeline.NamedTransform{Name: "fwt", Func: fwtTr.TransformToFWT},
-			)
-
-			// TODO: Pipeline should be contextified.
-			srcProcFunc := pipeline.ProcFuncForSourceFunc(func() (row.Row, pipeline.ImmutableProperties, error) { return cnfRd.NextConflict(ctx) })
-			sinkProcFunc := pipeline.ProcFuncForSinkFunc(cnfWr.ProcRowWithProps)
-			p := pipeline.NewAsyncPipeline(srcProcFunc, sinkProcFunc, transforms, func(failure *pipeline.TransformRowFailure) (quit bool) {
-				panic("")
-			})
-
-			colNames, err := schema.ExtractAllColNames(splitter.GetSchema())
-
-			if err != nil {
-				return errhand.BuildDError("error: failed to read columns from schema").AddCause(err).Build()
-			}
-			r, err := untyped.NewRowFromTaggedStrings(tbl.Format(), splitter.GetSchema(), colNames)
-
-			if err != nil {
-				return errhand.BuildDError("error: failed to create header row for printing").AddCause(err).Build()
-			}
-
-			p.InjectRow("fwt", r)
-
-			p.Start()
-			p.Wait()
-
-			return nil
-		}()
-
-		if verr != nil {
-			return verr
+		err = writeConflictResults(sqlCtx, confSqlSch, sqlTargetSch, rowItr, tw)
+		if err != nil {
+			return fmt.Errorf("error: failed to write conflict results for table '%s': %w", tblName, err)
 		}
 	}
 
 	return nil
+}
+
+func getUnionSchemaFromConflictsSchema(conflictsSch sql.Schema) (sql.Schema, error) {
+	// using array to preserve column order
+	conflictCpy := conflictsSch.Copy()
+	var baseCols, theirCols, ourCols sql.Schema
+	for _, col := range conflictCpy {
+		conflictColName := col.Name
+		_, shouldIgnore := conflictColsToIgnore[conflictColName]
+		if shouldIgnore {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(conflictColName, basePrefix):
+			col.Name = conflictColName[len(basePrefix):]
+			baseCols = append(baseCols, col)
+		case strings.HasPrefix(conflictColName, theirPrefix):
+			col.Name = conflictColName[len(theirPrefix):]
+			theirCols = append(theirCols, col)
+		case strings.HasPrefix(conflictColName, ourPrefix):
+			col.Name = conflictColName[len(ourPrefix):]
+			ourCols = append(ourCols, col)
+		}
+	}
+	return append(append(baseCols, theirCols...), ourCols...), nil
+}
+
+func printSchemaConflicts(queryist cli.Queryist, sqlCtx *sql.Context, wrCloser io.WriteCloser, table string) error {
+	q, err := dbr.InterpolateForDialect("select our_schema, their_schema, base_schema, description "+
+		"from dolt_schema_conflicts where table_name = ?", []interface{}{table}, dialect.MySQL)
+	if err != nil {
+		return err
+	}
+	sqlSch, rowItr, _, err := queryist.Query(sqlCtx, q)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := rowItr.Close(sqlCtx); err == nil {
+			err = cerr
+		}
+	}()
+
+	tw := tabular.NewFixedWidthTableWriter(sqlSch, wrCloser, 100)
+	defer func() {
+		if cerr := tw.Close(sqlCtx); err == nil {
+			err = cerr
+		}
+	}()
+
+	for {
+		r, err := rowItr.Next(sqlCtx)
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return err
+		}
+		if err = tw.WriteSqlRow(sqlCtx, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeConflictResults(
+	ctx *sql.Context,
+	resultSch sql.Schema,
+	targetSch sql.Schema,
+	iter sql.RowIter,
+	writer *tabular.FixedWidthConflictTableWriter) (err error) {
+
+	cs, err := newConflictSplitter(resultSch, targetSch)
+	if err != nil {
+		return err
+	}
+
+	for {
+		r, err := iter.Next(ctx)
+		if err == io.EOF {
+			return writer.Close(ctx)
+		} else if err != nil {
+			return err
+		}
+
+		conflictRows, err := cs.splitConflictRow(r)
+		if err != nil {
+			return err
+		}
+
+		for _, cR := range conflictRows {
+			err := writer.WriteRow(ctx, cR.version, cR.row, cR.diffType)
+			if err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func getMergeStatus(queryist cli.Queryist, sqlCtx *sql.Context) (mergeStatus, error) {
+	ms := mergeStatus{}
+	q := "select * from dolt_merge_status;"
+	rows, err := commands.GetRowsForSql(queryist, sqlCtx, q)
+	if err != nil {
+		return ms, err
+	}
+
+	if len(rows) > 1 {
+		return ms, errors.New("error: multiple rows in dolt_merge_status")
+	}
+
+	row := rows[0]
+	ms.isMerging, err = commands.GetTinyIntColAsBool(row[0])
+	if err != nil {
+		return ms, fmt.Errorf("error: failed to parse is_merging: %w", err)
+	}
+	if ms.isMerging {
+		ms.source = row[1].(string)
+		ms.sourceCommit = row[2].(string)
+		ms.target = row[3].(string)
+		unmergedTables := row[4].(string)
+		ms.unmergedTables = strings.Split(unmergedTables, ", ")
+	}
+
+	return ms, nil
+}
+
+func getSchemaConflictsExist(queryist cli.Queryist, sqlCtx *sql.Context) (bool, error) {
+	q := "select * from dolt_schema_conflicts limit 1;"
+	rows, err := commands.GetRowsForSql(queryist, sqlCtx, q)
+	if err != nil {
+		return false, err
+	}
+
+	if len(rows) == 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func getTableDataConflictsExist(queryist cli.Queryist, sqlCtx *sql.Context, tableName string) (bool, error) {
+	q, err := dbr.InterpolateForDialect("select * from ? limit 1;", []interface{}{dbr.I("dolt_conflicts_" + tableName)}, dialect.MySQL)
+	if err != nil {
+		return false, err
+	}
+	rows, err := commands.GetRowsForSql(queryist, sqlCtx, q)
+	if err != nil {
+		return false, err
+	}
+
+	if len(rows) == 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func isStringInArray(val string, arr []string) bool {
+	for _, v := range arr {
+		if val == v {
+			return true
+		}
+	}
+	return false
 }

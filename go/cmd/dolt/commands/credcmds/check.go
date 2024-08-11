@@ -17,7 +17,7 @@ package credcmds
 import (
 	"context"
 	"fmt"
-	"io"
+	"net"
 
 	"google.golang.org/grpc"
 
@@ -30,6 +30,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/grpcendpoint"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"github.com/dolthub/dolt/go/libraries/utils/config"
 )
 
 var checkShortDesc = "Check authenticating with a credential keypair against a doltremoteapi."
@@ -54,10 +55,9 @@ func (cmd CheckCmd) Description() string {
 	return checkShortDesc
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd CheckCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd CheckCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, checkDocs, ap))
+	return cli.NewCommandDocumentation(checkDocs, ap)
 }
 
 // RequiresRepo should return false if this interface is implemented, and the command does not have the requirement
@@ -72,39 +72,48 @@ func (cmd CheckCmd) EventType() eventsapi.ClientEventType {
 }
 
 func (cmd CheckCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	ap.SupportsString("endpoint", "", "", "API endpoint, otherwise taken from config.")
 	ap.SupportsString("creds", "", "", "Public Key ID or Public Key for credentials, otherwise taken from config.")
 	return ap
 }
 
 // Exec executes the command
-func (cmd CheckCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd CheckCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, checkDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, checkDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	endpoint := loadEndpoint(dEnv, apr)
+	host, endpoint := loadEndpoint(dEnv, apr)
 
 	dc, verr := loadCred(dEnv, apr)
 	if verr != nil {
 		return commands.HandleVErrAndExitCode(verr, usage)
 	}
 
-	verr = checkCredAndPrintSuccess(ctx, dEnv, dc, endpoint)
+	verr = checkCredAndPrintSuccess(ctx, dEnv, dc, host, endpoint)
 
 	return commands.HandleVErrAndExitCode(verr, usage)
 }
 
-func loadEndpoint(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) string {
+func loadEndpoint(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) (string, string) {
 	earg, ok := apr.GetValue("endpoint")
 	if ok {
-		return earg
+		return getHostFromEndpoint(earg), earg
 	}
 
-	host := dEnv.Config.GetStringOrDefault(env.RemotesApiHostKey, env.DefaultRemotesApiHost)
-	port := dEnv.Config.GetStringOrDefault(env.RemotesApiHostPortKey, env.DefaultRemotesApiPort)
-	return fmt.Sprintf("%s:%s", host, port)
+	host := dEnv.Config.GetStringOrDefault(config.RemotesApiHostKey, env.DefaultRemotesApiHost)
+	port := dEnv.Config.GetStringOrDefault(config.RemotesApiHostPortKey, env.DefaultRemotesApiPort)
+	return host, fmt.Sprintf("%s:%s", host, port)
+}
+
+func getHostFromEndpoint(endpoint string) string {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		cli.Printf("error getting host name from provided endpoint '%s': %v\nUsing default host instead: %s\n", endpoint, err, env.DefaultRemotesApiHost)
+		return env.DefaultRemotesApiHost
+	}
+	return host
 }
 
 func loadCred(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) (creds.DoltCreds, errhand.VerboseError) {
@@ -126,7 +135,7 @@ func loadCred(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) (creds.DoltCred
 		}
 		return dc, nil
 	} else {
-		dc, valid, err := dEnv.UserRPCCreds()
+		dc, valid, err := dEnv.UserDoltCreds()
 		if !valid {
 			return creds.EmptyCreds, errhand.BuildDError("error: no user credentials found").Build()
 		}
@@ -137,18 +146,19 @@ func loadCred(dEnv *env.DoltEnv, apr *argparser.ArgParseResults) (creds.DoltCred
 	}
 }
 
-func checkCredAndPrintSuccess(ctx context.Context, dEnv *env.DoltEnv, dc creds.DoltCreds, endpoint string) errhand.VerboseError {
-	endpoint, opts, err := dEnv.GetGRPCDialParams(grpcendpoint.Config{
+func checkCredAndPrintSuccess(ctx context.Context, dEnv *env.DoltEnv, dc creds.DoltCreds, authHost, endpoint string) errhand.VerboseError {
+	cfg, err := dEnv.GetGRPCDialParams(grpcendpoint.Config{
 		Endpoint: endpoint,
-		Creds:    dc,
+		Creds:    dc.RPCCreds(authHost),
 	})
 	if err != nil {
 		return errhand.BuildDError("error: unable to build server endpoint options.").AddCause(err).Build()
 	}
-	conn, err := grpc.Dial(endpoint, opts...)
+	conn, err := grpc.Dial(cfg.Endpoint, cfg.DialOptions...)
 	if err != nil {
 		return errhand.BuildDError("error: unable to connect to server with credentials.").AddCause(err).Build()
 	}
+	defer conn.Close()
 
 	grpcClient := remotesapi.NewCredentialsServiceClient(conn)
 

@@ -37,7 +37,7 @@ func (v Decimal) Equals(other Value) bool {
 	return decimal.Decimal(v).Equal(decimal.Decimal(v2))
 }
 
-func (v Decimal) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v Decimal) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if v2, ok := other.(Decimal); ok {
 		return decimal.Decimal(v).LessThan(decimal.Decimal(v2)), nil
 	}
@@ -52,11 +52,7 @@ func (v Decimal) isPrimitive() bool {
 	return true
 }
 
-func (v Decimal) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
-func (v Decimal) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (v Decimal) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 

@@ -9,7 +9,6 @@ teardown() {
     teardown_common
 }
 
-
 @test "sql-check-constraints: basic tests for check constraints" {
     dolt sql <<SQL
 CREATE table t1 (
@@ -79,6 +78,10 @@ SQL
     echo $output
     [[ "$output" =~ "CHECK" ]] || false
     [[ "$output" =~ "`c1` > 3" ]] || false
+
+    # check information_schema.CHECK_CONSTRAINTS table
+    run dolt sql -q "select constraint_catalog, constraint_name, check_clause from information_schema.CHECK_CONSTRAINTS;" -r csv
+    [[ "$output" =~ "def,foo_chk_eq3jn5ra,(c1 > 3)" ]] || false
 }
 
 @test "sql-check-constraints: check constraints survive renaming a column" {
@@ -184,5 +187,4 @@ SQL
     [[ "$output" =~ "CHECK" ]] || false
     [[ "$output" =~ "`c1` > 3" ]] || false
 }
-
 

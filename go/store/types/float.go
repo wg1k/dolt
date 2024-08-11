@@ -40,7 +40,7 @@ func (v Float) Equals(other Value) bool {
 	return v == other
 }
 
-func (v Float) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v Float) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if v2, ok := other.(Float); ok {
 		return v < v2, nil
 	}
@@ -55,11 +55,7 @@ func (v Float) isPrimitive() bool {
 	return true
 }
 
-func (v Float) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
-func (v Float) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (v Float) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 

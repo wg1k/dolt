@@ -18,9 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 )
@@ -28,10 +27,10 @@ import (
 // EventNowFunc function is used to get the current time and can be overridden for testing.
 var EventNowFunc = time.Now
 
-func nowTimestamp() *timestamp.Timestamp {
+func NowTimestamp() *timestamppb.Timestamp {
 	now := EventNowFunc()
-	ts, err := ptypes.TimestampProto(now)
-
+	ts := timestamppb.New(now)
+	err := ts.CheckValid()
 	if err != nil {
 		panic(err)
 	}
@@ -52,7 +51,7 @@ func NewEvent(ceType eventsapi.ClientEventType) *Event {
 	return &Event{
 		ce: &eventsapi.ClientEvent{
 			Id:        uuid.New().String(),
-			StartTime: nowTimestamp(),
+			StartTime: NowTimestamp(),
 			Type:      ceType,
 		},
 		m:          &sync.Mutex{},
@@ -84,7 +83,7 @@ func (evt *Event) close() *eventsapi.ClientEvent {
 	evt.m.Lock()
 	defer evt.m.Unlock()
 
-	evt.ce.EndTime = nowTimestamp()
+	evt.ce.EndTime = NowTimestamp()
 
 	for k, v := range evt.attributes {
 		evt.ce.Attributes = append(evt.ce.Attributes, &eventsapi.ClientEventAttribute{Id: k, Value: v})

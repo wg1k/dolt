@@ -55,7 +55,7 @@ func (v UUID) Equals(other Value) bool {
 	return v == other
 }
 
-func (v UUID) Less(nbf *NomsBinFormat, other LesserValuable) (bool, error) {
+func (v UUID) Less(ctx context.Context, nbf *NomsBinFormat, other LesserValuable) (bool, error) {
 	if v2, ok := other.(UUID); ok {
 		return bytes.Compare(v[:], v2[:]) < 0, nil
 	}
@@ -70,11 +70,7 @@ func (v UUID) isPrimitive() bool {
 	return true
 }
 
-func (v UUID) WalkValues(ctx context.Context, cb ValueCallback) error {
-	return nil
-}
-
-func (v UUID) WalkRefs(nbf *NomsBinFormat, cb RefCallback) error {
+func (v UUID) walkRefs(nbf *NomsBinFormat, cb RefCallback) error {
 	return nil
 }
 

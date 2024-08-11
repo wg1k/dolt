@@ -34,14 +34,17 @@ import (
 func TestLog(t *testing.T) {
 	dEnv := createUninitializedEnv()
 	err := dEnv.InitRepo(context.Background(), types.Format_Default, "Bill Billerson", "bigbillieb@fake.horse", env.DefaultInitBranch)
+	defer dEnv.DoltDB.Close()
 
 	if err != nil {
 		t.Error("Failed to init repo")
 	}
 
 	cs, _ := doltdb.NewCommitSpec(env.DefaultInitBranch)
-	commit, _ := dEnv.DoltDB.Resolve(context.Background(), cs, nil)
-	meta, _ := commit.GetCommitMeta()
+	opt, _ := dEnv.DoltDB.Resolve(context.Background(), cs, nil)
+	commit, _ := opt.ToCommit()
+
+	meta, _ := commit.GetCommitMeta(context.Background())
 	require.Equal(t, "Bill Billerson", meta.Name)
 }
 
@@ -52,14 +55,16 @@ func TestLogSigterm(t *testing.T) {
 
 	dEnv := createUninitializedEnv()
 	err := dEnv.InitRepo(context.Background(), types.Format_Default, "Bill Billerson", "bigbillieb@fake.horse", env.DefaultInitBranch)
+	defer dEnv.DoltDB.Close()
 
 	if err != nil {
 		t.Error("Failed to init repo")
 	}
 
 	cs, _ := doltdb.NewCommitSpec(env.DefaultInitBranch)
-	commit, _ := dEnv.DoltDB.Resolve(context.Background(), cs, nil)
-	cMeta, _ := commit.GetCommitMeta()
+	optCmt, _ := dEnv.DoltDB.Resolve(context.Background(), cs, nil)
+	commit, _ := optCmt.ToCommit()
+	cMeta, _ := commit.GetCommitMeta(context.Background())
 	cHash, _ := commit.HashOf()
 
 	outputpager.SetTestingArg(true)

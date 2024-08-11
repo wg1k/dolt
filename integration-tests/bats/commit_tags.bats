@@ -41,8 +41,16 @@ teardown() {
     [[ "$output" =~ "v1" ]] || false
 }
 
+@test "commit_tags: create a tag with author arg given" {
+    run dolt tag v1 --author "John Doe <john@doe.com>"
+    [ $status -eq 0 ]
+    run dolt tag -v
+    [ $status -eq 0 ]
+    [[ "$output" =~ "v1" ]] || false
+    [[ "$output" =~ "Tagger: John Doe <john@doe.com>" ]] || false
+}
+
 @test "commit_tags: create tag v1.2.3" {
-    skip "Noms doesn't support '.' in dataset names"
     run dolt tag v1.2.3
     [ $status -eq 0 ]
 }
@@ -81,24 +89,28 @@ teardown() {
     dolt tag v1 HEAD^
     run dolt diff v1
     [ $status -eq 0 ]
-    [[ "$output" =~ "-  | 0" ]]
-    [[ "$output" =~ "+  | 3" ]]
+    [[ "$output" =~ "- | 0" ]] || false
+    [[ "$output" =~ "+ | 3" ]] || false
 }
 
 @test "commit_tags: use a tag as a ref for merge" {
     dolt tag v1 HEAD
+    # TODO: remove this once dolt checkout is migrated
+    if [ "$SQL_ENGINE" = "remote-engine" ]; then
+      skip "This test relies on dolt checkout, which has not been migrated yet."
+    fi
     dolt checkout -b other HEAD^
     dolt sql -q "insert into test values (8),(9)"
     dolt add -A && dolt commit -m 'made changes'
-    run dolt merge v1
+    run dolt merge v1 -m "merge v1"
     [ $status -eq 0 ]
     run dolt sql -q "select * from test"
     [ $status -eq 0 ]
-    [[ "$output" =~ "1" ]]
-    [[ "$output" =~ "2" ]]
-    [[ "$output" =~ "3" ]]
-    [[ "$output" =~ "8" ]]
-    [[ "$output" =~ "9" ]]
+    [[ "$output" =~ "1" ]] || false
+    [[ "$output" =~ "2" ]] || false
+    [[ "$output" =~ "3" ]] || false
+    [[ "$output" =~ "8" ]] || false
+    [[ "$output" =~ "9" ]] || false
 }
 
 @test "commit_tags: push/pull tags to/from a remote" {
@@ -127,7 +139,7 @@ teardown() {
     run dolt push origin master
     [ $status -eq 0 ]
     cd ../repo_clone
-    run dolt pull
+    run dolt pull --no-edit
     [ $status -eq 0 ]
     run dolt tag
     [ $status -eq 0 ]
@@ -136,4 +148,17 @@ teardown() {
     run dolt tag -v
     [ $status -eq 0 ]
     [[ "$output" =~ "SAMO" ]] || false
+}
+
+@test "commit_tags: create a tag with semver string" {
+    dolt tag v1.0.0 HEAD^
+
+    run dolt tag
+    [ $status -eq 0 ]
+    [[ "$output" =~ "v1.0.0" ]] || false
+
+    dolt tag 1.0.0 HEAD
+    run dolt tag
+    [ $status -eq 0 ]
+    [[ "$output" =~ "1.0.0" ]] || false
 }

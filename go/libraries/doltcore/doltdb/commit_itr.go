@@ -16,10 +16,13 @@ package doltdb
 
 import (
 	"context"
-	"errors"
 	"io"
 
+	"github.com/dolthub/go-mysql-server/sql"
+
+	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/hash"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -27,7 +30,7 @@ import (
 type CommitItr interface {
 	// Next returns the hash of the next commit, and a pointer to that commit.  Implementations of Next must handle
 	// making sure the list of commits returned are unique.  When complete Next will return hash.Hash{}, nil, io.EOF
-	Next(ctx context.Context) (hash.Hash, *Commit, error)
+	Next(ctx context.Context) (hash.Hash, *OptionalCommit, error)
 
 	// Reset the commit iterator back to the start
 	Reset(ctx context.Context) error
@@ -66,7 +69,7 @@ func CommitItrForAllBranches(ctx context.Context, ddb *DoltDB) (CommitItr, error
 	return cmItr, nil
 }
 
-// CommitItrForRoots will return a CommitItr which will iterate over all descendant commits of the provided rootCommits.
+// CommitItrForRoots will return a CommitItr which will iterate over all ancestor commits of the provided rootCommits.
 func CommitItrForRoots(ddb *DoltDB, rootCommits ...*Commit) CommitItr {
 	return &commitItr{
 		ddb:         ddb,
@@ -87,7 +90,7 @@ func (cmItr *commitItr) Reset(ctx context.Context) error {
 
 // Next returns the hash of the next commit, and a pointer to that commit.  It handles making sure the list of commits
 // returned are unique.  When complete Next will return hash.Hash{}, nil, io.EOF
-func (cmItr *commitItr) Next(ctx context.Context) (hash.Hash, *Commit, error) {
+func (cmItr *commitItr) Next(ctx context.Context) (hash.Hash, *OptionalCommit, error) {
 	for cmItr.curr == nil {
 		if cmItr.currentRoot >= len(cmItr.rootCommits) {
 			return hash.Hash{}, nil, io.EOF
@@ -103,7 +106,7 @@ func (cmItr *commitItr) Next(ctx context.Context) (hash.Hash, *Commit, error) {
 		if !cmItr.added[h] {
 			cmItr.added[h] = true
 			cmItr.curr = cm
-			return h, cmItr.curr, nil
+			return h, &OptionalCommit{cmItr.curr, h}, nil
 		}
 
 		cmItr.currentRoot++
@@ -132,37 +135,42 @@ func (cmItr *commitItr) Next(ctx context.Context) (hash.Hash, *Commit, error) {
 
 	next := cmItr.unprocessed[numUnprocessed-1]
 	cmItr.unprocessed = cmItr.unprocessed[:numUnprocessed-1]
-	cmItr.curr, err = hashToCommit(ctx, cmItr.ddb.ValueReadWriter(), next)
-
-	if err != nil {
+	cmItr.curr, err = HashToCommit(ctx, cmItr.ddb.ValueReadWriter(), cmItr.ddb.ns, next)
+	if err != nil && err != ErrGhostCommitEncountered {
 		return hash.Hash{}, nil, err
 	}
+	if err == ErrGhostCommitEncountered {
+		cmItr.curr = nil
+	}
 
-	return next, cmItr.curr, nil
+	return next, &OptionalCommit{cmItr.curr, next}, nil
 }
 
-func hashToCommit(ctx context.Context, vrw types.ValueReadWriter, h hash.Hash) (*Commit, error) {
-	val, err := vrw.ReadValue(ctx, h)
-
+func HashToCommit(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, h hash.Hash) (*Commit, error) {
+	dc, err := datas.LoadCommitAddr(ctx, vrw, h)
 	if err != nil {
 		return nil, err
 	}
 
-	if val == nil {
-		return nil, errors.New("failed to get commit")
+	if dc.IsGhost() {
+		return nil, ErrGhostCommitEncountered
 	}
 
-	cmSt := val.(types.Struct)
-	return NewCommit(vrw, cmSt), nil
+	return NewCommit(ctx, vrw, ns, dc)
 }
 
 // CommitFilter is a function that returns true if a commit should be filtered out, and false if it should be kept
-type CommitFilter func(context.Context, hash.Hash, *Commit) (filterOut bool, err error)
+type CommitFilter func(context.Context, hash.Hash, *OptionalCommit) (filterOut bool, err error)
 
 // FilteringCommitItr is a CommitItr implementation that applies a filtering function to limit the commits returned
 type FilteringCommitItr struct {
 	itr    CommitItr
 	filter CommitFilter
+}
+
+// AllCommits is a CommitFilter that matches all commits
+func AllCommits(_ context.Context, _ hash.Hash, _ *Commit) (filterOut bool, err error) {
+	return false, nil
 }
 
 func NewFilteringCommitItr(itr CommitItr, filter CommitFilter) FilteringCommitItr {
@@ -171,7 +179,7 @@ func NewFilteringCommitItr(itr CommitItr, filter CommitFilter) FilteringCommitIt
 
 // Next returns the hash of the next commit, and a pointer to that commit.  Implementations of Next must handle
 // making sure the list of commits returned are unique.  When complete Next will return hash.Hash{}, nil, io.EOF
-func (itr FilteringCommitItr) Next(ctx context.Context) (hash.Hash, *Commit, error) {
+func (itr FilteringCommitItr) Next(ctx context.Context) (hash.Hash, *OptionalCommit, error) {
 	// iteration will terminate on io.EOF or a commit that is !filteredOut
 	for {
 		h, cm, err := itr.itr.Next(ctx)
@@ -191,4 +199,111 @@ func (itr FilteringCommitItr) Next(ctx context.Context) (hash.Hash, *Commit, err
 // Reset the commit iterator back to the
 func (itr FilteringCommitItr) Reset(ctx context.Context) error {
 	return itr.itr.Reset(ctx)
+}
+
+func NewCommitSliceIter(cm []*Commit, h []hash.Hash) *CommitSliceIter {
+	return &CommitSliceIter{cm: cm, h: h}
+}
+
+type CommitSliceIter struct {
+	h  []hash.Hash
+	cm []*Commit
+	i  int
+}
+
+var _ CommitItr = (*CommitSliceIter)(nil)
+
+func (i *CommitSliceIter) Next(ctx context.Context) (hash.Hash, *OptionalCommit, error) {
+	if i.i >= len(i.h) {
+		return hash.Hash{}, nil, io.EOF
+	}
+	i.i++
+	return i.h[i.i-1], &OptionalCommit{i.cm[i.i-1], i.h[i.i-1]}, nil
+
+}
+
+func (i *CommitSliceIter) Reset(ctx context.Context) error {
+	i.i = 0
+	return nil
+}
+
+func NewOneCommitIter(cm *Commit, h hash.Hash, meta *datas.CommitMeta) *OneCommitIter {
+	return &OneCommitIter{cm: &OptionalCommit{cm, h}, h: h}
+}
+
+type OneCommitIter struct {
+	h    hash.Hash
+	cm   *OptionalCommit
+	m    *datas.CommitMeta
+	done bool
+}
+
+var _ CommitItr = (*OneCommitIter)(nil)
+
+func (i *OneCommitIter) Next(_ context.Context) (hash.Hash, *OptionalCommit, error) {
+	if i.done {
+		return hash.Hash{}, nil, io.EOF
+	}
+	i.done = true
+	return i.h, i.cm, nil
+
+}
+
+func (i *OneCommitIter) Reset(_ context.Context) error {
+	i.done = false
+	return nil
+}
+
+func NewCommitPart(h hash.Hash, cm *Commit, m *datas.CommitMeta) *CommitPart {
+	return &CommitPart{h: h, cm: cm, m: m}
+}
+
+type CommitPart struct {
+	h  hash.Hash
+	m  *datas.CommitMeta
+	cm *Commit
+}
+
+var _ sql.Partition = (*CommitPart)(nil)
+
+func (c *CommitPart) Hash() hash.Hash {
+	return c.h
+}
+
+func (c *CommitPart) Commit() *Commit {
+	return c.cm
+}
+
+func (c *CommitPart) Meta() *datas.CommitMeta {
+	return c.m
+}
+
+func (c *CommitPart) Key() []byte {
+	return c.h[:]
+}
+
+func NewCommitSlicePartitionIter(h []hash.Hash, cm []*Commit, m []*datas.CommitMeta) *CommitSlicePartitionIter {
+	return &CommitSlicePartitionIter{h: h, cm: cm, m: m}
+}
+
+type CommitSlicePartitionIter struct {
+	h  []hash.Hash
+	m  []*datas.CommitMeta
+	cm []*Commit
+	i  int
+}
+
+var _ sql.PartitionIter = (*CommitSlicePartitionIter)(nil)
+
+func (i *CommitSlicePartitionIter) Next(ctx *sql.Context) (sql.Partition, error) {
+	if i.i >= len(i.cm) {
+		return nil, io.EOF
+	}
+	i.i++
+	return &CommitPart{h: i.h[i.i-1], m: i.m[i.i-1], cm: i.cm[i.i-1]}, nil
+
+}
+
+func (i *CommitSlicePartitionIter) Close(ctx *sql.Context) error {
+	return nil
 }

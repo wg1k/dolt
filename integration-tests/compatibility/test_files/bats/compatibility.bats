@@ -92,7 +92,7 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "${lines[1]}" =~ "| pk | a    | b   | x | y   |" ]] || false
     [[ "${lines[2]}" =~ "+----+------+-----+---+-----+" ]] || false
-    [[ "${lines[3]}" =~ "| 0  | asdf | 1.1 | 0 | 121 |" ]] || false
+    [[ "${lines[3]}" =~ "| 0  | asdf | 1.1 | 1 | 121 |" ]] || false
     [[ "${lines[4]}" =~ "| 2  | asdf | 1.1 | 0 | 121 |" ]] || false
     [[ "${lines[5]}" =~ "| 3  | data | 1.1 | 0 | 121 |" ]] || false
 }
@@ -119,37 +119,53 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "${lines[1]}" =~ "| pk | a    | b   | w | z   |" ]] || false
     [[ "${lines[2]}" =~ "+----+------+-----+---+-----+" ]] || false
-    [[ "${lines[3]}" =~ "| 0  | asdf | 1.1 | 0 | 122 |" ]] || false
+    [[ "${lines[3]}" =~ "| 0  | asdf | 1.1 | 1 | 122 |" ]] || false
     [[ "${lines[4]}" =~ "| 1  | asdf | 1.1 | 0 | 122 |" ]] || false
     [[ "${lines[5]}" =~ "| 4  | data | 1.1 | 0 | 122 |" ]] || false
 
+    # This breaks because the newly-created working sets (created on repo load)
+    # don't match head on either branch because they add a feature version,
+    # which previous releases of Dolt did not have. This is only a problem in
+    # the case that someone clones a very, very old repository (2+ years)
+    # created before Dolt stored working sets in the database.
+    skip "Breaks working set stomp check"
     dolt checkout "$DEFAULT_BRANCH"
 }
 
 @test "dolt diff other" {
     dolt diff other
     run dolt diff other
+
+    # We can't quote the entire schema here because there was a change
+    # in collation output at some point in the past
+    EXPECTED_SCHEMA=$(cat <<'EOF'
+   `b` double,
+-  `w` bigint,
+-  `z` bigint,
++  `x` bigint,
++  `y` bigint,
+   PRIMARY KEY (`pk`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+EOF
+)
+
+    EXPECTED_DATA=$(cat <<'EOF'
++---+----+------+-----+------+------+------+------+
+|   | pk | a    | b   | w    | z    | x    | y    |
++---+----+------+-----+------+------+------+------+
+| < | 0  | asdf | 1.1 | 1    | 122  | NULL | NULL |
+| > | 0  | asdf | 1.1 | NULL | NULL | 1    | 121  |
+| - | 1  | asdf | 1.1 | 0    | 122  | NULL | NULL |
+| + | 2  | asdf | 1.1 | NULL | NULL | 0    | 121  |
+| + | 3  | data | 1.1 | NULL | NULL | 0    | 121  |
+| - | 4  | data | 1.1 | 0    | 122  | NULL | NULL |
++---+----+------+-----+------+------+------+------+
+EOF
+)
+
     [ "$status" -eq 0 ]
-    [[ "${lines[3]}"  =~ 'CREATE TABLE `abc` ('   ]] || false
-    [[ "${lines[4]}"  =~ "\`pk\` bigint NOT NULL" ]] || false
-    [[ "${lines[5]}"  =~ "\`a\` longtext"         ]] || false
-    [[ "${lines[6]}"  =~ "\`b\` double"           ]] || false
-    [[ "${lines[7]}"  =~ "-  \`w\` bigint"        ]] || false
-    [[ "${lines[8]}"  =~ "-  \`z\` bigint"        ]] || false
-    [[ "${lines[9]}"  =~ "+  \`x\` bigint"        ]] || false
-    [[ "${lines[10]}" =~ "+  \`y\` bigint"        ]] || false
-    [[ "${lines[11]}" =~ 'PRIMARY KEY (`pk`)'     ]] || false
-    [[ "${lines[12]}" =~ ")"                      ]] || false
-    [[ "${lines[13]}" =~ "+-----+----+------+-----+------+------+------+------+" ]] || false
-    [[ "${lines[14]}" =~ "|  <  | pk | a    | b   |      |      | w    | z    |" ]] || false
-    [[ "${lines[15]}" =~ "|  >  | pk | a    | b   | x    | y    |      |      |" ]] || false
-    [[ "${lines[16]}" =~ "+-----+----+------+-----+------+------+------+------+" ]] || false
-    [[ "${lines[17]}" =~ "|  <  | 0  | asdf | 1.1 | NULL | NULL | 0    | 122  |" ]] || false
-    [[ "${lines[18]}" =~ "|  >  | 0  | asdf | 1.1 | 0    | 121  | NULL | NULL |" ]] || false
-    [[ "${lines[19]}" =~ "|  -  | 1  | asdf | 1.1 | NULL | NULL | 0    | 122  |" ]] || false
-    [[ "${lines[20]}" =~ "|  +  | 2  | asdf | 1.1 | 0    | 121  | NULL | NULL |" ]] || false
-    [[ "${lines[21]}" =~ "|  +  | 3  | data | 1.1 | 0    | 121  | NULL | NULL |" ]] || false
-    [[ "${lines[22]}" =~ "|  -  | 4  | data | 1.1 | NULL | NULL | 0    | 122  |" ]] || false
+    [[ "$output" =~ "$EXPECTED_SCHEMA" ]] || false
+    [[ "$output" =~ "$EXPECTED_DATA" ]] || false
 }
 
 @test "big table" {
@@ -160,9 +176,9 @@ teardown() {
     dolt sql -q "DELETE FROM big WHERE pk IN (71, 331, 881)"
     run dolt diff
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "|  -  | 71  |" ]] || false
-    [[ "$output" =~ "|  -  | 331 |" ]] || false
-    [[ "$output" =~ "|  -  | 881 |" ]] || false
+    [[ "$output" =~ "| - | 71  |" ]] || false
+    [[ "$output" =~ "| - | 331 |" ]] || false
+    [[ "$output" =~ "| - | 881 |" ]] || false
 
     run dolt sql -q "SELECT count(*) FROM big;" -r csv
     [ "$status" -eq 0 ]
@@ -177,8 +193,10 @@ teardown() {
 }
 
 @test "dolt merge other into $DEFAULT_BRANCH" {
-    # throws a conflict
-    dolt merge other
+    run dolt merge other
+    [ $status -eq 1 ]
+    [[ $output =~ "Merge conflict in abc" ]] || false
+    [[ $output =~ "Automatic merge failed" ]] || false
 }
 
 @test "dolt table import" {
@@ -187,17 +205,4 @@ teardown() {
     [[ "$output" =~ "Import completed successfully." ]] || false
 
     dolt sql -q 'drop table abc2'
-}
-
-@test "dolt_schemas" {
-    run dolt sql -q "select * from dolt_schemas"
-    [ "$status" -eq 0 ]
-    [[ "${lines[1]}" =~ "| type | name  | fragment             |" ]] || false
-    [[ "${lines[2]}" =~ "+------+-------+----------------------+" ]] || false
-    [[ "${lines[3]}" =~ "| view | view1 | SELECT 2+2 FROM dual |" ]] || false
-    run dolt sql -q 'select * from view1'
-    [ "$status" -eq 0 ]
-    [[ "${lines[1]}" =~ "2+2" ]] || false
-    [[ "${lines[2]}" =~ "-----" ]] || false
-    [[ "${lines[3]}" =~ " 4 " ]] || false
 }

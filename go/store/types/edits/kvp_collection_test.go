@@ -31,7 +31,7 @@ func (coll *KVPCollection) String() string {
 	ctx := context.Background()
 
 	itr := coll.Iterator()
-	val, err := itr.Next()
+	val, err := itr.Next(ctx)
 	d.PanicIfError(err)
 
 	keys := make([]types.Value, coll.totalSize)
@@ -40,11 +40,11 @@ func (coll *KVPCollection) String() string {
 		keys[i], err = val.Key.Value(ctx)
 		d.PanicIfError(err)
 
-		val, err = itr.Next()
+		val, err = itr.Next(ctx)
 		d.PanicIfError(err)
 	}
 
-	tpl, err := types.NewTuple(types.Format_7_18, keys...)
+	tpl, err := types.NewTuple(coll.vr.Format(), keys...)
 	d.PanicIfError(err)
 
 	str, err := types.EncodedValue(ctx, tpl)
@@ -55,61 +55,66 @@ func (coll *KVPCollection) String() string {
 
 func TestKVPCollection(t *testing.T) {
 	rng := rand.New(rand.NewSource(0))
-	testKVPCollection(t, rng)
+	vrw := types.NewMemoryValueStore()
+	ctx := context.Background()
+	testKVPCollection(t, ctx, vrw, rng)
 
 	for i := 0; i < 64; i++ {
 		seed := time.Now().UnixNano()
 		t.Log(seed)
 		rng := rand.New(rand.NewSource(seed))
-		testKVPCollection(t, rng)
+		testKVPCollection(t, ctx, vrw, rng)
 	}
 }
 
 func TestKVPCollectionDestructiveMergeStable(t *testing.T) {
-	left := NewKVPCollection(types.Format_Default, types.KVPSlice{
+	vrw := types.NewMemoryValueStore()
+	ctx := context.Background()
+
+	left := NewKVPCollection(vrw, types.KVPSlice{
 		types.KVP{Key: types.Int(0)},
 		types.KVP{Key: types.Int(1)},
 		types.KVP{Key: types.Int(2)},
 	})
-	right := NewKVPCollection(types.Format_Default, types.KVPSlice{
+	right := NewKVPCollection(vrw, types.KVPSlice{
 		types.KVP{Key: types.Int(0), Val: types.Int(0)},
 		types.KVP{Key: types.Int(1), Val: types.Int(0)},
 		types.KVP{Key: types.Int(2), Val: types.Int(0)},
 	})
 	var err error
-	left, err = left.DestructiveMerge(right)
+	left, err = left.DestructiveMerge(ctx, right)
 	assert.NoError(t, err)
 	i := left.Iterator()
 	var v *types.KVP
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(0), v.Key)
 	assert.Nil(t, v.Val)
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(0), v.Key)
 	assert.NotNil(t, v.Val)
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(1), v.Key)
 	assert.Nil(t, v.Val)
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(1), v.Key)
 	assert.NotNil(t, v.Val)
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(2), v.Key)
 	assert.Nil(t, v.Val)
-	v, err = i.Next()
+	v, err = i.Next(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, types.Int(2), v.Key)
 	assert.NotNil(t, v.Val)
-	_, err = i.Next()
+	_, err = i.Next(ctx)
 	assert.Equal(t, io.EOF, err)
 }
 
-func testKVPCollection(t *testing.T, rng *rand.Rand) {
+func testKVPCollection(t *testing.T, ctx context.Context, vr types.ValueReader, rng *rand.Rand) {
 	const (
 		maxSize = 1024
 		minSize = 4
@@ -125,12 +130,12 @@ func testKVPCollection(t *testing.T, rng *rand.Rand) {
 	t.Log("num collections:", numColls, "- buffer size", size)
 
 	for i := 0; i < numColls; i++ {
-		colls[i] = createKVPColl(rng, size)
+		colls[i] = createKVPColl(vr, rng, size)
 	}
 
 	for len(colls) > 1 {
 		for i, coll := range colls {
-			inOrder, _, err := IsInOrder(NewItr(types.Format_7_18, coll))
+			inOrder, _, err := IsInOrder(ctx, vr, NewItr(vr, coll))
 			assert.NoError(t, err)
 			if !inOrder {
 				t.Fatal(i, "not in order")
@@ -145,7 +150,7 @@ func testKVPCollection(t *testing.T, rng *rand.Rand) {
 				s1 := colls[i].Size()
 				s2 := colls[j].Size()
 				//fmt.Print(colls[i].String(), "+", colls[j].String())
-				mergedColl, err := colls[i].DestructiveMerge(colls[j])
+				mergedColl, err := colls[i].DestructiveMerge(ctx, colls[j])
 				assert.NoError(t, err)
 
 				ms := mergedColl.Size()
@@ -162,7 +167,7 @@ func testKVPCollection(t *testing.T, rng *rand.Rand) {
 		colls = newColls
 	}
 
-	inOrder, numItems, err := IsInOrder(NewItr(types.Format_7_18, colls[0]))
+	inOrder, numItems, err := IsInOrder(ctx, vr, NewItr(vr, colls[0]))
 	assert.NoError(t, err)
 	if !inOrder {
 		t.Fatal("collection not in order")
@@ -171,14 +176,14 @@ func testKVPCollection(t *testing.T, rng *rand.Rand) {
 	}
 }
 
-func createKVPColl(rng *rand.Rand, size int) *KVPCollection {
+func createKVPColl(vr types.ValueReader, rng *rand.Rand, size int) *KVPCollection {
 	kvps := make(types.KVPSlice, size)
 
 	for i := 0; i < size; i++ {
 		kvps[i] = types.KVP{Key: types.Uint(rng.Uint64() % 10000), Val: types.NullValue}
 	}
 
-	types.SortWithErroringLess(types.KVPSort{Values: kvps, NBF: types.Format_7_18})
+	types.SortWithErroringLess(context.Background(), vr.Format(), types.KVPSort{Values: kvps})
 
-	return NewKVPCollection(types.Format_7_18, kvps)
+	return NewKVPCollection(vr, kvps)
 }

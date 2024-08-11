@@ -32,7 +32,8 @@ import (
 	"github.com/dolthub/dolt/go/store/hash"
 )
 
-type ValueInRange func(Value) (bool, error)
+// type ValueInRange func(Value) (bool, error)
+type ValueInRange func(context.Context, Value) (bool, bool, error)
 
 var ErrKeysNotOrdered = errors.New("streaming map keys not ordered")
 
@@ -68,7 +69,7 @@ func newMapChunker(nbf *NomsBinFormat, salt byte) sequenceSplitter {
 }
 
 func NewMap(ctx context.Context, vrw ValueReadWriter, kv ...Value) (Map, error) {
-	entries, err := buildMapData(vrw.Format(), kv)
+	entries, err := buildMapData(ctx, vrw, kv)
 
 	if err != nil {
 		return EmptyMap, err
@@ -158,7 +159,7 @@ LOOP:
 				k = v
 
 				if lastK != nil {
-					isLess, err := lastK.Less(vrw.Format(), k)
+					isLess, err := lastK.Less(ctx, vrw.Format(), k)
 					if err != nil {
 						return EmptyMap, err
 					}
@@ -203,8 +204,8 @@ func (m Map) Diff(ctx context.Context, last Map, changes chan<- ValueChanged) er
 // streaming approach, optimised for returning results early, but not
 // completing quickly.
 func (m Map) DiffLeftRight(ctx context.Context, last Map, changes chan<- ValueChanged) error {
-	trueFunc := func(Value) (bool, error) {
-		return true, nil
+	trueFunc := func(context.Context, Value) (bool, bool, error) {
+		return true, false, nil
 	}
 	return m.DiffLeftRightInRange(ctx, last, nil, trueFunc, changes)
 }
@@ -236,14 +237,6 @@ func (m Map) asSequence() sequence {
 // Value interface
 func (m Map) Value(ctx context.Context) (Value, error) {
 	return m, nil
-}
-
-func (m Map) WalkValues(ctx context.Context, cb ValueCallback) error {
-	err := iterAll(ctx, m, func(v Value, idx uint64) error {
-		return cb(v)
-	})
-
-	return err
 }
 
 func (m Map) firstOrLast(ctx context.Context, last bool) (Value, Value, error) {
@@ -521,7 +514,7 @@ func (m Map) Edit() *MapEditor {
 	return NewMapEditor(m)
 }
 
-func buildMapData(nbf *NomsBinFormat, values []Value) (mapEntrySlice, error) {
+func buildMapData(ctx context.Context, vr ValueReader, values []Value) (mapEntrySlice, error) {
 	if len(values) == 0 {
 		return mapEntrySlice{}, nil
 	}
@@ -531,7 +524,6 @@ func buildMapData(nbf *NomsBinFormat, values []Value) (mapEntrySlice, error) {
 	}
 	kvs := mapEntrySlice{
 		make([]mapEntry, len(values)/2),
-		nbf,
 	}
 
 	for i := 0; i < len(values); i += 2 {
@@ -543,10 +535,9 @@ func buildMapData(nbf *NomsBinFormat, values []Value) (mapEntrySlice, error) {
 
 	uniqueSorted := mapEntrySlice{
 		make([]mapEntry, 0, len(kvs.entries)),
-		nbf,
 	}
 
-	err := SortWithErroringLess(kvs)
+	err := SortWithErroringLess(ctx, vr.Format(), kvs)
 
 	if err != nil {
 		return mapEntrySlice{}, err
@@ -564,12 +555,11 @@ func buildMapData(nbf *NomsBinFormat, values []Value) (mapEntrySlice, error) {
 
 	return mapEntrySlice{
 		append(uniqueSorted.entries, last),
-		uniqueSorted.nbf,
 	}, nil
 }
 
 func makeMapLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
-	return func(level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
+	return func(ctx context.Context, level uint64, items []sequenceItem) (Collection, orderedKey, uint64, error) {
 		d.PanicIfFalse(level == 0)
 		mapData := make([]mapEntry, len(items))
 
@@ -578,7 +568,7 @@ func makeMapLeafChunkFn(vrw ValueReadWriter) makeChunkFn {
 			entry := v.(mapEntry)
 
 			if lastKey != nil {
-				isLess, err := lastKey.Less(vrw.Format(), entry.key)
+				isLess, err := lastKey.Less(ctx, vrw.Format(), entry.key)
 
 				if err != nil {
 					return nil, orderedKey{}, 0, err
@@ -634,7 +624,7 @@ func (m Map) HumanReadableString() string {
 }
 
 // VisitMapLevelOrder writes hashes of internal node chunks to a writer
-// delimited with a newline character and returns the number or chunks written and the total number of
+// delimited with a newline character and returns the number of chunks written and the total number of
 // bytes written or an error if encountered
 func VisitMapLevelOrder(m Map, cb func(h hash.Hash) (int64, error)) (int64, int64, error) {
 	chunkCount := int64(0)
@@ -767,7 +757,7 @@ func (m Map) IndexForKey(ctx context.Context, key Value) (int64, error) {
 	if metaSeq, ok := m.orderedSequence.(metaSequence); ok {
 		return indexForKeyWithinSubtree(ctx, orderedKey, metaSeq, m.valueReadWriter())
 	} else if leaf, ok := m.orderedSequence.(mapLeafSequence); ok {
-		leafIdx, err := leaf.search(orderedKey)
+		leafIdx, err := leaf.search(ctx, orderedKey)
 		if err != nil {
 			return 0, err
 		}
@@ -791,7 +781,7 @@ func indexForKeyWithinSubtree(ctx context.Context, key orderedKey, metaSeq metaS
 			return 0, err
 		}
 
-		isLess, err := key.Less(vrw.Format(), tupleKey)
+		isLess, err := key.Less(ctx, vrw.Format(), tupleKey)
 		if err != nil {
 			return 0, err
 		}
@@ -815,7 +805,7 @@ func indexForKeyWithinSubtree(ctx context.Context, key orderedKey, metaSeq metaS
 				}
 				return idx + subtreeIdx, nil
 			} else if leaf, ok := child.(mapLeafSequence); ok {
-				leafIdx, err := leaf.search(key)
+				leafIdx, err := leaf.search(ctx, key)
 				if err != nil {
 					return 0, err
 				}
@@ -828,4 +818,94 @@ func indexForKeyWithinSubtree(ctx context.Context, key orderedKey, metaSeq metaS
 	}
 
 	return idx, nil
+}
+
+// MapUnionConflictCB is a callback that is used to resolve a key collision.
+// Callers should pass a callback that returns the resolved value.
+type MapUnionConflictCB func(key Value, aValue Value, bValue Value) (Value, error)
+
+// UnionMaps unions |a| and |b|. Colliding keys are returned to |cb|. As
+// currently implemented, keys of |b| are inserted into |a|.
+func UnionMaps(ctx context.Context, a Map, b Map, cb MapUnionConflictCB) (Map, error) {
+	editor := NewMapEditor(a)
+
+	aIter, err := a.Iterator(ctx)
+	if err != nil {
+		return EmptyMap, nil
+	}
+	bIter, err := b.Iterator(ctx)
+	if err != nil {
+		return EmptyMap, nil
+	}
+
+	aKey, aVal, err := aIter.Next(ctx)
+	if err != nil {
+		return EmptyMap, nil
+	}
+	bKey, bVal, err := bIter.Next(ctx)
+	if err != nil {
+		return EmptyMap, nil
+	}
+
+	for aKey != nil && bKey != nil {
+
+		aLess, err := aKey.Less(ctx, a.format(), bKey)
+		if err != nil {
+			return EmptyMap, nil
+		}
+
+		if aLess {
+			// take from a (which we already have)
+			aKey, aVal, err = aIter.Next(ctx)
+			if err != nil {
+				return EmptyMap, nil
+			}
+			continue
+		}
+
+		if aKey.Equals(bKey) {
+			// collision, delegate behavior to caller
+			chosen, err := cb(aKey, aVal, bVal)
+			if err != nil {
+				return EmptyMap, nil
+			}
+			if !chosen.Equals(aVal) {
+				editor.Set(aKey, chosen)
+			}
+			// advance a and b
+			aKey, aVal, err = aIter.Next(ctx)
+			if err != nil {
+				return EmptyMap, nil
+			}
+			bKey, aVal, err = bIter.Next(ctx)
+			if err != nil {
+				return EmptyMap, nil
+			}
+			continue
+		}
+
+		// take from b
+		editor.Set(bKey, bVal)
+		bKey, bVal, err = bIter.Next(ctx)
+		if err != nil {
+			return EmptyMap, nil
+		}
+	}
+
+	if aKey == nil && bKey == nil {
+		return editor.Map(ctx)
+	}
+
+	if aKey == nil {
+		// |a| is finished, take rest from |b|.
+		for bKey != nil {
+			editor.Set(bKey, bVal)
+			bKey, bVal, err = bIter.Next(ctx)
+			if err != nil {
+				return EmptyMap, nil
+			}
+		}
+	}
+
+	return editor.Map(ctx)
 }

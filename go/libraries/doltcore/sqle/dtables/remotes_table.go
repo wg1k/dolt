@@ -15,23 +15,27 @@
 package dtables
 
 import (
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
+	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/index"
 )
+
+const remotesDefaultRowCount = 1
 
 var _ sql.Table = (*RemotesTable)(nil)
 var _ sql.UpdatableTable = (*RemotesTable)(nil)
 var _ sql.DeletableTable = (*RemotesTable)(nil)
 var _ sql.InsertableTable = (*RemotesTable)(nil)
 var _ sql.ReplaceableTable = (*RemotesTable)(nil)
+var _ sql.StatisticsTable = (*RemotesTable)(nil)
 
 // RemotesTable is a sql.Table implementation that implements a system table which shows the dolt remotes
 type RemotesTable struct {
@@ -41,6 +45,19 @@ type RemotesTable struct {
 // NewRemotesTable creates a RemotesTable
 func NewRemotesTable(_ *sql.Context, ddb *doltdb.DoltDB) sql.Table {
 	return &RemotesTable{ddb}
+}
+
+func (bt *RemotesTable) DataLength(ctx *sql.Context) (uint64, error) {
+	numBytesPerRow := schema.SchemaAvgLength(bt.Schema())
+	numRows, _, err := bt.RowCount(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return numBytesPerRow * numRows, nil
+}
+
+func (bt *RemotesTable) RowCount(_ *sql.Context) (uint64, bool, error) {
+	return remotesDefaultRowCount, false, nil
 }
 
 // Name is a sql.Table interface function which returns the name of the table which is defined by the constant
@@ -58,11 +75,16 @@ func (bt *RemotesTable) String() string {
 // Schema is a sql.Table interface function that gets the sql.Schema of the remotes system table
 func (bt *RemotesTable) Schema() sql.Schema {
 	return []*sql.Column{
-		{Name: "name", Type: sql.Text, Source: doltdb.RemotesTableName, PrimaryKey: true, Nullable: false},
-		{Name: "url", Type: sql.Text, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: false},
-		{Name: "fetch_specs", Type: sql.JSON, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: true},
-		{Name: "params", Type: sql.JSON, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: true},
+		{Name: "name", Type: types.Text, Source: doltdb.RemotesTableName, PrimaryKey: true, Nullable: false},
+		{Name: "url", Type: types.Text, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: false},
+		{Name: "fetch_specs", Type: types.JSON, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: true},
+		{Name: "params", Type: types.JSON, Source: doltdb.RemotesTableName, PrimaryKey: false, Nullable: true},
 	}
+}
+
+// Collation implements the sql.Table interface.
+func (bt *RemotesTable) Collation() sql.CollationID {
+	return sql.Collation_Default
 }
 
 // Partitions is a sql.Table interface function that returns a partition of the data.  Currently the data is unpartitioned.
@@ -99,12 +121,12 @@ func NewRemoteItr(ctx *sql.Context, ddb *doltdb.DoltDB) (*RemoteItr, error) {
 	if err != nil {
 		return nil, err
 	}
-	remotes := make([]env.Remote, len(remoteMap))
-	i := 0
-	for _, r := range remoteMap {
-		remotes[i] = r
-		i++
-	}
+	remotes := []env.Remote{}
+
+	remoteMap.Iter(func(key string, val env.Remote) bool {
+		remotes = append(remotes, val)
+		return true
+	})
 
 	return &RemoteItr{remotes, 0}, nil
 }
@@ -122,7 +144,16 @@ func (itr *RemoteItr) Next(*sql.Context) (sql.Row, error) {
 
 	remote := itr.remotes[itr.idx]
 
-	return sql.NewRow(remote.Name, remote.Url, remote.FetchSpecs, remote.Params), nil
+	fs, _, err := types.JSON.Convert(remote.FetchSpecs)
+	if err != nil {
+		return nil, err
+	}
+	params, _, err := types.JSON.Convert(remote.Params)
+	if err != nil {
+		return nil, err
+	}
+
+	return sql.NewRow(remote.Name, remote.Url, fs, params), nil
 }
 
 // Close closes the iterator.
@@ -163,107 +194,23 @@ type remoteWriter struct {
 	bt *RemotesTable
 }
 
-func validateRow(ctx *sql.Context, r sql.Row) (*env.Remote, error) {
-	name, ok := r[0].(string)
-	if !ok {
-		return nil, errors.New("invalid type for name")
-	}
-
-	url, ok := r[1].(string)
-	if !ok {
-		return nil, errors.New("invalid value type for url")
-	}
-
-	var fetchSpecs []string
-	if v, ok := r[2].(sql.JSONValue); ok {
-		fetchSpecsInterface, err := v.Unmarshall(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		fetchSpecs, ok = fetchSpecsInterface.Val.([]string)
-		if !ok {
-			return nil, errors.New("invalid value type for params json")
-		}
-	} else if v, ok := r[2].([]string); ok {
-		fetchSpecs = v
-	} else {
-		fetchSpecs = []string{"refs/heads/*:refs/remotes/" + name + "/*"}
-	}
-
-	var params map[string]string
-	if v, ok := r[3].(map[string]string); ok {
-		params = v
-	} else {
-		params = map[string]string{}
-	}
-
-	remote := env.Remote{Name: name, Url: url, FetchSpecs: fetchSpecs, Params: params}
-	return &remote, nil
-}
-
 // Insert inserts the row given, returning an error if it cannot. Insert will be called once for each row to process
 // for the insert operation, which may involve many rows. After all rows in an operation have been processed, Close
 // is called.
 func (bWr remoteWriter) Insert(ctx *sql.Context, r sql.Row) error {
-	dbName := ctx.GetCurrentDatabase()
-
-	if len(dbName) == 0 {
-		return fmt.Errorf("Empty database name.")
-	}
-
-	sess := dsess.DSessFromSess(ctx.Session)
-	dbData, ok := sess.GetDbData(ctx, dbName)
-	if !ok {
-		return sql.ErrDatabaseNotFound.New(dbName)
-	}
-
-	remote, err := validateRow(ctx, r)
-
-	if err != nil {
-		return err
-	}
-
-	err = dbData.Rsw.AddRemote(remote.Name, remote.Url, remote.FetchSpecs, remote.Params)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return fmt.Errorf("the dolt_remotes table is read-only; use the dolt_remote stored procedure to edit remotes")
 }
 
 // Update the given row. Provides both the old and new rows.
 func (bWr remoteWriter) Update(ctx *sql.Context, old sql.Row, new sql.Row) error {
-	return bWr.Insert(ctx, new)
+	return fmt.Errorf("the dolt_remotes table is read-only; use the dolt_remote stored procedure to edit remotes")
 }
 
 // Delete deletes the given row. Returns ErrDeleteRowNotFound if the row was not found. Delete will be called once for
 // each row to process for the delete operation, which may involve many rows. After all rows have been processed,
 // Close is called.
 func (bWr remoteWriter) Delete(ctx *sql.Context, r sql.Row) error {
-	remote, err := validateRow(ctx, r)
-
-	if err != nil {
-		return err
-	}
-	dbName := ctx.GetCurrentDatabase()
-
-	if len(dbName) == 0 {
-		return fmt.Errorf("Empty database name.")
-	}
-
-	sess := dsess.DSessFromSess(ctx.Session)
-	dbData, ok := sess.GetDbData(ctx, dbName)
-	if !ok {
-		return sql.ErrDatabaseNotFound.New(dbName)
-	}
-
-	err = dbData.Rsw.RemoveRemote(ctx, remote.Name)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return fmt.Errorf("the dolt_remotes table is read-only; use the dolt_remote stored procedure to edit remotes")
 }
 
 // StatementBegin implements the interface sql.TableEditor. Currently a no-op.

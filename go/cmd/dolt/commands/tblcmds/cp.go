@@ -51,14 +51,13 @@ func (cmd CpCmd) Description() string {
 	return "Copies a table"
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd CpCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd CpCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, tblCpDocs, ap))
+	return cli.NewCommandDocumentation(tblCpDocs, ap)
 }
 
 func (cmd CpCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 2)
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"oldtable", "The table being copied."})
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"newtable", "The destination where the table is being copied to."})
 	ap.SupportsFlag(forceParam, "f", "If data already exists in the destination, the force flag will allow the target to be overwritten.")
@@ -71,9 +70,9 @@ func (cmd CpCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd CpCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd CpCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, tblCpDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, tblCpDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	if apr.NArg() != 2 {
@@ -92,8 +91,7 @@ func (cmd CpCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 
 	cli.CliOut = io.Discard // display nothing on success
 	return commands.SqlCmd{}.Exec(ctx, "", []string{
-		fmt.Sprintf("--%s", commands.BatchFlag),
 		fmt.Sprintf(`--%s`, commands.QueryFlag),
 		queryStr,
-	}, dEnv)
+	}, dEnv, cliCtx)
 }
