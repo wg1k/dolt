@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dolthub/go-mysql-server/sql"
+
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
@@ -36,11 +38,11 @@ type sessionedTableEditor struct {
 
 var _ editor.TableEditor = &sessionedTableEditor{}
 
-func (ste *sessionedTableEditor) GetIndexedRows(ctx context.Context, key types.Tuple, indexName string, idxSch schema.Schema) ([]row.Row, error) {
+func (ste *sessionedTableEditor) GetIndexedRows(ctx *sql.Context, key types.Tuple, indexName string, idxSch schema.Schema) ([]row.Row, error) {
 	return ste.tableEditor.GetIndexedRows(ctx, key, indexName, idxSch)
 }
 
-func (ste *sessionedTableEditor) InsertKeyVal(ctx context.Context, key, val types.Tuple, tagToVal map[uint64]types.Value, errFunc editor.PKDuplicateErrFunc) error {
+func (ste *sessionedTableEditor) InsertKeyVal(ctx context.Context, key, val types.Tuple, tagToVal map[uint64]types.Value, errFunc editor.PKDuplicateCb) error {
 	ste.tableEditSession.mut.RLock()
 	defer ste.tableEditSession.mut.RUnlock()
 
@@ -57,7 +59,7 @@ func (ste *sessionedTableEditor) DeleteByKey(ctx context.Context, key types.Tupl
 }
 
 // InsertRow adds the given row to the table. If the row already exists, use UpdateRow.
-func (ste *sessionedTableEditor) InsertRow(ctx context.Context, dRow row.Row, errFunc editor.PKDuplicateErrFunc) error {
+func (ste *sessionedTableEditor) InsertRow(ctx context.Context, dRow row.Row, errFunc editor.PKDuplicateCb) error {
 	ste.tableEditSession.mut.RLock()
 	defer ste.tableEditSession.mut.RUnlock()
 
@@ -76,7 +78,7 @@ func (ste *sessionedTableEditor) DeleteRow(ctx context.Context, r row.Row) error
 
 // UpdateRow takes the current row and new row, and updates it accordingly. Any applicable rows from tables that have a
 // foreign key referencing this table will also be updated.
-func (ste *sessionedTableEditor) UpdateRow(ctx context.Context, dOldRow row.Row, dNewRow row.Row, errFunc editor.PKDuplicateErrFunc) error {
+func (ste *sessionedTableEditor) UpdateRow(ctx context.Context, dOldRow row.Row, dNewRow row.Row, errFunc editor.PKDuplicateCb) error {
 	ste.tableEditSession.mut.RLock()
 	defer ste.tableEditSession.mut.RUnlock()
 
@@ -100,7 +102,7 @@ func (ste *sessionedTableEditor) MarkDirty() {
 }
 
 // Table implements TableEditor.
-func (ste *sessionedTableEditor) Table(ctx context.Context) (*doltdb.Table, error) {
+func (ste *sessionedTableEditor) Table(ctx *sql.Context) (*doltdb.Table, error) {
 	ws, err := ste.tableEditSession.Flush(ctx)
 	if err != nil {
 		return nil, err
@@ -108,7 +110,7 @@ func (ste *sessionedTableEditor) Table(ctx context.Context) (*doltdb.Table, erro
 	root := ws.WorkingRoot()
 
 	name := ste.tableEditor.Name()
-	tbl, ok, err := root.GetTable(ctx, name)
+	tbl, ok, err := root.GetTable(ctx, doltdb.TableName{Name: name})
 	if !ok {
 		return nil, fmt.Errorf("edit session failed to flush table %s", name)
 	}

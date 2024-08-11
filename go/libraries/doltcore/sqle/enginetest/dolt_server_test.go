@@ -15,229 +15,112 @@
 package enginetest
 
 import (
-	"context"
-	gosql "database/sql"
-	"math/rand"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/dolthub/go-mysql-server/enginetest/queries"
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/gocraft/dbr/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/commands/sqlserver"
-	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 )
-
-// DoltBranchMultiSessionScriptTests contain tests that need to be run in a multi-session server environment
-// in order to fully test branch deletion and renaming logic.
-var DoltBranchMultiSessionScriptTests = []queries.ScriptTest{
-	{
-		Name: "Test multi-session behavior for deleting branches",
-		SetUpScript: []string{
-			"call dolt_branch('branch1');",
-			"call dolt_branch('branch2');",
-			"call dolt_branch('branch3');",
-		},
-		Assertions: []queries.ScriptTestAssertion{
-			{
-				Query:    "/* client a */ CALL DOLT_CHECKOUT('branch1');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:    "/* client a */ select active_branch();",
-				Expected: []sql.Row{{"branch1"}},
-			},
-			{
-				Query:          "/* client b */ CALL DOLT_BRANCH('-d', 'branch1');",
-				ExpectedErrStr: "Error 1105: unsafe to delete or rename branches in use in other sessions; use --force to force the change",
-			},
-			{
-				Query:    "/* client a */ CALL DOLT_CHECKOUT('branch2');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:    "/* client b */ CALL DOLT_BRANCH('-d', 'branch1');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:          "/* client b */ CALL DOLT_BRANCH('-d', 'branch2');",
-				ExpectedErrStr: "Error 1105: unsafe to delete or rename branches in use in other sessions; use --force to force the change",
-			},
-			{
-				Query:    "/* client b */ CALL DOLT_BRANCH('-df', 'branch2');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:    "/* client b */ CALL DOLT_BRANCH('-d', 'branch3');",
-				Expected: []sql.Row{{0}},
-			},
-		},
-	},
-	{
-		Name: "Test multi-session behavior for renaming branches",
-		SetUpScript: []string{
-			"call dolt_branch('branch1');",
-			"call dolt_branch('branch2');",
-		},
-		Assertions: []queries.ScriptTestAssertion{
-			{
-				Query:    "/* client a */ CALL DOLT_CHECKOUT('branch1');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:    "/* client a */ select active_branch();",
-				Expected: []sql.Row{{"branch1"}},
-			},
-			{
-				Query:          "/* client b */ CALL DOLT_BRANCH('-m', 'branch1', 'movedBranch1');",
-				ExpectedErrStr: "Error 1105: unsafe to delete or rename branches in use in other sessions; use --force to force the change",
-			},
-			{
-				Query:    "/* client b */ CALL DOLT_BRANCH('-mf', 'branch1', 'movedBranch1');",
-				Expected: []sql.Row{{0}},
-			},
-			{
-				Query:    "/* client b */ CALL DOLT_BRANCH('-m', 'branch2', 'movedBranch2');",
-				Expected: []sql.Row{{0}},
-			},
-		},
-	},
-}
 
 // TestDoltMultiSessionBehavior runs tests that exercise multi-session logic on a running SQL server. Statements
 // are sent through the server, from out of process, instead of directly to the in-process engine API.
 func TestDoltMultiSessionBehavior(t *testing.T) {
-	// When this test runs with the new storage engine format, we get a panic about an unknown message id.
-	// Ex: https://github.com/dolthub/dolt/runs/6679643619?check_suite_focus=true
-	skipNewFormat(t)
-
 	testMultiSessionScriptTests(t, DoltBranchMultiSessionScriptTests)
 }
 
-func testMultiSessionScriptTests(t *testing.T, tests []queries.ScriptTest) {
-	sc, serverConfig := startServer(t)
-	defer sc.StopServer()
-
-	for _, test := range tests {
-		conn1, sess1 := newConnection(t, serverConfig)
-		conn2, sess2 := newConnection(t, serverConfig)
-
-		t.Run(test.Name, func(t *testing.T) {
-			for _, setupStatement := range test.SetUpScript {
-				_, err := sess1.Exec(setupStatement)
-				require.NoError(t, err)
-			}
-
-			for _, assertion := range test.Assertions {
-				t.Run(assertion.Query, func(t *testing.T) {
-					var activeSession *dbr.Session
-					if strings.Contains(strings.ToLower(assertion.Query), "/* client a */") {
-						activeSession = sess1
-					} else if strings.Contains(strings.ToLower(assertion.Query), "/* client b */") {
-						activeSession = sess2
-					} else {
-						require.Fail(t, "unsupported client specification: "+assertion.Query)
-					}
-
-					rows, err := activeSession.Query(assertion.Query)
-
-					if len(assertion.ExpectedErrStr) > 0 {
-						require.EqualError(t, err, assertion.ExpectedErrStr)
-					} else if assertion.ExpectedErr != nil {
-						require.True(t, assertion.ExpectedErr.Is(err))
-					} else if assertion.Expected != nil {
-						require.NoError(t, err)
-						assertResultsEqual(t, assertion.Expected, rows)
-					} else {
-						require.Fail(t, "unsupported ScriptTestAssertion property: %v", assertion)
-					}
-					if rows != nil {
-						require.NoError(t, rows.Close())
-					}
-				})
-			}
-		})
-
-		require.NoError(t, conn1.Close())
-		require.NoError(t, conn2.Close())
-	}
+// TestDropDatabaseMultiSessionBehavior tests that dropping a database from one session correctly updates state
+// in other sessions.
+func TestDropDatabaseMultiSessionBehavior(t *testing.T) {
+	testMultiSessionScriptTests(t, DropDatabaseMultiSessionScriptTests)
 }
 
-func makeDestinationSlice(t *testing.T, columnTypes []*gosql.ColumnType) []interface{} {
-	dest := make([]any, len(columnTypes))
-	for i, columnType := range columnTypes {
-		switch strings.ToLower(columnType.DatabaseTypeName()) {
-		case "int", "tinyint", "bigint":
-			var integer int
-			dest[i] = &integer
-		case "text":
-			var s string
-			dest[i] = &s
-		default:
-			require.Fail(t, "unsupported type: "+columnType.DatabaseTypeName())
-		}
-	}
-
-	return dest
+// TestPersistVariable tests persisting variables across server starts
+func TestPersistVariable(t *testing.T) {
+	testSerialSessionScriptTests(t, PersistVariableTests)
 }
 
-func assertResultsEqual(t *testing.T, expected []sql.Row, rows *gosql.Rows) {
-	columnTypes, err := rows.ColumnTypes()
+func TestDoltServerRunningUnixSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets not supported on Windows")
+	}
+	const defaultUnixSocketPath = "/tmp/mysql.sock"
+
+	// Running unix socket server
+	dEnv, sc, serverConfig := startServer(t, false, "", defaultUnixSocketPath)
+	sc.WaitForStart()
+	defer dEnv.DoltDB.Close()
+	require.True(t, strings.Contains(servercfg.ConnectionString(serverConfig, "dolt"), "unix"))
+
+	// default unix socket connection works
+	localConn, localSess := newConnection(t, serverConfig)
+	rows, err := localSess.Query("select 1")
 	require.NoError(t, err)
-	dest := makeDestinationSlice(t, columnTypes)
+	assertResultsEqual(t, []sql.Row{{1}}, rows)
 
-	for _, expectedRow := range expected {
-		ok := rows.Next()
-		if !ok {
-			require.Fail(t, "Fewer results than expected")
-		}
-		err := rows.Scan(dest...)
+	t.Run("connecting to local server with tcp connections", func(t *testing.T) {
+		// connect with port defined
+		serverConfigWithPortOnly := sqlserver.DefaultCommandLineServerConfig().WithPort(3306)
+		conn1, sess1 := newConnection(t, serverConfigWithPortOnly)
+		rows1, err := sess1.Query("select 1")
 		require.NoError(t, err)
-		require.Equal(t, len(expectedRow), len(dest),
-			"Different number of columns returned than expected")
+		assertResultsEqual(t, []sql.Row{{1}}, rows1)
 
-		for j, expectedValue := range expectedRow {
-			switch strings.ToUpper(columnTypes[j].DatabaseTypeName()) {
-			case "TEXT":
-				actualValue, ok := dest[j].(*string)
-				require.True(t, ok)
-				require.Equal(t, expectedValue, *actualValue)
-			case "INT", "TINYINT", "BIGINT":
-				actualValue, ok := dest[j].(*int)
-				require.True(t, ok)
-				require.Equal(t, expectedValue, *actualValue)
-			default:
-				require.Fail(t, "Unsupported datatype: %s", columnTypes[j].DatabaseTypeName())
-			}
-		}
-	}
+		// connect with host defined
+		serverConfigWithPortandHost := sqlserver.DefaultCommandLineServerConfig().WithHost("127.0.0.1")
+		conn2, sess2 := newConnection(t, serverConfigWithPortandHost)
+		rows2, err := sess2.Query("select 1")
+		require.NoError(t, err)
+		assertResultsEqual(t, []sql.Row{{1}}, rows2)
 
-	if rows.Next() {
-		require.Fail(t, "More results than expected")
-	}
-}
+		// connect with port and host defined
+		serverConfigWithPortandHost1 := sqlserver.DefaultCommandLineServerConfig().WithPort(3306).WithHost("0.0.0.0")
+		conn3, sess3 := newConnection(t, serverConfigWithPortandHost1)
+		rows3, err := sess3.Query("select 1")
+		require.NoError(t, err)
+		assertResultsEqual(t, []sql.Row{{1}}, rows3)
 
-func startServer(t *testing.T) (*sqlserver.ServerController, sqlserver.ServerConfig) {
-	dEnv := dtestutils.CreateEnvWithSeedData(t)
-	port := 15403 + rand.Intn(25)
-	serverConfig := sqlserver.DefaultServerConfig().WithPort(port)
+		// close connections
+		require.NoError(t, conn3.Close())
+		require.NoError(t, conn2.Close())
+		require.NoError(t, conn1.Close())
+	})
 
-	sc := sqlserver.NewServerController()
-	go func() {
-		_, _ = sqlserver.Serve(context.Background(), "", serverConfig, sc, dEnv)
-	}()
-	err := sc.WaitForStart()
+	require.NoError(t, localConn.Close())
+
+	// Stopping unix socket server
+	sc.Stop()
+	err = sc.WaitForStop()
 	require.NoError(t, err)
+	require.NoFileExists(t, defaultUnixSocketPath)
 
-	return sc, serverConfig
-}
+	// Running TCP socket server
+	dEnv, tcpSc, tcpServerConfig := startServer(t, true, "0.0.0.0", "")
+	tcpSc.WaitForStart()
+	defer dEnv.DoltDB.Close()
+	require.False(t, strings.Contains(servercfg.ConnectionString(tcpServerConfig, "dolt"), "unix"))
 
-func newConnection(t *testing.T, serverConfig sqlserver.ServerConfig) (*dbr.Connection, *dbr.Session) {
-	const dbName = "dolt"
-	conn, err := dbr.Open("mysql", sqlserver.ConnectionString(serverConfig)+dbName, nil)
+	t.Run("host and port specified, there should not be unix socket created", func(t *testing.T) {
+		// unix socket connection should fail
+		localServerConfig := sqlserver.DefaultCommandLineServerConfig().WithSocket(defaultUnixSocketPath)
+		conn, sess := newConnection(t, localServerConfig)
+		_, err := sess.Query("select 1")
+		require.Error(t, err)
+		require.NoError(t, conn.Close())
+
+		// connection with the host and port define should work
+		conn1, sess1 := newConnection(t, tcpServerConfig)
+		rows1, err := sess1.Query("select 1")
+		require.NoError(t, err)
+		assertResultsEqual(t, []sql.Row{{1}}, rows1)
+		require.NoError(t, conn1.Close())
+	})
+
+	// Stopping TCP socket server
+	tcpSc.Stop()
+	err = tcpSc.WaitForStop()
 	require.NoError(t, err)
-	sess := conn.NewSession(nil)
-	return conn, sess
 }

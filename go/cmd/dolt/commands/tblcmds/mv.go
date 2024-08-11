@@ -17,7 +17,6 @@ package tblcmds
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands"
@@ -38,7 +37,7 @@ in a new table and a deleted table in the working set. These changes can be stag
 using {{.EmphasisLeft}}dolt commit{{.EmphasisRight}}.`,
 
 	Synopsis: []string{
-		"[-f] {{.LessThan}}oldtable{{.EmphasisRight}} {{.LessThan}}newtable{{.EmphasisRight}}",
+		"[-f] {{.LessThan}}oldtable{{.GreaterThan}} {{.LessThan}}newtable{{.GreaterThan}}",
 	},
 }
 
@@ -54,14 +53,13 @@ func (cmd MvCmd) Description() string {
 	return "Moves a table"
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd MvCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd MvCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, tblMvDocs, ap))
+	return cli.NewCommandDocumentation(tblMvDocs, ap)
 }
 
 func (cmd MvCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 2)
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"oldtable", "The table being moved."})
 	ap.ArgListHelp = append(ap.ArgListHelp, [2]string{"newtable", "The new name of the table"})
 	ap.SupportsFlag(forceParam, "f", "If data already exists in the destination, the force flag will allow the target to be overwritten.")
@@ -74,9 +72,9 @@ func (cmd MvCmd) EventType() eventsapi.ClientEventType {
 }
 
 // Exec executes the command
-func (cmd MvCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd MvCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, tblMvDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, tblMvDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
 	if apr.NArg() != 2 {
@@ -86,6 +84,7 @@ func (cmd MvCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 
 	oldName := apr.Arg(0)
 	newName := apr.Arg(1)
+
 	queryStr := ""
 	if force := apr.Contains(forceParam); force {
 		queryStr = fmt.Sprintf("DROP TABLE IF EXISTS `%s`;", newName)
@@ -93,8 +92,7 @@ func (cmd MvCmd) Exec(ctx context.Context, commandStr string, args []string, dEn
 	queryStr = fmt.Sprintf("%sRENAME TABLE `%s` TO `%s`;", queryStr, oldName, newName)
 
 	return commands.SqlCmd{}.Exec(ctx, "", []string{
-		fmt.Sprintf("--%s", commands.BatchFlag),
 		fmt.Sprintf(`--%s`, commands.QueryFlag),
 		queryStr,
-	}, dEnv)
+	}, dEnv, cliCtx)
 }

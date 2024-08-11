@@ -16,54 +16,17 @@ package sqlutil
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
-	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	// Necessary for the empty context used by some functions to be initialized with system vars
+	_ "github.com/dolthub/go-mysql-server/sql/variables"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
-	"github.com/dolthub/dolt/go/libraries/doltcore/table/typed/noms"
 	"github.com/dolthub/dolt/go/store/types"
 )
-
-type mapSqlIter struct {
-	ctx context.Context
-	nmr *noms.NomsMapReader
-	sch schema.Schema
-}
-
-var _ sql.RowIter = (*mapSqlIter)(nil)
-
-// Next implements the interface sql.RowIter.
-func (m *mapSqlIter) Next(ctx *sql.Context) (sql.Row, error) {
-	dRow, err := m.nmr.ReadRow(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return DoltRowToSqlRow(dRow, m.sch)
-}
-
-// Close implements the interface sql.RowIter.
-func (m *mapSqlIter) Close(ctx *sql.Context) error {
-	return m.nmr.Close(ctx)
-}
-
-// MapToSqlIter returns a map reader that converts all rows to sql rows, creating a sql row iterator.
-func MapToSqlIter(ctx context.Context, sch schema.Schema, data types.Map) (sql.RowIter, error) {
-	mapReader, err := noms.NewNomsMapReader(ctx, data, sch)
-	if err != nil {
-		return nil, err
-	}
-	return &mapSqlIter{
-		nmr: mapReader,
-		sch: sch,
-	}, nil
-}
 
 // DoltRowToSqlRow constructs a go-mysql-server sql.Row from a Dolt row.Row.
 func DoltRowToSqlRow(doltRow row.Row, sch schema.Schema) (sql.Row, error) {
@@ -181,7 +144,7 @@ func DoltKeyAndMappingFromSqlRow(ctx context.Context, vrw types.ValueReadWriter,
 	}
 
 	for i := 0; i < numCols; i++ {
-		schCol := allCols.GetAtIndex(i)
+		schCol := allCols.GetByIndex(i)
 		val := r[i]
 		if val == nil {
 			continue
@@ -256,125 +219,38 @@ func keylessDoltRowFromSqlRow(ctx context.Context, vrw types.ValueReadWriter, sq
 	return row.KeylessRow(vrw.Format(), vals[:j]...)
 }
 
-// WriteEWKBHeader writes the SRID, endianness, and type to the byte buffer
-// This function assumes v is a valid spatial type
-func WriteEWKBHeader(v interface{}, buf []byte) {
-	// Write endianness byte (always little endian)
-	buf[4] = 1
+// The Type.SQL() call takes in a SQL context to determine the output character set for types that use a collation.
+// As the SqlColToStr utility function is primarily used in places where no SQL context is available (such as commands
+// on the CLI), we force the `utf8mb4` character set to be used, as it is the most likely to be supported by the
+// destination. `utf8mb4` is the default character set for empty contexts, so we don't need to explicitly set it.
+var sqlColToStrContext = sql.NewEmptyContext()
 
-	// Parse data
-	switch v := v.(type) {
-	case sql.Point:
-		// Write SRID and type
-		binary.LittleEndian.PutUint32(buf[0:4], v.SRID)
-		binary.LittleEndian.PutUint32(buf[5:9], 1)
-	case sql.LineString:
-		binary.LittleEndian.PutUint32(buf[0:4], v.SRID)
-		binary.LittleEndian.PutUint32(buf[5:9], 2)
-	case sql.Polygon:
-		binary.LittleEndian.PutUint32(buf[0:4], v.SRID)
-		binary.LittleEndian.PutUint32(buf[5:9], 3)
-	}
-}
-
-// WriteEWKBPointData converts a Point into a byte array in EWKB format
-// Very similar to function in GMS
-func WriteEWKBPointData(p sql.Point, buf []byte) {
-	binary.LittleEndian.PutUint64(buf[0:8], math.Float64bits(p.X))
-	binary.LittleEndian.PutUint64(buf[8:16], math.Float64bits(p.Y))
-}
-
-// WriteEWKBLineData converts a Line into a byte array in EWKB format
-func WriteEWKBLineData(l sql.LineString, buf []byte) {
-	// Write length of linestring
-	binary.LittleEndian.PutUint32(buf[:4], uint32(len(l.Points)))
-	// Append each point
-	for i, p := range l.Points {
-		WriteEWKBPointData(p, buf[4+16*i:4+16*(i+1)])
-	}
-}
-
-// WriteEWKBPolyData converts a Polygon into a byte array in EWKB format
-func WriteEWKBPolyData(p sql.Polygon, buf []byte) {
-	// Write length of polygon
-	binary.LittleEndian.PutUint32(buf[:4], uint32(len(p.Lines)))
-	// Write each line
-	start, stop := 0, 4
-	for _, l := range p.Lines {
-		start, stop = stop, stop+4+16*len(l.Points)
-		WriteEWKBLineData(l, buf[start:stop])
-	}
-}
-
-// SqlColToStr is a utility function for converting a sql column of type interface{} to a string
-func SqlColToStr(ctx context.Context, col interface{}) string {
+// SqlColToStr is a utility function for converting a sql column of type interface{} to a string.
+// NULL values are treated as empty strings. Handle nil separately if you require other behavior.
+func SqlColToStr(sqlType sql.Type, col interface{}) (string, error) {
 	if col != nil {
 		switch typedCol := col.(type) {
-		case int:
-			return strconv.FormatInt(int64(typedCol), 10)
-		case int32:
-			return strconv.FormatInt(int64(typedCol), 10)
-		case int64:
-			return strconv.FormatInt(int64(typedCol), 10)
-		case int16:
-			return strconv.FormatInt(int64(typedCol), 10)
-		case int8:
-			return strconv.FormatInt(int64(typedCol), 10)
-		case uint:
-			return strconv.FormatUint(uint64(typedCol), 10)
-		case uint32:
-			return strconv.FormatUint(uint64(typedCol), 10)
-		case uint64:
-			return strconv.FormatUint(uint64(typedCol), 10)
-		case uint16:
-			return strconv.FormatUint(uint64(typedCol), 10)
-		case uint8:
-			return strconv.FormatUint(uint64(typedCol), 10)
-		case float64:
-			return strconv.FormatFloat(float64(typedCol), 'g', -1, 64)
-		case float32:
-			return strconv.FormatFloat(float64(typedCol), 'g', -1, 32)
-		case string:
-			return typedCol
-		case []byte:
-			return string(typedCol)
 		case bool:
 			if typedCol {
-				return "true"
+				return "true", nil
 			} else {
-				return "false"
+				return "false", nil
 			}
-		case time.Time:
-			return typedCol.Format("2006-01-02 15:04:05.999999 -0700 MST")
-		case sql.Point:
-			buf := make([]byte, 25)
-			WriteEWKBHeader(typedCol, buf)
-			WriteEWKBPointData(typedCol, buf[9:])
-			return SqlColToStr(ctx, buf)
-		case sql.LineString:
-			buf := make([]byte, 9+4+16*len(typedCol.Points))
-			WriteEWKBHeader(typedCol, buf)
-			WriteEWKBLineData(typedCol, buf[9:])
-			return SqlColToStr(ctx, buf)
-		case sql.Polygon:
-			size := 0
-			for _, l := range typedCol.Lines {
-				size += 4 + 16*len(l.Points)
-			}
-			buf := make([]byte, 9+4+size)
-			WriteEWKBHeader(typedCol, buf)
-			WriteEWKBPolyData(typedCol, buf[9:])
-			return SqlColToStr(ctx, buf)
-		case sql.JSONValue:
-			s, err := typedCol.ToString(sql.NewContext(ctx))
+		case sql.SpatialColumnType:
+			res, err := sqlType.SQL(sqlColToStrContext, nil, col)
+			hexRes := fmt.Sprintf("0x%X", res.Raw())
 			if err != nil {
-				s = err.Error()
+				return "", err
 			}
-			return s
+			return hexRes, nil
 		default:
-			return fmt.Sprintf("no match: %v", typedCol)
+			res, err := sqlType.SQL(sqlColToStrContext, nil, col)
+			if err != nil {
+				return "", err
+			}
+			return res.ToString(), nil
 		}
 	}
 
-	return ""
+	return "", nil
 }

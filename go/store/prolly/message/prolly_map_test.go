@@ -16,11 +16,13 @@ package message
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dolt/go/store/pool"
+	"github.com/dolthub/dolt/go/store/val"
 )
 
 var sharedPool = pool.NewBuffPool()
@@ -29,19 +31,24 @@ func TestGetKeyValueOffsetsVectors(t *testing.T) {
 	for trial := 0; trial < 100; trial++ {
 		keys, values := randomByteSlices(t, (testRand.Int()%101)+50)
 		require.True(t, sumSize(keys)+sumSize(values) < MaxVectorOffset)
-		s := ProllyMapSerializer{Pool: sharedPool}
+		s := ProllyMapSerializer{valDesc: val.TupleDesc{}, pool: sharedPool}
 		msg := s.Serialize(keys, values, nil, 0)
 
 		// uses hard-coded vtable slot
-		keyBuf, valBuf, _ := getProllyMapKeysAndValues(msg)
+		keyBuf, valBuf, _, _, _ := getProllyMapKeysAndValues(msg)
 
 		for i := range keys {
-			assert.Equal(t, keys[i], keyBuf.GetSlice(i))
+			assert.Equal(t, keys[i], keyBuf.GetItem(i, msg))
 		}
 		for i := range values {
-			assert.Equal(t, values[i], valBuf.GetSlice(i))
+			assert.Equal(t, values[i], valBuf.GetItem(i, msg))
 		}
 	}
+}
+
+func TestItemAccessSize(t *testing.T) {
+	sz := unsafe.Sizeof(ItemAccess{})
+	assert.Equal(t, 10, int(sz))
 }
 
 func randomByteSlices(t *testing.T, count int) (keys, values [][]byte) {

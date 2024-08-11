@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
-	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
 	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
+	"github.com/dolthub/dolt/go/libraries/utils/concurrentmap"
 	"github.com/dolthub/dolt/go/libraries/utils/config"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/datas"
@@ -46,7 +46,6 @@ func NewMemoryDbData(ctx context.Context, cfg config.ReadableConfig) (DbData, er
 		Ddb: ddb,
 		Rsw: rs,
 		Rsr: rs,
-		Drw: rs,
 	}, nil
 }
 
@@ -57,7 +56,7 @@ func NewMemoryDoltDB(ctx context.Context, initBranch string) (*doltdb.DoltDB, er
 
 	m := "memory"
 	branchRef := ref.NewBranchRef(initBranch)
-	err := ddb.WriteEmptyRepoWithCommitTimeAndDefaultBranch(ctx, m, m, datas.CommitNowFunc(), branchRef)
+	err := ddb.WriteEmptyRepoWithCommitTimeAndDefaultBranch(ctx, m, m, datas.CommitterDate(), branchRef)
 	if err != nil {
 		return nil, err
 	}
@@ -102,28 +101,35 @@ type MemoryRepoState struct {
 
 var _ RepoStateReader = MemoryRepoState{}
 var _ RepoStateWriter = MemoryRepoState{}
-var _ DocsReadWriter = MemoryRepoState{}
 
-func (m MemoryRepoState) CWBHeadRef() ref.DoltRef {
-	return m.Head
+func (m MemoryRepoState) CWBHeadRef() (ref.DoltRef, error) {
+	return m.Head, nil
 }
 
-func (m MemoryRepoState) CWBHeadSpec() *doltdb.CommitSpec {
-	spec, err := doltdb.NewCommitSpec(m.CWBHeadRef().GetPath())
+func (m MemoryRepoState) CWBHeadSpec() (*doltdb.CommitSpec, error) {
+	headRef, err := m.CWBHeadRef()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return spec
+	spec, err := doltdb.NewCommitSpec(headRef.GetPath())
+	if err != nil {
+		return nil, err
+	}
+	return spec, nil
 }
 
-func (m MemoryRepoState) UpdateStagedRoot(ctx context.Context, newRoot *doltdb.RootValue) error {
+func (m MemoryRepoState) UpdateStagedRoot(ctx context.Context, newRoot doltdb.RootValue) error {
 	var h hash.Hash
 	var wsRef ref.WorkingSetRef
 
 	ws, err := m.WorkingSet(ctx)
 	if err == doltdb.ErrWorkingSetNotFound {
 		// first time updating root
-		wsRef, err = ref.WorkingSetRefForHead(m.CWBHeadRef())
+		headRef, err := m.CWBHeadRef()
+		if err != nil {
+			return err
+		}
+		wsRef, err = ref.WorkingSetRefForHead(headRef)
 		if err != nil {
 			return err
 		}
@@ -139,17 +145,21 @@ func (m MemoryRepoState) UpdateStagedRoot(ctx context.Context, newRoot *doltdb.R
 		wsRef = ws.Ref()
 	}
 
-	return m.DoltDB.UpdateWorkingSet(ctx, wsRef, ws.WithStagedRoot(newRoot), h, m.workingSetMeta())
+	return m.DoltDB.UpdateWorkingSet(ctx, wsRef, ws.WithStagedRoot(newRoot), h, m.workingSetMeta(), nil)
 }
 
-func (m MemoryRepoState) UpdateWorkingRoot(ctx context.Context, newRoot *doltdb.RootValue) error {
+func (m MemoryRepoState) UpdateWorkingRoot(ctx context.Context, newRoot doltdb.RootValue) error {
 	var h hash.Hash
 	var wsRef ref.WorkingSetRef
 
 	ws, err := m.WorkingSet(ctx)
 	if err == doltdb.ErrWorkingSetNotFound {
 		// first time updating root
-		wsRef, err = ref.WorkingSetRefForHead(m.CWBHeadRef())
+		headRef, err := m.CWBHeadRef()
+		if err != nil {
+			return err
+		}
+		wsRef, err = ref.WorkingSetRefForHead(headRef)
 		if err != nil {
 			return err
 		}
@@ -165,11 +175,15 @@ func (m MemoryRepoState) UpdateWorkingRoot(ctx context.Context, newRoot *doltdb.
 		wsRef = ws.Ref()
 	}
 
-	return m.DoltDB.UpdateWorkingSet(ctx, wsRef, ws.WithWorkingRoot(newRoot), h, m.workingSetMeta())
+	return m.DoltDB.UpdateWorkingSet(ctx, wsRef, ws.WithWorkingRoot(newRoot), h, m.workingSetMeta(), nil)
 }
 
 func (m MemoryRepoState) WorkingSet(ctx context.Context) (*doltdb.WorkingSet, error) {
-	workingSetRef, err := ref.WorkingSetRefForHead(m.CWBHeadRef())
+	headRef, err := m.CWBHeadRef()
+	if err != nil {
+		return nil, err
+	}
+	workingSetRef, err := ref.WorkingSetRefForHead(headRef)
 	if err != nil {
 		return nil, err
 	}
@@ -194,16 +208,16 @@ func (m MemoryRepoState) SetCWBHeadRef(_ context.Context, r ref.MarshalableRef) 
 	return
 }
 
-func (m MemoryRepoState) GetRemotes() (map[string]Remote, error) {
-	return make(map[string]Remote), nil
+func (m MemoryRepoState) GetRemotes() (*concurrentmap.Map[string, Remote], error) {
+	return concurrentmap.New[string, Remote](), nil
 }
 
-func (m MemoryRepoState) AddRemote(name string, url string, fetchSpecs []string, params map[string]string) error {
+func (m MemoryRepoState) AddRemote(r Remote) error {
 	return fmt.Errorf("cannot insert a remote in a memory database")
 }
 
-func (m MemoryRepoState) GetBranches() (map[string]BranchConfig, error) {
-	return make(map[string]BranchConfig), nil
+func (m MemoryRepoState) GetBranches() (*concurrentmap.Map[string, BranchConfig], error) {
+	return concurrentmap.New[string, BranchConfig](), nil
 }
 
 func (m MemoryRepoState) UpdateBranch(name string, new BranchConfig) error {
@@ -214,23 +228,15 @@ func (m MemoryRepoState) RemoveRemote(ctx context.Context, name string) error {
 	return fmt.Errorf("cannot delete a remote from a memory database")
 }
 
-func (m MemoryRepoState) TempTableFilesDir() string {
-	return os.TempDir()
+func (m MemoryRepoState) TempTableFilesDir() (string, error) {
+	return os.TempDir(), nil
 }
 
-func (m MemoryRepoState) GetDocsOnDisk(docNames ...string) (doltdocs.Docs, error) {
-	return nil, fmt.Errorf("cannot get docs from a memory database")
-}
-
-func (m MemoryRepoState) WriteDocsToDisk(docs doltdocs.Docs) error {
-	return fmt.Errorf("cannot write docs to a memory database")
-}
-
-func (m MemoryRepoState) GetBackups() (map[string]Remote, error) {
+func (m MemoryRepoState) GetBackups() (*concurrentmap.Map[string, Remote], error) {
 	panic("cannot get backups on in memory database")
 }
 
-func (m MemoryRepoState) AddBackup(name string, url string, fetchSpecs []string, params map[string]string) error {
+func (m MemoryRepoState) AddBackup(r Remote) error {
 	panic("cannot add backup to in memory database")
 }
 

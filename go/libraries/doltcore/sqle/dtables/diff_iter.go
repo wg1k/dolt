@@ -16,7 +16,6 @@ package dtables
 
 import (
 	"context"
-	"errors"
 	"io"
 	"time"
 
@@ -66,13 +65,13 @@ func newNomsDiffIter(ctx *sql.Context, ddb *doltdb.DoltDB, joiner *rowconv.Joine
 		return nil, err
 	}
 
-	fromConv, err := dp.rowConvForSchema(ctx, ddb.ValueReadWriter(), *dp.fromSch, fromSch)
+	fromConv, err := dp.rowConvForSchema(ctx, ddb.ValueReadWriter(), dp.fromSch, fromSch)
 
 	if err != nil {
 		return nil, err
 	}
 
-	toConv, err := dp.rowConvForSchema(ctx, ddb.ValueReadWriter(), *dp.toSch, toSch)
+	toConv, err := dp.rowConvForSchema(ctx, ddb.ValueReadWriter(), dp.toSch, toSch)
 
 	if err != nil {
 		return nil, err
@@ -87,20 +86,23 @@ func newNomsDiffIter(ctx *sql.Context, ddb *doltdb.DoltDB, joiner *rowconv.Joine
 	fromCmInfo := commitInfo{types.String(dp.fromName), dp.fromDate, fromCol.Tag, fromDateCol.Tag}
 	toCmInfo := commitInfo{types.String(dp.toName), dp.toDate, toCol.Tag, toDateCol.Tag}
 
-	rd := diff.NewRowDiffer(ctx, fromSch, toSch, 1024)
+	rd := diff.NewRowDiffer(ctx, ddb.Format(), fromSch, toSch, 1024)
 	// TODO (dhruv) don't cast to noms map
 	// Use index lookup if it exists
-	if lookup == nil {
+	if lookup.IsEmpty() {
 		rd.Start(ctx, durable.NomsMapFromIndex(fromData), durable.NomsMapFromIndex(toData))
 	} else {
-		ranges := index.NomsRangesFromIndexLookup(lookup) // TODO: this is a testing method
+		ranges, err := index.NomsRangesFromIndexLookup(ctx, lookup) // TODO: this is a testing method
+		if err != nil {
+			return nil, err
+		}
 		// TODO: maybe just use Check
 		rangeFunc := func(ctx context.Context, val types.Value) (bool, bool, error) {
 			v, ok := val.(types.Tuple)
 			if !ok {
 				return false, false, nil
 			}
-			return ranges[0].Check.Check(ctx, v)
+			return ranges[0].Check.Check(ctx, ddb.ValueReadWriter(), v)
 		}
 		rd.StartWithRange(ctx, durable.NomsMapFromIndex(fromData), durable.NomsMapFromIndex(toData), ranges[0].Start, rangeFunc)
 	}
@@ -119,8 +121,8 @@ func newNomsDiffIter(ctx *sql.Context, ddb *doltdb.DoltDB, joiner *rowconv.Joine
 }
 
 // Next returns the next row
-func (itr *diffRowItr) Next(*sql.Context) (sql.Row, error) {
-	r, _, err := itr.diffSrc.NextDiff()
+func (itr *diffRowItr) Next(ctx *sql.Context) (sql.Row, error) {
+	r, err := itr.diffSrc.NextDiff()
 
 	if err != nil {
 		return nil, err
@@ -201,6 +203,8 @@ type prollyDiffIter struct {
 	fromSch, toSch             schema.Schema
 	targetFromSch, targetToSch schema.Schema
 	fromConverter, toConverter ProllyRowConverter
+	fromVD, toVD               val.TupleDesc
+	keyless                    bool
 
 	fromCm commitInfo2
 	toCm   commitInfo2
@@ -229,11 +233,7 @@ var _ sql.RowIter = prollyDiffIter{}
 // than |targetFromSchema| or |targetToSchema|. We convert the rows from the
 // schema of |from| to |targetFromSchema| and the schema of |to| to
 // |targetToSchema|. See the tablediff_prolly package.
-func newProllyDiffIter(ctx *sql.Context, dp DiffPartition, ddb *doltdb.DoltDB, targetFromSchema, targetToSchema schema.Schema) (prollyDiffIter, error) {
-	if schema.IsKeyless(targetToSchema) {
-		return prollyDiffIter{}, errors.New("diffs with keyless schema have not been implemented yet")
-	}
-
+func newProllyDiffIter(ctx *sql.Context, dp DiffPartition, targetFromSchema, targetToSchema schema.Schema) (prollyDiffIter, error) {
 	fromCm := commitInfo2{
 		name: dp.fromName,
 		ts:   (*time.Time)(dp.fromDate),
@@ -242,41 +242,65 @@ func newProllyDiffIter(ctx *sql.Context, dp DiffPartition, ddb *doltdb.DoltDB, t
 		name: dp.toName,
 		ts:   (*time.Time)(dp.toDate),
 	}
+	var from, to prolly.Map
 
-	// dp.from may be nil
-	f, fSch, err := tableData(ctx, dp.from, ddb)
-	if err != nil {
-		return prollyDiffIter{}, nil
+	var fsch schema.Schema = schema.EmptySchema
+	if dp.from != nil {
+		idx, err := dp.from.GetRowData(ctx)
+		if err != nil {
+			return prollyDiffIter{}, err
+		}
+		from = durable.ProllyMapFromIndex(idx)
+		if fsch, err = dp.from.GetSchema(ctx); err != nil {
+			return prollyDiffIter{}, err
+		}
 	}
-	from := durable.ProllyMapFromIndex(f)
 
-	t, tSch, err := tableData(ctx, dp.to, ddb)
-	if err != nil {
-		return prollyDiffIter{}, nil
+	var tsch schema.Schema = schema.EmptySchema
+	if dp.to != nil {
+		idx, err := dp.to.GetRowData(ctx)
+		if err != nil {
+			return prollyDiffIter{}, err
+		}
+		to = durable.ProllyMapFromIndex(idx)
+		if tsch, err = dp.to.GetSchema(ctx); err != nil {
+			return prollyDiffIter{}, err
+		}
 	}
-	to := durable.ProllyMapFromIndex(t)
 
-	fromConverter, err := NewProllyRowConverter(fSch, targetFromSchema, ctx.Warn)
+	var nodeStore tree.NodeStore
+	if dp.to != nil {
+		nodeStore = dp.to.NodeStore()
+	} else {
+		nodeStore = dp.from.NodeStore()
+	}
+
+	fromConverter, err := NewProllyRowConverter(fsch, targetFromSchema, ctx.Warn, nodeStore)
 	if err != nil {
 		return prollyDiffIter{}, err
 	}
 
-	toConverter, err := NewProllyRowConverter(tSch, targetToSchema, ctx.Warn)
+	toConverter, err := NewProllyRowConverter(tsch, targetToSchema, ctx.Warn, nodeStore)
 	if err != nil {
 		return prollyDiffIter{}, err
 	}
 
+	fromVD := fsch.GetValueDescriptor()
+	toVD := tsch.GetValueDescriptor()
+	keyless := schema.IsKeyless(targetFromSchema) && schema.IsKeyless(targetToSchema)
 	child, cancel := context.WithCancel(ctx)
-
 	iter := prollyDiffIter{
 		from:          from,
 		to:            to,
-		fromSch:       fSch,
-		toSch:         tSch,
+		fromSch:       fsch,
+		toSch:         tsch,
 		targetFromSch: targetFromSchema,
 		targetToSch:   targetToSchema,
 		fromConverter: fromConverter,
 		toConverter:   toConverter,
+		fromVD:        fromVD,
+		toVD:          toVD,
+		keyless:       keyless,
 		fromCm:        fromCm,
 		toCm:          toCm,
 		rows:          make(chan sql.Row, 64),
@@ -297,11 +321,11 @@ func (itr prollyDiffIter) Next(ctx *sql.Context) (sql.Row, error) {
 		return nil, ctx.Err()
 	case err := <-itr.errChan:
 		return nil, err
-	case r, ok := <-itr.rows:
+	case row, ok := <-itr.rows:
 		if !ok {
 			return nil, io.EOF
 		}
-		return r, nil
+		return row, nil
 	}
 }
 
@@ -311,16 +335,27 @@ func (itr prollyDiffIter) Close(ctx *sql.Context) error {
 }
 
 func (itr prollyDiffIter) queueRows(ctx context.Context) {
-	err := prolly.DiffMaps(ctx, itr.from, itr.to, func(ctx context.Context, d tree.Diff) error {
-		r, err := itr.makeDiffRow(d)
+	// TODO: Determine whether or not the schema has changed. If it has, then all rows should count as modifications in the diff.
+	considerAllRowsModified := false
+	err := prolly.DiffMaps(ctx, itr.from, itr.to, considerAllRowsModified, func(ctx context.Context, d tree.Diff) error {
+		dItr, err := itr.makeDiffRowItr(ctx, d)
 		if err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case itr.rows <- r:
-			return nil
+		for {
+			r, err := dItr.Next(ctx)
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case itr.rows <- r:
+				continue
+			}
 		}
 	})
 	if err != nil && err != io.EOF {
@@ -335,39 +370,108 @@ func (itr prollyDiffIter) queueRows(ctx context.Context) {
 }
 
 // todo(andy): copy string fields
-func (itr prollyDiffIter) makeDiffRow(d tree.Diff) (r sql.Row, err error) {
+func (itr prollyDiffIter) makeDiffRowItr(ctx context.Context, d tree.Diff) (*repeatingRowIter, error) {
+	if !itr.keyless {
+		r, err := itr.getDiffRow(ctx, d)
+		if err != nil {
+			return nil, err
+		}
+		return &repeatingRowIter{row: r, n: 1}, nil
+	}
 
-	n := itr.targetToSch.GetAllCols().Size()
-	m := itr.targetFromSch.GetAllCols().Size()
+	r, n, err := itr.getDiffRowAndCardinality(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	return &repeatingRowIter{row: r, n: n}, nil
+}
+
+func (itr prollyDiffIter) getDiffRowAndCardinality(ctx context.Context, d tree.Diff) (r sql.Row, n uint64, err error) {
+	switch d.Type {
+	case tree.AddedDiff:
+		n = val.ReadKeylessCardinality(val.Tuple(d.To))
+	case tree.RemovedDiff:
+		n = val.ReadKeylessCardinality(val.Tuple(d.From))
+	case tree.ModifiedDiff:
+		fN := val.ReadKeylessCardinality(val.Tuple(d.From))
+		tN := val.ReadKeylessCardinality(val.Tuple(d.To))
+		if fN < tN {
+			n = tN - fN
+			d.Type = tree.AddedDiff
+		} else {
+			n = fN - tN
+			d.Type = tree.RemovedDiff
+		}
+	}
+
+	r, err = itr.getDiffRow(ctx, d)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return r, n, nil
+}
+
+func (itr prollyDiffIter) getDiffRow(ctx context.Context, dif tree.Diff) (row sql.Row, err error) {
+	tLen := schemaSize(itr.targetToSch)
+	fLen := schemaSize(itr.targetFromSch)
+
+	if fLen == 0 && dif.Type == tree.AddedDiff {
+		fLen = tLen
+	} else if tLen == 0 && dif.Type == tree.RemovedDiff {
+		tLen = fLen
+	}
 	// 2 commit names, 2 commit dates, 1 diff_type
-	r = make(sql.Row, n+m+5)
+	row = make(sql.Row, fLen+tLen+5)
 
 	// todo (dhruv): implement warnings for row column value coercions.
 
-	if d.Type != tree.RemovedDiff {
-		err = itr.toConverter.PutConverted(val.Tuple(d.Key), val.Tuple(d.To), r[0:n])
+	if dif.Type != tree.RemovedDiff {
+		err = itr.toConverter.PutConverted(ctx, val.Tuple(dif.Key), val.Tuple(dif.To), row[0:tLen])
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	o := n
-	r[o] = itr.toCm.name
-	r[o+1] = maybeTime(itr.toCm.ts)
+	idx := tLen
+	row[idx] = itr.toCm.name
+	row[idx+1] = maybeTime(itr.toCm.ts)
 
-	if d.Type != tree.AddedDiff {
-		err = itr.fromConverter.PutConverted(val.Tuple(d.Key), val.Tuple(d.From), r[n+2:n+2+m])
+	if dif.Type != tree.AddedDiff {
+		err = itr.fromConverter.PutConverted(ctx, val.Tuple(dif.Key), val.Tuple(dif.From), row[tLen+2:tLen+2+fLen])
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	o = n + 2 + m
-	r[o] = itr.fromCm.name
-	r[o+1] = maybeTime(itr.fromCm.ts)
-	r[o+2] = diffTypeString(d)
+	idx = fLen + 2 + tLen
+	row[idx] = itr.fromCm.name
+	row[idx+1] = maybeTime(itr.fromCm.ts)
+	row[idx+2] = diffTypeString(dif)
 
-	return r, nil
+	return row, nil
+}
+
+type repeatingRowIter struct {
+	row sql.Row
+	n   uint64
+}
+
+func (r *repeatingRowIter) Next(ctx context.Context) (sql.Row, error) {
+	if r.n == 0 {
+		return nil, io.EOF
+	}
+	r.n--
+	c := make(sql.Row, len(r.row))
+	copy(c, r.row)
+	return c, nil
+}
+
+func schemaSize(sch schema.Schema) int {
+	if sch == nil {
+		return 0
+	}
+	return sch.GetAllCols().Size()
 }
 
 func diffTypeString(d tree.Diff) (s string) {
@@ -386,5 +490,68 @@ func maybeTime(t *time.Time) interface{} {
 	if t != nil {
 		return *t
 	}
+	return nil
+}
+
+//------------------------------------
+// diffPartitionRowIter
+//------------------------------------
+
+var _ sql.RowIter = (*diffPartitionRowIter)(nil)
+
+type diffPartitionRowIter struct {
+	diffPartitions   *DiffPartitions
+	ddb              *doltdb.DoltDB
+	joiner           *rowconv.Joiner
+	currentPartition *sql.Partition
+	currentRowIter   *sql.RowIter
+}
+
+func NewDiffPartitionRowIter(partition sql.Partition, ddb *doltdb.DoltDB, joiner *rowconv.Joiner) *diffPartitionRowIter {
+	return &diffPartitionRowIter{
+		currentPartition: &partition,
+		ddb:              ddb,
+		joiner:           joiner,
+	}
+}
+
+func (itr *diffPartitionRowIter) Next(ctx *sql.Context) (sql.Row, error) {
+	for {
+		if itr.currentPartition == nil {
+			nextPartition, err := itr.diffPartitions.Next(ctx)
+			if err != nil {
+				return nil, err
+			}
+			itr.currentPartition = &nextPartition
+		}
+
+		if itr.currentRowIter == nil {
+			dp := (*itr.currentPartition).(DiffPartition)
+			rowIter, err := dp.GetRowIter(ctx, itr.ddb, itr.joiner, sql.IndexLookup{})
+			if err != nil {
+				return nil, err
+			}
+			itr.currentRowIter = &rowIter
+		}
+
+		row, err := (*itr.currentRowIter).Next(ctx)
+		if err == io.EOF {
+			itr.currentPartition = nil
+			itr.currentRowIter = nil
+
+			if itr.diffPartitions == nil {
+				return nil, err
+			}
+
+			continue
+		} else if err != nil {
+			return nil, err
+		} else {
+			return row, nil
+		}
+	}
+}
+
+func (itr *diffPartitionRowIter) Close(_ *sql.Context) error {
 	return nil
 }

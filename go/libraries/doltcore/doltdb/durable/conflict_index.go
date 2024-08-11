@@ -16,11 +16,10 @@ package durable
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/store/hash"
-	"github.com/dolthub/dolt/go/store/prolly"
-	"github.com/dolthub/dolt/go/store/prolly/shim"
 	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -34,40 +33,32 @@ type ConflictIndex interface {
 // RefFromConflictIndex persists |idx| and returns the types.Ref targeting it.
 func RefFromConflictIndex(ctx context.Context, vrw types.ValueReadWriter, idx ConflictIndex) (types.Ref, error) {
 	switch idx.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		return refFromNomsValue(ctx, vrw, idx.(nomsConflictIndex).index)
 
-	case types.Format_DOLT_1:
-		b := shim.ValueFromConflictMap(idx.(prollyConflictIndex).index)
-		return refFromNomsValue(ctx, vrw, b)
+	case types.Format_DOLT:
+		return types.Ref{}, fmt.Errorf("__DOLT__ conflicts should be stored in ArtifactIndex")
 
 	default:
-		return types.Ref{}, errNbfUnkown
+		return types.Ref{}, errNbfUnknown
 	}
 }
 
 // NewEmptyConflictIndex returns an ConflictIndex with no rows.
-func NewEmptyConflictIndex(ctx context.Context, vrw types.ValueReadWriter, oursSch, theirsSch, baseSch schema.Schema) (ConflictIndex, error) {
+func NewEmptyConflictIndex(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, oursSch, theirsSch, baseSch schema.Schema) (ConflictIndex, error) {
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		m, err := types.NewMap(ctx, vrw)
 		if err != nil {
 			return nil, err
 		}
 		return ConflictIndexFromNomsMap(m, vrw), nil
 
-	case types.Format_DOLT_1:
-		kd, oursVD := shim.MapDescriptorsFromSchema(oursSch)
-		theirsVD := shim.ValueDescriptorFromSchema(theirsSch)
-		baseVD := shim.ValueDescriptorFromSchema(baseSch)
-		ns := tree.NewNodeStore(shim.ChunkStoreFromVRW(vrw))
-
-		m := prolly.NewEmptyConflictMap(ns, kd, oursVD, theirsVD, baseVD)
-
-		return ConflictIndexFromProllyMap(m), nil
+	case types.Format_DOLT:
+		return nil, fmt.Errorf("__DOLT__ conflicts should be stored in ArtifactIndex")
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
@@ -82,36 +73,25 @@ func NomsMapFromConflictIndex(i ConflictIndex) types.Map {
 	return i.(nomsConflictIndex).index
 }
 
-func ConflictIndexFromProllyMap(m prolly.ConflictMap) ConflictIndex {
-	return prollyConflictIndex{
-		index: m,
-	}
+func conflictIndexFromRef(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, ourSch, theirSch, baseSch schema.Schema, r types.Ref) (ConflictIndex, error) {
+	return conflictIndexFromAddr(ctx, vrw, ns, ourSch, theirSch, baseSch, r.TargetHash())
 }
 
-func ProllyMapFromConflictIndex(i ConflictIndex) prolly.ConflictMap {
-	return i.(prollyConflictIndex).index
-}
-
-func conflictIndexFromRef(ctx context.Context, vrw types.ValueReadWriter, ourSch, theirSch, baseSch schema.Schema, r types.Ref) (ConflictIndex, error) {
-	return conflictIndexFromAddr(ctx, vrw, ourSch, theirSch, baseSch, r.TargetHash())
-}
-
-func conflictIndexFromAddr(ctx context.Context, vrw types.ValueReadWriter, ourSch, theirSch, baseSch schema.Schema, addr hash.Hash) (ConflictIndex, error) {
+func conflictIndexFromAddr(ctx context.Context, vrw types.ValueReadWriter, ns tree.NodeStore, ourSch, theirSch, baseSch schema.Schema, addr hash.Hash) (ConflictIndex, error) {
 	v, err := vrw.ReadValue(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	switch vrw.Format() {
-	case types.Format_LD_1, types.Format_7_18, types.Format_DOLT_DEV:
+	case types.Format_LD_1:
 		return ConflictIndexFromNomsMap(v.(types.Map), vrw), nil
 
-	case types.Format_DOLT_1:
-		m := shim.ConflictMapFromValue(v, ourSch, theirSch, baseSch, vrw)
-		return ConflictIndexFromProllyMap(m), nil
+	case types.Format_DOLT:
+		return nil, fmt.Errorf("__DOLT__ conflicts should be stored in ArtifactIndex")
 
 	default:
-		return nil, errNbfUnkown
+		return nil, errNbfUnknown
 	}
 }
 
@@ -130,20 +110,4 @@ func (i nomsConflictIndex) Count() uint64 {
 
 func (i nomsConflictIndex) Format() *types.NomsBinFormat {
 	return i.vrw.Format()
-}
-
-type prollyConflictIndex struct {
-	index prolly.ConflictMap
-}
-
-func (i prollyConflictIndex) HashOf() (hash.Hash, error) {
-	return i.index.HashOf(), nil
-}
-
-func (i prollyConflictIndex) Count() uint64 {
-	return uint64(i.index.Count())
-}
-
-func (i prollyConflictIndex) Format() *types.NomsBinFormat {
-	return i.index.Format()
 }

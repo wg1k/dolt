@@ -22,26 +22,25 @@ teardown() {
     teardown_common
 }
 
-@test "2pk5cols-ints: create a table with a schema file and examine repo" {
-    skip_nbf_dolt_1
+@test "2pk5cols-ints: empty table" {
     run dolt ls
     [ "$status" -eq 0 ]
     [[ "${lines[1]}" =~ "test" ]] || false
     run dolt sql -q "select * from test"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ pk1[[:space:]]+\|[[:space:]]+pk2[[:space:]]+\|[[:space:]]+c1[[:space:]]+\|[[:space:]]+c2[[:space:]]+\|[[:space:]]+c3[[:space:]]+\|[[:space:]]+c4[[:space:]]+\|[[:space:]]+c5 ]] || false
+    [ "${#lines[@]}" -eq 0 ]
+
     run dolt diff
     [ "$status" -eq 0 ]
     [ "${lines[0]}" = "diff --dolt a/test b/test" ]
     [ "${lines[1]}" = "added table" ]
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "Untracked files" ]] || false
+    [[ "$output" =~ "Untracked tables" ]] || false
     [[ "$output" =~ "new table:" ]] || false
 }
 
 @test "2pk5cols-ints: add a row to a two primary table using dolt table put-row" {
-    skip_nbf_dolt_1
     dolt add test
     dolt commit -m "added test table"
     run dolt sql -q "insert into test values (0, 0, 1, 2, 3, 4, 5)"

@@ -16,10 +16,6 @@ package commands
 
 import (
 	"context"
-	"errors"
-	"io"
-
-	"github.com/fatih/color"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
@@ -31,11 +27,6 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/nbs"
-	"github.com/dolthub/dolt/go/store/types"
-)
-
-const (
-	gcShallowFlag = "shallow"
 )
 
 var gcDocs = cli.CommandDocumentationContent{
@@ -60,10 +51,6 @@ func (cmd GarbageCollectionCmd) Description() string {
 	return gcDocs.ShortDesc
 }
 
-func (cmd GarbageCollectionCmd) GatedForNBF(nbf *types.NomsBinFormat) bool {
-	return types.IsFormat_DOLT_1(nbf)
-}
-
 // Hidden should return true if this command should be hidden from the help text
 func (cmd GarbageCollectionCmd) Hidden() bool {
 	return false
@@ -75,16 +62,13 @@ func (cmd GarbageCollectionCmd) RequiresRepo() bool {
 	return true
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd GarbageCollectionCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd GarbageCollectionCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, gcDocs, ap))
+	return cli.NewCommandDocumentation(gcDocs, ap)
 }
 
 func (cmd GarbageCollectionCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsFlag(gcShallowFlag, "s", "perform a fast, but incomplete garbage collection pass")
-	return ap
+	return cli.CreateGCArgParser()
 }
 
 // EventType returns the type of the event to log
@@ -94,49 +78,40 @@ func (cmd GarbageCollectionCmd) EventType() eventsapi.ClientEventType {
 
 // Version displays the version of the running dolt client
 // Exec executes the command
-func (cmd GarbageCollectionCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
-	var verr errhand.VerboseError
-
+func (cmd GarbageCollectionCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, gcDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, gcDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	var err error
-	if apr.Contains(gcShallowFlag) {
-		err = dEnv.DoltDB.ShallowGC(ctx)
-		if err != nil {
-			if err == chunks.ErrUnsupportedOperation {
-				verr = errhand.BuildDError("this database does not support shallow garbage collection").Build()
-				return HandleVErrAndExitCode(verr, usage)
-			}
-			verr = errhand.BuildDError("an error occurred during garbage collection").AddCause(err).Build()
-		}
-	} else {
-		// full gc
-		dEnv, err = MaybeMigrateEnv(ctx, dEnv)
-
-		if err != nil {
-			verr = errhand.BuildDError("could not load manifest for gc").AddCause(err).Build()
-			return HandleVErrAndExitCode(verr, usage)
-		}
-
-		keepers, err := env.GetGCKeepers(ctx, dEnv)
-		if err != nil {
-			verr = errhand.BuildDError("an error occurred while saving working set").AddCause(err).Build()
-			return HandleVErrAndExitCode(verr, usage)
-		}
-
-		err = dEnv.DoltDB.GC(ctx, keepers...)
-		if err != nil {
-			if errors.Is(err, chunks.ErrNothingToCollect) {
-				cli.PrintErrln(color.YellowString("Nothing to collect."))
-			} else {
-				verr = errhand.BuildDError("an error occurred during garbage collection").AddCause(err).Build()
-			}
-		}
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+	if closeFunc != nil {
+		defer closeFunc()
 	}
 
-	return HandleVErrAndExitCode(verr, usage)
+	query, err := constructDoltGCQuery(apr)
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+
+	_, _, _, err = queryist.Query(sqlCtx, query)
+	if err != nil && err != chunks.ErrNothingToCollect {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+
+	return HandleVErrAndExitCode(nil, usage)
+}
+
+// constructDoltGCQuery generates the sql query necessary to call DOLT_GC()
+func constructDoltGCQuery(apr *argparser.ArgParseResults) (string, error) {
+	query := "call DOLT_GC("
+	if apr.Contains(cli.ShallowFlag) {
+		query += "'--shallow'"
+	}
+	query += ")"
+	return query, nil
 }
 
 func MaybeMigrateEnv(ctx context.Context, dEnv *env.DoltEnv) (*env.DoltEnv, error) {
@@ -156,9 +131,6 @@ func MaybeMigrateEnv(ctx context.Context, dEnv *env.DoltEnv) (*env.DoltEnv, erro
 	}
 	if tmp.RSLoadErr != nil {
 		return nil, tmp.RSLoadErr
-	}
-	if tmp.DocsLoadErr != nil {
-		return nil, tmp.DocsLoadErr
 	}
 	if tmp.DBLoadError != nil {
 		return nil, tmp.DBLoadError

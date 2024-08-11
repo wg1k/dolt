@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
+	"github.com/dolthub/dolt/go/libraries/doltcore/dconfig"
 	"github.com/dolthub/dolt/go/libraries/utils/config"
 	"github.com/dolthub/dolt/go/libraries/utils/earl"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
@@ -31,14 +33,30 @@ import (
 )
 
 func TestDirToDBName(t *testing.T) {
-	tests := map[string]string{
-		"irs":                "irs",
+	replaceHyphenTests := map[string]string{
 		"corona-virus":       "corona_virus",
-		"  fake - name     ": "fake_name",
+		"  real - name     ": "real_name",
 	}
 
-	for dirName, expected := range tests {
-		actual := dirToDBName(dirName)
+	err := os.Setenv(dconfig.EnvDbNameReplace, "true")
+	require.NoError(t, err)
+
+	for dirName, expected := range replaceHyphenTests {
+		actual := dbfactory.DirToDBName(dirName)
+		assert.Equal(t, expected, actual)
+	}
+
+	allowHyphenTests := map[string]string{
+		"irs":                "irs",
+		"corona-virus":       "corona-virus",
+		"  fake - name     ": "  fake - name     ",
+	}
+
+	err = os.Setenv(dconfig.EnvDbNameReplace, "")
+	require.NoError(t, err)
+
+	for dirName, expected := range allowHyphenTests {
+		actual := dbfactory.DirToDBName(dirName)
 		assert.Equal(t, expected, actual)
 	}
 }
@@ -86,8 +104,8 @@ func initRepoWithRelativePath(t *testing.T, envPath string, hdp HomeDirProvider)
 	dEnv := Load(context.Background(), hdp, fs, urlStr, "test")
 	cfg, _ := dEnv.Config.GetConfig(GlobalConfig)
 	cfg.SetStrings(map[string]string{
-		UserNameKey:  name,
-		UserEmailKey: email,
+		config.UserNameKey:  name,
+		config.UserEmailKey: email,
 	})
 
 	err = dEnv.InitRepo(context.Background(), types.Format_Default, name, email, DefaultInitBranch)
@@ -96,7 +114,7 @@ func initRepoWithRelativePath(t *testing.T, envPath string, hdp HomeDirProvider)
 	return Load(context.Background(), hdp, fs, urlStr, "test")
 }
 
-func TestDoltEnvAsMultiEnv(t *testing.T) {
+func TestMultiEnvForDirectory(t *testing.T) {
 	rootPath, err := test.ChangeToTestDir("TestDoltEnvAsMultiEnv")
 	require.NoError(t, err)
 
@@ -104,29 +122,9 @@ func TestDoltEnvAsMultiEnv(t *testing.T) {
 	envPath := filepath.Join(rootPath, " test---name _ 123")
 	dEnv := initRepoWithRelativePath(t, envPath, hdp)
 
-	mrEnv, err := DoltEnvAsMultiEnv(context.Background(), dEnv)
+	mrEnv, err := MultiEnvForDirectory(context.Background(), dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
 	require.NoError(t, err)
 	assert.Len(t, mrEnv.envs, 1)
-
-	for _, e := range mrEnv.envs {
-		assert.Equal(t, "test_name_123", e.name)
-		assert.Equal(t, dEnv, e.env)
-	}
-}
-
-func TestDoltEnvAsMultiEnvWithMultipleRepos(t *testing.T) {
-	rootPath, err := test.ChangeToTestDir("TestDoltEnvAsMultiEnvWithMultipleRepos")
-	require.NoError(t, err)
-
-	hdp := func() (string, error) { return rootPath, nil }
-	envPath := filepath.Join(rootPath, " test---name _ 123")
-	dEnv := initRepoWithRelativePath(t, envPath, hdp)
-	subEnv1 := initRepoWithRelativePath(t, filepath.Join(envPath, "abc"), hdp)
-	subEnv2 := initRepoWithRelativePath(t, filepath.Join(envPath, "def"), hdp)
-
-	mrEnv, err := DoltEnvAsMultiEnv(context.Background(), dEnv)
-	require.NoError(t, err)
-	assert.Len(t, mrEnv.envs, 3)
 
 	type envCmp struct {
 		name    string
@@ -135,16 +133,8 @@ func TestDoltEnvAsMultiEnvWithMultipleRepos(t *testing.T) {
 
 	expected := []envCmp{
 		{
-			name:    "test_name_123",
+			name:    " test---name _ 123",
 			doltDir: dEnv.GetDoltDir(),
-		},
-		{
-			name:    "abc",
-			doltDir: subEnv1.GetDoltDir(),
-		},
-		{
-			name:    "def",
-			doltDir: subEnv2.GetDoltDir(),
 		},
 	}
 
@@ -154,6 +144,33 @@ func TestDoltEnvAsMultiEnvWithMultipleRepos(t *testing.T) {
 			name:    env.name,
 			doltDir: env.env.GetDoltDir(),
 		})
+	}
+
+	assert.Equal(t, expected, actual)
+}
+
+func TestMultiEnvForDirectoryWithMultipleRepos(t *testing.T) {
+	rootPath, err := test.ChangeToTestDir("TestDoltEnvAsMultiEnvWithMultipleRepos")
+	require.NoError(t, err)
+
+	hdp := func() (string, error) { return rootPath, nil }
+	envPath := filepath.Join(rootPath, " test---name _ 123")
+	dEnv := initRepoWithRelativePath(t, envPath, hdp)
+	subEnv1 := initRepoWithRelativePath(t, filepath.Join(envPath, "abc"), hdp)
+	subEnv2 := initRepoWithRelativePath(t, filepath.Join(envPath, "def"), hdp)
+
+	mrEnv, err := MultiEnvForDirectory(context.Background(), dEnv.Config.WriteableConfig(), dEnv.FS, dEnv.Version, dEnv)
+	require.NoError(t, err)
+	assert.Len(t, mrEnv.envs, 3)
+
+	expected := make(map[string]string)
+	expected[" test---name _ 123"] = dEnv.GetDoltDir()
+	expected["abc"] = subEnv1.GetDoltDir()
+	expected["def"] = subEnv2.GetDoltDir()
+
+	actual := make(map[string]string)
+	for _, env := range mrEnv.envs {
+		actual[env.name] = env.env.GetDoltDir()
 	}
 
 	assert.Equal(t, expected, actual)
@@ -172,48 +189,4 @@ func initMultiEnv(t *testing.T, testName string, names []string) (string, HomeDi
 	}
 
 	return rootPath, hdp, envs
-}
-
-func TestLoadMultiEnv(t *testing.T) {
-	names := []string{"env 1", " env  2", "env-3"}
-	rootPath, hdp, _ := initMultiEnv(t, "TestLoadMultiEnv", names)
-
-	envNamesAndPaths := make([]EnvNameAndPath, len(names))
-	for i, name := range names {
-		envNamesAndPaths[i] = EnvNameAndPath{name, filepath.Join(rootPath, name)}
-	}
-
-	mrEnv, err := LoadMultiEnv(context.Background(), hdp, config.NewEmptyMapConfig(), filesys.LocalFS, "test", envNamesAndPaths...)
-	require.NoError(t, err)
-
-	for _, name := range names {
-		e := mrEnv.GetEnv(name)
-		assert.NotNil(t, e)
-	}
-}
-
-func TestLoadMultiEnvFromDir(t *testing.T) {
-	dirNameToDBName := map[string]string{
-		"env 1":   "env_1",
-		" env  2": "env_2",
-		"env-3":   "env_3",
-	}
-
-	names := make([]string, 0, len(dirNameToDBName))
-	for k := range dirNameToDBName {
-		names = append(names, k)
-	}
-
-	rootPath, hdp, envs := initMultiEnv(t, "TestLoadMultiEnvFromDir", names)
-	mrEnv, err := LoadMultiEnvFromDir(context.Background(), hdp, config.NewEmptyMapConfig(), filesys.LocalFS, rootPath, "test")
-	require.NoError(t, err)
-
-	assert.Len(t, mrEnv.envs, len(names))
-	for _, dirName := range names {
-		dbName := dirNameToDBName[dirName]
-		_, ok := envs[dirName]
-		require.True(t, ok)
-		e := mrEnv.GetEnv(dbName)
-		require.NotNil(t, e)
-	}
 }

@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/dolthub/go-mysql-server/sql"
+
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
@@ -40,7 +42,7 @@ type uniqueKeyErr struct {
 // Error implements the error interface.
 func (u *uniqueKeyErr) Error() string {
 	keyStr, _ := formatKey(context.Background(), u.IndexTuple)
-	return fmt.Sprintf("UNIQUE constraint violation on index '%s': %s", u.IndexName, keyStr)
+	return fmt.Sprintf("duplicate unique key given: %s", keyStr)
 }
 
 // NOTE: Regarding partial keys and full keys. For this example, let's say that our table has a primary key W, with
@@ -97,6 +99,20 @@ func NewIndexEditor(ctx context.Context, index schema.Index, indexData types.Map
 // InsertRow adds the given row to the index. If the row already exists and the index is unique, then an error is returned.
 // Otherwise, it is a no-op.
 func (ie *IndexEditor) InsertRow(ctx context.Context, key, partialKey types.Tuple, value types.Tuple) error {
+	return ie.InsertRowWithDupCb(ctx, key, partialKey, value, func(ctx context.Context, uke *uniqueKeyErr) error {
+		msg, err := formatKey(context.Background(), uke.IndexTuple)
+		if err != nil {
+			return err
+		}
+		// The only secondary index that can throw unique key errors is a unique index
+		return sql.NewUniqueKeyErr(msg, !ie.idx.IsUnique(), nil)
+	})
+}
+
+// InsertRowWithDupCb adds the given row to the index. If the row already exists and the
+// index is unique, then a uniqueKeyErr is passed to |cb|. If |cb| returns a non-nil
+// error then the insert is aborted. Otherwise, the insert proceeds.
+func (ie *IndexEditor) InsertRowWithDupCb(ctx context.Context, key, partialKey types.Tuple, value types.Tuple, cb func(ctx context.Context, uke *uniqueKeyErr) error) error {
 	keyHash, err := key.Hash(key.Format())
 	if err != nil {
 		return err
@@ -121,8 +137,11 @@ func (ie *IndexEditor) InsertRow(ctx context.Context, key, partialKey types.Tupl
 			if err != nil {
 				return err
 			}
-			// For a UNIQUE key violation, there should only be 1 at max. We still do an "over 0" check for safety though.
-			return &uniqueKeyErr{tableTuple, matches[0].key, ie.idx.Name()}
+			cause := &uniqueKeyErr{tableTuple, partialKey, ie.idx.Name()}
+			err = cb(ctx, cause)
+			if err != nil {
+				return err
+			}
 		}
 	} else {
 		if rowExists, err := ie.iea.Has(ctx, keyHash, key); err != nil {
@@ -293,7 +312,7 @@ func RebuildIndex(ctx context.Context, tbl *doltdb.Table, indexName string, opts
 	tf.Reset(tbl.Format())
 	defer tupleFactories.Put(tf)
 
-	opts = opts.WithDeaf(NewBulkImportTEAFactory(tbl.Format(), tbl.ValueReadWriter(), opts.Tempdir))
+	opts = opts.WithDeaf(NewBulkImportTEAFactory(tbl.ValueReadWriter(), opts.Tempdir))
 	rebuiltIndexData, err := rebuildIndexRowData(ctx, tbl.ValueReadWriter(), sch, tableRowData, index, opts, tf)
 	if err != nil {
 		return types.EmptyMap, err
@@ -325,7 +344,7 @@ func RebuildAllIndexes(ctx context.Context, t *doltdb.Table, opts Options) (*dol
 	tf.Reset(t.Format())
 	defer tupleFactories.Put(tf)
 
-	opts = opts.WithDeaf(NewBulkImportTEAFactory(t.Format(), t.ValueReadWriter(), opts.Tempdir))
+	opts = opts.WithDeaf(NewBulkImportTEAFactory(t.ValueReadWriter(), opts.Tempdir))
 	for _, index := range sch.Indexes().AllIndexes() {
 		rebuiltIndexRowData, err := rebuildIndexRowData(ctx, t.ValueReadWriter(), sch, tableRowData, index, opts, tf)
 		if err != nil {

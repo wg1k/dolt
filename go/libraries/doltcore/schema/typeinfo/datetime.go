@@ -17,9 +17,11 @@ package typeinfo
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/sqltypes"
 
 	"github.com/dolthub/dolt/go/store/types"
@@ -30,6 +32,7 @@ const (
 	datetimeTypeParam_SQL_Date      = "date"
 	datetimeTypeParam_SQL_Datetime  = "datetime"
 	datetimeTypeParam_SQL_Timestamp = "timestamp"
+	datetimeTypeParam_Precision     = "precision"
 )
 
 type datetimeType struct {
@@ -38,20 +41,40 @@ type datetimeType struct {
 
 var _ TypeInfo = (*datetimeType)(nil)
 var (
-	DateType      = &datetimeType{sql.Date}
-	DatetimeType  = &datetimeType{sql.Datetime}
-	TimestampType = &datetimeType{sql.Timestamp}
+	DateType      = &datetimeType{gmstypes.Date}
+	DatetimeType  = &datetimeType{gmstypes.DatetimeMaxPrecision}
+	TimestampType = &datetimeType{gmstypes.TimestampMaxPrecision}
 )
+
+func CreateDatetimeTypeFromSqlType(typ sql.DatetimeType) *datetimeType {
+	return &datetimeType{typ}
+}
 
 func CreateDatetimeTypeFromParams(params map[string]string) (TypeInfo, error) {
 	if sqlType, ok := params[datetimeTypeParam_SQL]; ok {
+		precision := 6
+		if precisionParam, ok := params[datetimeTypeParam_Precision]; ok {
+			var err error
+			precision, err = strconv.Atoi(precisionParam)
+			if err != nil {
+				return nil, err
+			}
+		}
 		switch sqlType {
 		case datetimeTypeParam_SQL_Date:
 			return DateType, nil
 		case datetimeTypeParam_SQL_Datetime:
-			return DatetimeType, nil
+			gmsType, err := gmstypes.CreateDatetimeType(sqltypes.Datetime, precision)
+			if err != nil {
+				return nil, err
+			}
+			return CreateDatetimeTypeFromSqlType(gmsType), nil
 		case datetimeTypeParam_SQL_Timestamp:
-			return TimestampType, nil
+			gmsType, err := gmstypes.CreateDatetimeType(sqltypes.Timestamp, precision)
+			if err != nil {
+				return nil, err
+			}
+			return CreateDatetimeTypeFromSqlType(gmsType), nil
 		default:
 			return nil, fmt.Errorf(`create datetime type info has invalid param "%v"`, sqlType)
 		}
@@ -102,7 +125,7 @@ func (ti *datetimeType) ConvertValueToNomsValue(ctx context.Context, vrw types.V
 	if v == nil {
 		return types.NullValue, nil
 	}
-	timeVal, err := ti.sqlDatetimeType.Convert(v)
+	timeVal, _, err := ti.sqlDatetimeType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
@@ -153,24 +176,26 @@ func (ti *datetimeType) GetTypeIdentifier() Identifier {
 
 // GetTypeParams implements TypeInfo interface.
 func (ti *datetimeType) GetTypeParams() map[string]string {
-	sqlParam := ""
+	params := map[string]string{}
 	switch ti.sqlDatetimeType.Type() {
 	case sqltypes.Date:
-		sqlParam = datetimeTypeParam_SQL_Date
+		params[datetimeTypeParam_SQL] = datetimeTypeParam_SQL_Date
 	case sqltypes.Datetime:
-		sqlParam = datetimeTypeParam_SQL_Datetime
+		params[datetimeTypeParam_SQL] = datetimeTypeParam_SQL_Datetime
+		params[datetimeTypeParam_Precision] = strconv.Itoa(ti.sqlDatetimeType.Precision())
 	case sqltypes.Timestamp:
-		sqlParam = datetimeTypeParam_SQL_Timestamp
+		params[datetimeTypeParam_SQL] = datetimeTypeParam_SQL_Timestamp
+		params[datetimeTypeParam_Precision] = strconv.Itoa(ti.sqlDatetimeType.Precision())
 	default:
 		panic(fmt.Errorf(`unknown datetime type info sql type "%v"`, ti.sqlDatetimeType.Type().String()))
 	}
-	return map[string]string{datetimeTypeParam_SQL: sqlParam}
+	return params
 }
 
 // IsValid implements TypeInfo interface.
 func (ti *datetimeType) IsValid(v types.Value) bool {
 	if val, ok := v.(types.Timestamp); ok {
-		_, err := ti.sqlDatetimeType.Convert(time.Time(val))
+		_, _, err := ti.sqlDatetimeType.Convert(time.Time(val))
 		if err != nil {
 			return false
 		}
@@ -219,6 +244,8 @@ func datetimeTypeConverter(ctx context.Context, src *datetimeType, destTi TypeIn
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
@@ -228,6 +255,12 @@ func datetimeTypeConverter(ctx context.Context, src *datetimeType, destTi TypeIn
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

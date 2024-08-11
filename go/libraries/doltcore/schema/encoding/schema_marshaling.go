@@ -17,6 +17,7 @@ package encoding
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
@@ -147,11 +148,26 @@ func (enc encodedTypeInfo) decodeTypeInfo() (typeinfo.TypeInfo, error) {
 }
 
 type encodedIndex struct {
-	Name            string   `noms:"name" json:"name"`
-	Tags            []uint64 `noms:"tags" json:"tags"`
-	Comment         string   `noms:"comment" json:"comment"`
-	Unique          bool     `noms:"unique" json:"unique"`
-	IsSystemDefined bool     `noms:"hidden,omitempty" json:"hidden,omitempty"` // Was previously named Hidden, do not change noms name
+	Name            string              `noms:"name" json:"name"`
+	Tags            []uint64            `noms:"tags" json:"tags"`
+	Comment         string              `noms:"comment" json:"comment"`
+	Unique          bool                `noms:"unique" json:"unique"`
+	Spatial         bool                `noms:"spatial,omitempty" json:"spatial,omitempty"`
+	FullText        bool                `noms:"fulltext,omitempty" json:"fulltext,omitempty"`
+	IsSystemDefined bool                `noms:"hidden,omitempty" json:"hidden,omitempty"` // Was previously named Hidden, do not change noms name
+	PrefixLengths   []uint16            `noms:"prefixLengths,omitempty" json:"prefixLengths,omitempty"`
+	FullTextInfo    encodedFullTextInfo `noms:"fulltext_info,omitempty" json:"fulltext_info,omitempty"`
+}
+
+type encodedFullTextInfo struct {
+	ConfigTable      string   `noms:"config_table" json:"config_table"`
+	PositionTable    string   `noms:"position_table" json:"position_table"`
+	DocCountTable    string   `noms:"doc_count_table" json:"doc_count_table"`
+	GlobalCountTable string   `noms:"global_count_table" json:"global_count_table"`
+	RowCountTable    string   `noms:"row_count_table" json:"row_count_table"`
+	KeyType          uint8    `noms:"key_type" json:"key_type"`
+	KeyName          string   `noms:"key_name" json:"key_name"`
+	KeyPositions     []uint16 `noms:"key_positions" json:"key_positions"`
 }
 
 type encodedCheck struct {
@@ -160,14 +176,15 @@ type encodedCheck struct {
 	Enforced   bool   `noms:"enforced" json:"enforced"`
 }
 
-type schemaData struct {
-	Columns          []encodedColumn `noms:"columns" json:"columns"`
-	IndexCollection  []encodedIndex  `noms:"idxColl,omitempty" json:"idxColl,omitempty"`
-	CheckConstraints []encodedCheck  `noms:"checks,omitempty" json:"checks,omitempty"`
-	PkOrdinals       []int           `noms:"pkOrdinals,omitempty" json:"pkOrdinals,omitEmpty"`
+type encodedSchemaData struct {
+	Columns          []encodedColumn  `noms:"columns" json:"columns"`
+	IndexCollection  []encodedIndex   `noms:"idxColl,omitempty" json:"idxColl,omitempty"`
+	CheckConstraints []encodedCheck   `noms:"checks,omitempty" json:"checks,omitempty"`
+	PkOrdinals       []int            `noms:"pkOrdinals,omitempty" json:"pkOrdinals,omitempty"`
+	Collation        schema.Collation `noms:"collation,omitempty" json:"collation,omitempty"`
 }
 
-func (sd *schemaData) Copy() *schemaData {
+func (sd *encodedSchemaData) Copy() *encodedSchemaData {
 	var columns []encodedColumn
 	if sd.Columns != nil {
 		columns = make([]encodedColumn, len(sd.Columns))
@@ -184,6 +201,12 @@ func (sd *schemaData) Copy() *schemaData {
 			idxCol[i].Tags = make([]uint64, len(idx.Tags))
 			for j, tag := range idx.Tags {
 				idxCol[i].Tags[j] = tag
+			}
+			if len(idx.PrefixLengths) > 0 {
+				idxCol[i].PrefixLengths = make([]uint16, len(idx.PrefixLengths))
+				for j, prefixLength := range idx.PrefixLengths {
+					idxCol[i].PrefixLengths[j] = prefixLength
+				}
 			}
 		}
 	}
@@ -204,15 +227,16 @@ func (sd *schemaData) Copy() *schemaData {
 		}
 	}
 
-	return &schemaData{
+	return &encodedSchemaData{
 		Columns:          columns,
 		IndexCollection:  idxCol,
 		CheckConstraints: checks,
 		PkOrdinals:       pkOrdinals,
+		Collation:        sd.Collation,
 	}
 }
 
-func toSchemaData(sch schema.Schema) (schemaData, error) {
+func toSchemaData(sch schema.Schema) (encodedSchemaData, error) {
 	allCols := sch.GetAllCols()
 	encCols := make([]encodedColumn, allCols.Size())
 
@@ -225,17 +249,31 @@ func toSchemaData(sch schema.Schema) (schemaData, error) {
 	})
 
 	if err != nil {
-		return schemaData{}, err
+		return encodedSchemaData{}, err
 	}
 
 	encodedIndexes := make([]encodedIndex, sch.Indexes().Count())
 	for i, index := range sch.Indexes().AllIndexes() {
+		props := index.FullTextProperties()
 		encodedIndexes[i] = encodedIndex{
 			Name:            index.Name(),
 			Tags:            index.IndexedColumnTags(),
 			Comment:         index.Comment(),
 			Unique:          index.IsUnique(),
+			Spatial:         index.IsSpatial(),
+			FullText:        index.IsFullText(),
 			IsSystemDefined: !index.IsUserDefined(),
+			PrefixLengths:   index.PrefixLengths(),
+			FullTextInfo: encodedFullTextInfo{
+				ConfigTable:      props.ConfigTable,
+				PositionTable:    props.PositionTable,
+				DocCountTable:    props.DocCountTable,
+				GlobalCountTable: props.GlobalCountTable,
+				RowCountTable:    props.RowCountTable,
+				KeyType:          props.KeyType,
+				KeyName:          props.KeyName,
+				KeyPositions:     props.KeyPositions,
+			},
 		}
 	}
 
@@ -249,15 +287,16 @@ func toSchemaData(sch schema.Schema) (schemaData, error) {
 		}
 	}
 
-	return schemaData{
+	return encodedSchemaData{
 		Columns:          encCols,
 		IndexCollection:  encodedIndexes,
 		CheckConstraints: encodedChecks,
 		PkOrdinals:       sch.GetPkOrdinals(),
+		Collation:        sch.GetCollation(),
 	}, nil
 }
 
-func (sd schemaData) decodeSchema() (schema.Schema, error) {
+func (sd encodedSchemaData) decodeSchema() (schema.Schema, error) {
 	numCols := len(sd.Columns)
 	cols := make([]schema.Column, numCols)
 
@@ -275,17 +314,12 @@ func (sd schemaData) decodeSchema() (schema.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	sch.SetCollation(sd.Collation)
 
-	return sch, nil
-}
-
-func (sd schemaData) addChecksIndexesAndPkOrderingToSchema(sch schema.Schema) error {
-
-	// initialize pk order before adding indexes
 	if sd.PkOrdinals != nil {
 		err := sch.SetPkOrdinals(sd.PkOrdinals)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -293,14 +327,27 @@ func (sd schemaData) addChecksIndexesAndPkOrderingToSchema(sch schema.Schema) er
 		_, err := sch.Indexes().UnsafeAddIndexByColTags(
 			encodedIndex.Name,
 			encodedIndex.Tags,
+			encodedIndex.PrefixLengths,
 			schema.IndexProperties{
 				IsUnique:      encodedIndex.Unique,
+				IsSpatial:     encodedIndex.Spatial,
+				IsFullText:    encodedIndex.FullText,
 				IsUserDefined: !encodedIndex.IsSystemDefined,
 				Comment:       encodedIndex.Comment,
+				FullTextProperties: schema.FullTextProperties{
+					ConfigTable:      encodedIndex.FullTextInfo.ConfigTable,
+					PositionTable:    encodedIndex.FullTextInfo.PositionTable,
+					DocCountTable:    encodedIndex.FullTextInfo.DocCountTable,
+					GlobalCountTable: encodedIndex.FullTextInfo.GlobalCountTable,
+					RowCountTable:    encodedIndex.FullTextInfo.RowCountTable,
+					KeyType:          encodedIndex.FullTextInfo.KeyType,
+					KeyName:          encodedIndex.FullTextInfo.KeyName,
+					KeyPositions:     encodedIndex.FullTextInfo.KeyPositions,
+				},
 			},
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -311,15 +358,15 @@ func (sd schemaData) addChecksIndexesAndPkOrderingToSchema(sch schema.Schema) er
 			encodedCheck.Enforced,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return sch, nil
 }
 
-// MarshalSchemaAsNomsValue takes a Schema and converts it to a types.Value
-func MarshalSchemaAsNomsValue(ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema) (types.Value, error) {
+// MarshalSchema takes a Schema and converts it to a types.Value
+func MarshalSchema(ctx context.Context, vrw types.ValueReadWriter, sch schema.Schema) (types.Value, error) {
 	// Anyone calling this is going to serialize this to disk, so it's our last line of defense against defective schemas.
 	// Business logic should catch errors before this point, but this is a failsafe.
 	err := schema.ValidateColumnConstraints(sch.GetAllCols())
@@ -330,6 +377,18 @@ func MarshalSchemaAsNomsValue(ctx context.Context, vrw types.ValueReadWriter, sc
 	err = schema.ValidateForInsert(sch.GetAllCols())
 	if err != nil {
 		return nil, err
+	}
+
+	if vrw.Format().VersionString() != types.Format_DOLT.VersionString() {
+		for _, idx := range sch.Indexes().AllIndexes() {
+			if idx.IsSpatial() {
+				return nil, fmt.Errorf("spatial indexes are only supported in storage format __DOLT__")
+			}
+		}
+	}
+
+	if vrw.Format().UsesFlatbuffers() {
+		return SerializeSchema(ctx, vrw, sch)
 	}
 
 	sd, err := toSchemaData(sch)
@@ -352,149 +411,73 @@ func MarshalSchemaAsNomsValue(ctx context.Context, vrw types.ValueReadWriter, sc
 }
 
 type schCacheData struct {
-	all   *schema.ColCollection
-	pk    *schema.ColCollection
-	nonPK *schema.ColCollection
-	sd    *schemaData
+	schema schema.Schema
 }
 
 var schemaCacheMu *sync.Mutex = &sync.Mutex{}
 var unmarshalledSchemaCache = map[hash.Hash]schCacheData{}
 
-// UnmarshalSchemaNomsValue takes a types.Value instance and Unmarshalls it into a Schema.
-func UnmarshalSchemaNomsValue(ctx context.Context, nbf *types.NomsBinFormat, schemaVal types.Value) (schema.Schema, error) {
-	h, err := schemaVal.Hash(nbf)
-	if err != nil {
-		return nil, err
-	}
-
-	schemaCacheMu.Lock()
-	cachedData, ok := unmarshalledSchemaCache[h]
-	schemaCacheMu.Unlock()
-
-	if ok {
-		cachedSch := schema.SchemaFromColCollections(cachedData.all, cachedData.pk, cachedData.nonPK)
-		sd := cachedData.sd.Copy()
-		err := sd.addChecksIndexesAndPkOrderingToSchema(cachedSch)
+// UnmarshalSchema takes a types.Value representing a Schema and Unmarshalls it into a schema.Schema.
+func UnmarshalSchema(ctx context.Context, nbf *types.NomsBinFormat, schemaVal types.Value) (schema.Schema, error) {
+	var sch schema.Schema
+	var err error
+	if nbf.UsesFlatbuffers() {
+		sch, err = DeserializeSchema(ctx, nbf, schemaVal)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var sd encodedSchemaData
+		err = marshal.Unmarshal(ctx, nbf, schemaVal, &sd)
 		if err != nil {
 			return nil, err
 		}
 
-		return cachedSch, nil
+		sch, err = sd.decodeSchema()
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	var sd schemaData
-	err = marshal.Unmarshal(ctx, nbf, schemaVal, &sd)
+	if nbf.VersionString() != types.Format_DOLT.VersionString() {
+		for _, idx := range sch.Indexes().AllIndexes() {
+			if idx.IsSpatial() {
+				return nil, fmt.Errorf("spatial indexes are only supported in storage format __DOLT__")
+			}
+		}
+	}
 
+	return sch, nil
+}
+
+// UnmarshalSchemaAtAddr returns the schema at the given address, using the schema cache if possible.
+func UnmarshalSchemaAtAddr(ctx context.Context, vr types.ValueReader, addr hash.Hash) (schema.Schema, error) {
+	schemaCacheMu.Lock()
+	cachedData, ok := unmarshalledSchemaCache[addr]
+	schemaCacheMu.Unlock()
+
+	if ok {
+		cachedSch := cachedData.schema
+		return cachedSch.Copy(), nil
+	}
+
+	schemaVal, err := vr.ReadValue(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	sch, err := sd.decodeSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	if sd.PkOrdinals == nil {
-		// schemaData will not have PK ordinals in old versions of Dolt
-		// this sets the default PK ordinates for subsequent cache lookups
-		sd.PkOrdinals = sch.GetPkOrdinals()
-	}
-
-	err = sd.addChecksIndexesAndPkOrderingToSchema(sch)
+	sch, err := UnmarshalSchema(ctx, vr.Format(), schemaVal)
 	if err != nil {
 		return nil, err
 	}
 
 	d := schCacheData{
-		all:   sch.GetAllCols(),
-		pk:    sch.GetPKCols(),
-		nonPK: sch.GetNonPKCols(),
-		sd:    sd.Copy(),
+		schema: sch,
 	}
 
 	schemaCacheMu.Lock()
-	unmarshalledSchemaCache[h] = d
+	unmarshalledSchemaCache[addr] = d
 	schemaCacheMu.Unlock()
 
 	return sch, nil
-}
-
-type superSchemaData struct {
-	Columns  []encodedColumn     `noms:"columns" json:"columns"`
-	TagNames map[uint64][]string `noms:"col_constraints" json:"col_constraints"`
-}
-
-func toSuperSchemaData(ss *schema.SuperSchema) (superSchemaData, error) {
-	encCols := make([]encodedColumn, ss.Size())
-	tn := make(map[uint64][]string)
-
-	i := 0
-	err := ss.Iter(func(tag uint64, col schema.Column) (stop bool, err error) {
-		encCols[i] = encodeColumn(col)
-		tn[tag] = ss.AllColumnNames(tag)
-		i++
-
-		return false, nil
-	})
-
-	if err != nil {
-		return superSchemaData{}, err
-	}
-
-	return superSchemaData{encCols, tn}, nil
-}
-
-func (ssd superSchemaData) decodeSuperSchema() (*schema.SuperSchema, error) {
-	numCols := len(ssd.Columns)
-	cols := make([]schema.Column, numCols)
-
-	for i, col := range ssd.Columns {
-		c, err := col.decodeColumn()
-		if err != nil {
-			return nil, err
-		}
-		cols[i] = c
-	}
-
-	colColl := schema.NewColCollection(cols...)
-
-	if ssd.TagNames == nil {
-		ssd.TagNames = make(map[uint64][]string)
-	}
-
-	return schema.UnmarshalSuperSchema(colColl, ssd.TagNames), nil
-}
-
-// MarshalSuperSchemaAsNomsValue creates a Noms value from a SuperSchema to be written to a RootValue.
-func MarshalSuperSchemaAsNomsValue(ctx context.Context, vrw types.ValueReadWriter, ss *schema.SuperSchema) (types.Value, error) {
-	ssd, err := toSuperSchemaData(ss)
-
-	if err != nil {
-		return types.EmptyStruct(vrw.Format()), err
-	}
-
-	val, err := marshal.Marshal(ctx, vrw, ssd)
-
-	if err != nil {
-		return types.EmptyStruct(vrw.Format()), err
-	}
-
-	if _, ok := val.(types.Struct); ok {
-		return val, nil
-	}
-
-	return types.EmptyStruct(vrw.Format()), errors.New("Table Super Schema could not be converted to types.Struct")
-}
-
-// UnmarshalSuperSchemaNomsValue takes a Noms value read from a RootValue and constructs a SuperSchema from it.
-func UnmarshalSuperSchemaNomsValue(ctx context.Context, nbf *types.NomsBinFormat, ssVal types.Value) (*schema.SuperSchema, error) {
-	var ssd superSchemaData
-	err := marshal.Unmarshal(ctx, nbf, ssVal, &ssd)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return ssd.decodeSuperSchema()
 }

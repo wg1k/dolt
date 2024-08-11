@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -26,17 +27,18 @@ import (
 // This is a dolt implementation of the MySQL type Time, thus most of the functionality
 // within is directly reliant on the go-mysql-server implementation.
 type timeType struct {
-	sqlTimeType sql.TimeType
+	sqlTimeType gmstypes.TimeType
 }
 
 var _ TypeInfo = (*timeType)(nil)
 
-var TimeType = &timeType{sql.Time}
+var TimeType = &timeType{gmstypes.Time}
 
 // ConvertNomsValueToValue implements TypeInfo interface.
 func (ti *timeType) ConvertNomsValueToValue(v types.Value) (interface{}, error) {
 	if val, ok := v.(types.Int); ok {
-		return ti.sqlTimeType.Unmarshal(int64(val)), nil
+		ret, _, err := ti.sqlTimeType.Convert(gmstypes.Timespan(val))
+		return ret, err
 	}
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
@@ -50,7 +52,8 @@ func (ti *timeType) ReadFrom(_ *types.NomsBinFormat, reader types.CodecReader) (
 	switch k {
 	case types.IntKind:
 		val := reader.ReadInt()
-		return ti.sqlTimeType.Unmarshal(val), nil
+		ret, _, err := ti.sqlTimeType.Convert(gmstypes.Timespan(val))
+		return ret, err
 	case types.NullKind:
 		return nil, nil
 	}
@@ -63,11 +66,11 @@ func (ti *timeType) ConvertValueToNomsValue(ctx context.Context, vrw types.Value
 	if v == nil {
 		return types.NullValue, nil
 	}
-	val, err := ti.sqlTimeType.Marshal(v)
+	val, _, err := ti.sqlTimeType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
-	return types.Int(val), nil
+	return types.Int(val.(gmstypes.Timespan)), nil
 }
 
 // Equals implements TypeInfo interface.
@@ -84,14 +87,11 @@ func (ti *timeType) FormatValue(v types.Value) (*string, error) {
 	if _, ok := v.(types.Null); ok || v == nil {
 		return nil, nil
 	}
-	strVal, err := ti.ConvertNomsValueToValue(v)
+	convVal, err := ti.ConvertNomsValueToValue(v)
 	if err != nil {
 		return nil, err
 	}
-	val, ok := strVal.(string)
-	if !ok {
-		return nil, fmt.Errorf(`"%v" has unexpectedly encountered a value of type "%T" from embedded type`, ti.String(), v)
-	}
+	val := convVal.(gmstypes.Timespan).String()
 	return &val, nil
 }
 
@@ -123,7 +123,7 @@ func (ti *timeType) NomsKind() types.NomsKind {
 
 // Promote implements TypeInfo interface.
 func (ti *timeType) Promote() TypeInfo {
-	return &timeType{ti.sqlTimeType.Promote().(sql.TimeType)}
+	return &timeType{ti.sqlTimeType.Promote().(gmstypes.TimeType)}
 }
 
 // String implements TypeInfo interface.
@@ -153,6 +153,8 @@ func timeTypeConverter(ctx context.Context, src *timeType, destTi TypeInfo) (tc 
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
@@ -162,6 +164,12 @@ func timeTypeConverter(ctx context.Context, src *timeType, destTi TypeInfo) (tc 
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

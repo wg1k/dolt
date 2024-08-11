@@ -15,7 +15,6 @@
 package tree
 
 import (
-	"bytes"
 	"context"
 	"io"
 
@@ -26,10 +25,16 @@ import (
 
 const patchBufferSize = 1024
 
-// CollisionFn is a callback that handles 3-way merging of NodeItems.
-// A typical implementation will attempt a cell-wise merge of the tuples,
-// or register a conflict if such a merge is not possible.
+// CollisionFn is a callback that handles 3-way merging of NodeItems when any
+// key collision occurs. A typical implementation will attempt a cell-wise merge
+// of the tuples, or register a conflict if such a merge is not possible.
 type CollisionFn func(left, right Diff) (Diff, bool)
+
+type MergeStats struct {
+	Adds          int
+	Modifications int
+	Removes       int
+}
 
 // ThreeWayMerge implements a three-way merge algorithm using |base| as the common ancestor, |right| as
 // the source branch, and |left| as the destination branch. Both |left| and |right| are diff'd against
@@ -37,23 +42,23 @@ type CollisionFn func(left, right Diff) (Diff, bool)
 // |right| are applied directly to |left|. This reduces the amount of write work and improves performance.
 // In the case that a key-value pair was modified on both |left| and |right| with different resulting
 // values, the CollisionFn is called to perform a cell-wise merge, or to throw a conflict.
-func ThreeWayMerge[S message.Serializer](
+func ThreeWayMerge[K ~[]byte, O Ordering[K], S message.Serializer](
 	ctx context.Context,
 	ns NodeStore,
 	left, right, base Node,
-	compare CompareFn,
 	collide CollisionFn,
+	leftSchemaChange, rightSchemaChange bool,
+	order O,
 	serializer S,
-) (final Node, err error) {
-
-	ld, err := DifferFromRoots(ctx, ns, base, left, compare)
+) (final Node, stats MergeStats, err error) {
+	ld, err := DifferFromRoots[K](ctx, ns, ns, base, left, order, leftSchemaChange)
 	if err != nil {
-		return Node{}, err
+		return Node{}, MergeStats{}, err
 	}
 
-	rd, err := DifferFromRoots(ctx, ns, base, right, compare)
+	rd, err := DifferFromRoots[K](ctx, ns, ns, base, right, order, rightSchemaChange)
 	if err != nil {
-		return Node{}, err
+		return Node{}, MergeStats{}, err
 	}
 
 	eg, ctx := errgroup.WithContext(ctx)
@@ -66,21 +71,21 @@ func ThreeWayMerge[S message.Serializer](
 				err = cerr
 			}
 		}()
-		err = sendPatches(ctx, ld, rd, patches, collide)
+		stats, err = sendPatches(ctx, ld, rd, patches, collide)
 		return
 	})
 
 	// consume |patches| and apply them to |left|
 	eg.Go(func() error {
-		final, err = ApplyMutations(ctx, ns, left, serializer, patches, compare)
+		final, err = ApplyMutations[K](ctx, ns, left, order, serializer, patches)
 		return err
 	})
 
 	if err = eg.Wait(); err != nil {
-		return Node{}, err
+		return Node{}, MergeStats{}, err
 	}
 
-	return final, nil
+	return final, stats, nil
 }
 
 // patchBuffer implements MutationIter. It consumes Diffs
@@ -124,7 +129,12 @@ func (ps patchBuffer) Close() error {
 	return nil
 }
 
-func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb CollisionFn) (err error) {
+func sendPatches[K ~[]byte, O Ordering[K]](
+	ctx context.Context,
+	l, r Differ[K, O],
+	buf patchBuffer,
+	cb CollisionFn,
+) (stats MergeStats, err error) {
 	var (
 		left, right Diff
 		lok, rok    = true, true
@@ -135,7 +145,7 @@ func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb Collision
 		err, lok = nil, false
 	}
 	if err != nil {
-		return err
+		return MergeStats{}, err
 	}
 
 	right, err = r.Next(ctx)
@@ -143,11 +153,11 @@ func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb Collision
 		err, rok = nil, false
 	}
 	if err != nil {
-		return err
+		return MergeStats{}, err
 	}
 
 	for lok && rok {
-		cmp := compareDiffKeys(left, right, l.cmp)
+		cmp := l.order.Compare(K(left.Key), K(right.Key))
 
 		switch {
 		case cmp < 0:
@@ -157,32 +167,32 @@ func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb Collision
 				err, lok = nil, false
 			}
 			if err != nil {
-				return err
+				return MergeStats{}, err
 			}
 
 		case cmp > 0:
 			err = buf.sendPatch(ctx, right)
 			if err != nil {
-				return err
+				return MergeStats{}, err
 			}
+			updateStats(right, &stats)
 
 			right, err = r.Next(ctx)
 			if err == io.EOF {
 				err, rok = nil, false
 			}
 			if err != nil {
-				return err
+				return MergeStats{}, err
 			}
 
 		case cmp == 0:
-			if !equalDiffVals(left, right) {
-				resolved, ok := cb(left, right)
-				if ok {
-					err = buf.sendPatch(ctx, resolved)
-				}
-				if err != nil {
-					return err
-				}
+			resolved, ok := cb(left, right)
+			if ok {
+				err = buf.sendPatch(ctx, resolved)
+				updateStats(right, &stats)
+			}
+			if err != nil {
+				return MergeStats{}, err
 			}
 
 			left, err = l.Next(ctx)
@@ -190,7 +200,7 @@ func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb Collision
 				err, lok = nil, false
 			}
 			if err != nil {
-				return err
+				return MergeStats{}, err
 			}
 
 			right, err = r.Next(ctx)
@@ -198,40 +208,42 @@ func sendPatches(ctx context.Context, l, r Differ, buf patchBuffer, cb Collision
 				err, rok = nil, false
 			}
 			if err != nil {
-				return err
+				return MergeStats{}, err
 			}
 		}
 	}
 
 	if lok {
 		// already in left
-		return nil
+		return stats, nil
 	}
 
 	for rok {
 		err = buf.sendPatch(ctx, right)
 		if err != nil {
-			return err
+			return MergeStats{}, err
 		}
+		updateStats(right, &stats)
 
 		right, err = r.Next(ctx)
 		if err == io.EOF {
 			err, rok = nil, false
 		}
 		if err != nil {
-			return err
+			return MergeStats{}, err
 		}
 	}
 
-	return nil
+	return stats, nil
 }
 
-func compareDiffKeys(left, right Diff, cmp CompareFn) int {
-	return cmp(Item(left.Key), Item(right.Key))
-}
-
-func equalDiffVals(left, right Diff) bool {
-	// todo(andy): bytes must be comparable
-	ok := left.Type == right.Type
-	return ok && bytes.Equal(left.To, right.To)
+func updateStats(right Diff, stats *MergeStats) {
+	switch right.Type {
+	case AddedDiff:
+		stats.Adds++
+	case RemovedDiff:
+		stats.Removes++
+	case ModifiedDiff:
+		stats.Modifications++
+	}
 }

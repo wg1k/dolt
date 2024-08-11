@@ -42,8 +42,7 @@ CREATE TABLE test (
 SQL
     run dolt table import -r test `batshelper 2pk5col-ints.csv`
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Error determining the output schema." ]] || false
-    [[ "$output" =~ "cause: input primary keys do not match primary keys of existing table" ]] || false
+    [[ "$output" =~ "Field 'pk' doesn't have a default value" ]] || false
 }
 
 @test "import-replace-tables: replace table using psv" {
@@ -79,8 +78,7 @@ CREATE TABLE test (
 SQL
     run dolt table import -r test `batshelper 1pk5col-ints.psv`
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Error determining the output schema." ]] || false
-    [[ "$output" =~ "cause: input primary keys do not match primary keys of existing table" ]] || false
+    [[ "$output" =~ "Field 'pk1' doesn't have a default value" ]] || false
 }
 
 @test "import-replace-tables: replace table using schema with csv" {
@@ -103,7 +101,7 @@ SQL
 @test "import-replace-tables: replace table using json" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -121,7 +119,7 @@ SQL
 @test "import-replace-tables: replace table using json with wrong schema" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`idz\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`idz\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first namez\` LONGTEXT COMMENT 'tag:1',
   \`last namez\` LONGTEXT COMMENT 'tag:2',
   \`titlez\` LONGTEXT COMMENT 'tag:3',
@@ -140,7 +138,7 @@ SQL
 @test "import-replace-tables: replace table using schema with json" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`idz\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`idz\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first namez\` LONGTEXT COMMENT 'tag:1',
   \`last namez\` LONGTEXT COMMENT 'tag:2',
   \`titlez\` LONGTEXT COMMENT 'tag:3',
@@ -182,7 +180,7 @@ SQL
 @test "import-replace-tables: replace table with bad json" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -193,13 +191,29 @@ CREATE TABLE employees (
 SQL
     run dolt table import -r employees `batshelper employees-tbl-bad.json`
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "An error occurred moving data" ]] || false
+    [[ "$output" =~ "An error occurred while moving data" ]] || false
+}
+
+@test "import-replace-tables: import table with unexpected JSON format" {
+    dolt sql <<SQL
+CREATE TABLE employees (
+  id INTEGER,
+  first_name VARCHAR(20) NOT NULL,
+  PRIMARY KEY (id)
+);
+SQL
+
+echo "[{\"id\": 1,\"first_name\":\"Wednesday\"},{\"id\": 2,\"first_name\":\"Monday\"}]" > unexpected.json
+    run dolt table import -r employees unexpected.json
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "An error occurred while moving data" ]] || false
+    [[ "$output" =~ "unexpected JSON format received, expected format: { \"rows\": [ json_row_objects... ] }" ]] || false
 }
 
 @test "import-replace-tables: replace table using xlsx file" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first\` LONGTEXT COMMENT 'tag:1',
   \`last\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -217,7 +231,7 @@ SQL
 @test "import-replace-tables: replace table using xlsx file with wrong schema" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -236,8 +250,7 @@ SQL
     [[ "$output" =~ "Import completed successfully." ]] || false
     run dolt table import -r test `batshelper 1pk5col-ints.csv`
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Error determining the output schema." ]] || false
-    [[ "$output" =~ "cause: input primary keys do not match primary keys of existing table" ]] || false
+    [[ "$output" =~ "Field 'pk1' doesn't have a default value" ]] || false
 }
 
 @test "import-replace-tables: replace table with 2 primary keys with a csv with 2 primary keys" {
@@ -253,7 +266,7 @@ SQL
 @test "import-replace-tables: replace table with a json with columns in different order" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -271,7 +284,7 @@ SQL
 @test "import-replace-tables: replace table with a csv with columns in different order" {
     dolt sql <<SQL
 CREATE TABLE employees (
-  \`id\` LONGTEXT NOT NULL COMMENT 'tag:0',
+  \`id\` varchar(20) NOT NULL COMMENT 'tag:0',
   \`first name\` LONGTEXT COMMENT 'tag:1',
   \`last name\` LONGTEXT COMMENT 'tag:2',
   \`title\` LONGTEXT COMMENT 'tag:3',
@@ -308,8 +321,7 @@ SQL
     dolt add .
     dolt commit --allow-empty -m "update table from parquet file"
 
-    skip_nbf_dolt_1
-    run dolt diff --summary main new_branch
+    run dolt diff --stat main new_branch
     [ "$status" -eq 0 ]
     [[ "$output" = "" ]] || false
 }
@@ -336,6 +348,7 @@ DELIM
 
     run dolt table import -r test 1pk5col-ints-updt.csv
     [ "$status" -eq 0 ]
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
     [[ "$output" =~ "Rows Processed: 1, Additions: 1, Modifications: 0, Had No Effect: 0" ]] || false
     [[ "$output" =~ "Import completed successfully." ]] || false
 
@@ -363,12 +376,44 @@ DELIM
 
     run dolt table import -r subset data.csv
     [ "$status" -eq 0 ]
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
+    [[ "$output" =~ "If unintentional, check for any typos in the import file's header" ]] || false
+    [[ "$output" =~ "Extra columns in import file:" ]] || false
+    [[ "$output" =~ "	c4" ]] || false
 
     # schema argument subsets the data and adds empty column
     run dolt sql -r csv -q "select * from subset ORDER BY pk"
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
     [ "${lines[1]}" = "0,1,2,3" ]
+}
+
+@test "import-replace-tables: different schema warning lists differing columns" {
+    cat <<SQL > schema.sql
+CREATE TABLE t (
+    pk INT NOT NULL,
+    c1 INT,
+    c2 INT,
+    c3 INT,
+    PRIMARY KEY (pk)
+);
+SQL
+    cat <<DELIM > data.csv
+pk,c4,c1,c3
+0,4,1,3
+DELIM
+
+    dolt sql < schema.sql
+    dolt sql -q "insert into t values (1000, 100, 1000, 10000)"
+
+    run dolt table import -r t data.csv
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Warning: The import file's schema does not match the table's schema" ]] || false
+    [[ "$output" =~ "If unintentional, check for any typos in the import file's header" ]] || false
+    [[ "$output" =~ "Missing columns in t:" ]] || false
+    [[ "$output" =~ "	c2" ]] || false
+    [[ "$output" =~ "Extra columns in import file:" ]] || false
+    [[ "$output" =~ "	c4" ]] || false
 }
 
 @test "import-replace-tables: Replace that breaks fk constraints correctly errors" {
@@ -400,4 +445,21 @@ DELIM
     run dolt table import -r colors colors-bad.csv
     [ "$status" -eq 1 ]
     [[ "$output" =~ "cannot truncate table colors as it is referenced in foreign key" ]] || false
+}
+
+@test "import-replace-tables: can't use --all-text with -r" {
+    dolt sql <<SQL
+CREATE TABLE test (
+  pk BIGINT NOT NULL COMMENT 'tag:0',
+  c1 BIGINT COMMENT 'tag:1',
+  c2 BIGINT COMMENT 'tag:2',
+  c3 BIGINT COMMENT 'tag:3',
+  c4 BIGINT COMMENT 'tag:4',
+  c5 BIGINT COMMENT 'tag:5',
+  PRIMARY KEY (pk)
+);
+SQL
+    run dolt table import -r --all-text test `batshelper 1pk5col-ints.csv`
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "fatal: --all-text is only supported for create operations" ]] || false
 }

@@ -10,18 +10,34 @@ if [ ! -z "$(ls $GEN_DIR)" ]; then
     rm $GEN_DIR/*.go
 fi
 
+FLATC=${FLATC:-$SRC/../../proto/third_party/flatbuffers/bazel-bin/flatc}
+
+if [ ! -x "$FLATC" ]; then
+  echo "$FLATC is not an executable. Did you remember to run 'bazel build //:flatc' in $(dirname $(dirname $FLATC))"
+  exit 1
+fi
+
 # generate golang (de)serialization package
-flatc -o $GEN_DIR --gen-onefile --filename-suffix "" --gen-mutable --go-namespace "serial" --go \
-  commit.fbs \
-  prolly.fbs \
+"$FLATC" -o $GEN_DIR --gen-onefile --filename-suffix "" --gen-mutable --go-namespace "serial" --go \
   addressmap.fbs \
+  blob.fbs \
+  branchcontrol.fbs \
+  collation.fbs \
+  commit.fbs \
+  commitclosure.fbs \
+  encoding.fbs \
+  foreign_key.fbs \
+  mergeartifacts.fbs \
+  prolly.fbs \
   rootvalue.fbs \
   schema.fbs \
+  stash.fbs \
+  stashlist.fbs \
   storeroot.fbs \
+  stat.fbs \
   table.fbs \
   tag.fbs \
-  workingset.fbs \
-  encoding.fbs
+  workingset.fbs
 
 # prefix files with copyright header
 for FILE in $GEN_DIR/*.go;

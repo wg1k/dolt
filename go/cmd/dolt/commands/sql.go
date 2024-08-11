@@ -21,21 +21,20 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/abiosoft/readline"
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/expression"
-	"github.com/dolthub/go-mysql-server/sql/parse"
-	"github.com/dolthub/go-mysql-server/sql/plan"
-	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/dolthub/ishell"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 	"github.com/dolthub/vitess/go/vt/vterrors"
 	"github.com/fatih/color"
 	"github.com/flynn-archive/go-shlex"
+	textunicode "golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
+	"gopkg.in/src-d/go-errors.v1"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands/engine"
@@ -43,21 +42,11 @@ import (
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	dsqle "github.com/dolthub/dolt/go/libraries/doltcore/sqle"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dtables"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 	"github.com/dolthub/dolt/go/libraries/utils/iohelp"
 	"github.com/dolthub/dolt/go/libraries/utils/osutil"
-)
-
-type batchMode int64
-
-const (
-	invalidBatchMode batchMode = iota
-	insertBatchMode
-	deleteBatchMode
 )
 
 var sqlDocs = cli.CommandDocumentationContent{
@@ -66,39 +55,51 @@ var sqlDocs = cli.CommandDocumentationContent{
 
 Multiple SQL statements must be separated by semicolons. Use {{.EmphasisLeft}}-b{{.EmphasisRight}} to enable batch mode to speed up large batches of INSERT / UPDATE statements. Pipe SQL files to dolt sql (no {{.EmphasisLeft}}-q{{.EmphasisRight}}) to execute a SQL import or update script. 
 
-Queries can be saved to the query catalog with {{.EmphasisLeft}}-s{{.EmphasisRight}}. Alternatively {{.EmphasisLeft}}-x{{.EmphasisRight}} can be used to execute a saved query by name.
+By default this command uses the dolt database in the current working directory. If you would prefer to use a different directory, user the {{.EmphasisLeft}}--data-dir <directory>{{.EmphasisRight}} argument before the sql subcommand.
 
-By default this command uses the dolt database in the current working directory, as well as any dolt databases that are found in the current directory. Any databases created with CREATE DATABASE are placed in the current directory as well. Running with {{.EmphasisLeft}}--multi-db-dir <directory>{{.EmphasisRight}} uses each of the subdirectories of the supplied directory (each subdirectory must be a valid dolt data repository) as databases. Subdirectories starting with '.' are ignored.`,
+If a server is running for the database in question, then the query will go through the server automatically. If connecting to a remote server is preferred, used the {{.EmphasisLeft}}--host <host>{{.EmphasisRight}} and {{.EmphasisLeft}}--port <port>{{.EmphasisRight}} global arguments. See 'dolt --help' for more information about global arguments.`,
 
 	Synopsis: []string{
 		"",
 		"< script.sql",
-		"[--multi-db-dir {{.LessThan}}directory{{.GreaterThan}}] [-r {{.LessThan}}result format{{.GreaterThan}}]",
 		"-q {{.LessThan}}query{{.GreaterThan}} [-r {{.LessThan}}result format{{.GreaterThan}}] [-s {{.LessThan}}name{{.GreaterThan}} -m {{.LessThan}}message{{.GreaterThan}}] [-b]",
-		"-q {{.LessThan}}query{{.GreaterThan}} --multi-db-dir {{.LessThan}}directory{{.GreaterThan}} [-r {{.LessThan}}result format{{.GreaterThan}}] [-b]",
 		"-x {{.LessThan}}name{{.GreaterThan}}",
 		"--list-saved",
 	},
 }
 
+var ErrMultipleDoltCfgDirs = errors.NewKind("multiple .doltcfg directories detected: '%s' and '%s'; pass one of the directories using option --doltcfg-dir")
+
 const (
-	QueryFlag      = "query"
-	FormatFlag     = "result-format"
-	saveFlag       = "save"
-	executeFlag    = "execute"
-	listSavedFlag  = "list-saved"
-	messageFlag    = "message"
-	BatchFlag      = "batch"
-	multiDBDirFlag = "multi-db-dir"
-	continueFlag   = "continue"
-	fileInputFlag  = "file"
-	welcomeMsg     = `# Welcome to the DoltSQL shell.
+	QueryFlag             = "query"
+	FormatFlag            = "result-format"
+	saveFlag              = "save"
+	executeFlag           = "execute"
+	listSavedFlag         = "list-saved"
+	messageFlag           = "message"
+	BatchFlag             = "batch"
+	DataDirFlag           = "data-dir"
+	MultiDBDirFlag        = "multi-db-dir"
+	CfgDirFlag            = "doltcfg-dir"
+	DefaultCfgDirName     = ".doltcfg"
+	PrivsFilePathFlag     = "privilege-file"
+	BranchCtrlPathFlag    = "branch-control-file"
+	DefaultPrivsName      = "privileges.db"
+	DefaultBranchCtrlName = "branch_control.db"
+	continueFlag          = "continue"
+	fileInputFlag         = "file"
+	UserFlag              = "user"
+	DefaultUser           = "root"
+	DefaultHost           = "localhost"
+	UseDbFlag             = "use-db"
+	ProfileFlag           = "profile"
+
+	welcomeMsg = `# Welcome to the DoltSQL shell.
 # Statements must be terminated with ';'.
-# "exit" or "quit" (or Ctrl-D) to exit.`
+# "exit" or "quit" (or Ctrl-D) to exit. "\help" for help.`
 )
 
-var delimiterRegex = regexp.MustCompile(`(?i)^\s*DELIMITER\s+(\S+)\s*(\s+\S+\s*)?$`)
-
+// TODO: get rid of me, use a real integration point to define system variables
 func init() {
 	dsqle.AddDoltSystemVariables()
 }
@@ -125,24 +126,22 @@ func (cmd SqlCmd) Description() string {
 	return "Run a SQL query against tables in repository."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd SqlCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd SqlCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, sqlDocs, ap))
+	return cli.NewCommandDocumentation(sqlDocs, ap)
 }
 
 func (cmd SqlCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
-	ap.SupportsString(QueryFlag, "q", "SQL query to run", "Runs a single query and exits")
-	ap.SupportsString(FormatFlag, "r", "result output format", "How to format result output. Valid values are tabular, csv, json, vertical. Defaults to tabular. ")
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
+	ap.SupportsString(QueryFlag, "q", "SQL query to run", "Runs a single query and exits.")
+	ap.SupportsString(FormatFlag, "r", "result output format", "How to format result output. Valid values are tabular, csv, json, vertical, and parquet. Defaults to tabular.")
 	ap.SupportsString(saveFlag, "s", "saved query name", "Used with --query, save the query to the query catalog with the name provided. Saved queries can be examined in the dolt_query_catalog system table.")
-	ap.SupportsString(executeFlag, "x", "saved query name", "Executes a saved query with the given name")
-	ap.SupportsFlag(listSavedFlag, "l", "Lists all saved queries")
-	ap.SupportsString(messageFlag, "m", "saved query description", "Used with --query and --save, saves the query with the descriptive message given. See also --name")
-	ap.SupportsFlag(BatchFlag, "b", "Use to enable more efficient batch processing for large SQL import scripts consisting of only INSERT statements. Other statements types are not guaranteed to work in this mode.")
-	ap.SupportsString(multiDBDirFlag, "", "directory", "Defines a directory whose subdirectories should all be dolt data repositories accessible as independent databases within ")
-	ap.SupportsFlag(continueFlag, "c", "continue running queries on an error. Used for batch mode only.")
-	ap.SupportsString(fileInputFlag, "", "input file", "Execute statements from the file given")
+	ap.SupportsString(executeFlag, "x", "saved query name", "Executes a saved query with the given name.")
+	ap.SupportsFlag(listSavedFlag, "l", "List all saved queries.")
+	ap.SupportsString(messageFlag, "m", "saved query description", "Used with --query and --save, saves the query with the descriptive message given. See also `--name`.")
+	ap.SupportsFlag(BatchFlag, "b", "Use to enable more efficient batch processing for large SQL import scripts. This mode is no longer supported and this flag is a no-op. To speed up your SQL imports, use either LOAD DATA, or structure your SQL import script to insert many rows per statement.")
+	ap.SupportsFlag(continueFlag, "c", "Continue running queries on an error. Used for batch mode only.")
+	ap.SupportsString(fileInputFlag, "f", "input file", "Execute statements from the file given.")
 	return ap
 }
 
@@ -152,7 +151,7 @@ func (cmd SqlCmd) EventType() eventsapi.ClientEventType {
 }
 
 // RequiresRepo indicates that this command does not have to be run from within a dolt data repository directory.
-// In this case it is because this command supports the multiDBDirFlag which can pass in a directory.  In the event that
+// In this case it is because this command supports the DataDirFlag which can pass in a directory.  In the event that
 // that parameter is not provided there is additional error handling within this command to make sure that this was in
 // fact run from within a dolt data repository directory.
 func (cmd SqlCmd) RequiresRepo() bool {
@@ -162,12 +161,25 @@ func (cmd SqlCmd) RequiresRepo() bool {
 // Exec executes the command
 // Unlike other commands, sql doesn't set a new working root directly, as the SQL layer updates the working set as
 // necessary when committing work.
-func (cmd SqlCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd SqlCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, sqlDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, sqlDocs, ap))
+	apr, err := cmd.handleLegacyArguments(ap, commandStr, args)
+	if err != nil {
+		if err == argparser.ErrHelp {
+			help()
+			return 0
+		}
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
 
-	apr := cli.ParseArgsOrDie(ap, args, help)
-	err := validateSqlArgs(apr)
+	err = validateSqlArgs(apr)
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+
+	globalArgs := cliCtx.GlobalArgs()
+	err = validateSqlArgs(globalArgs)
 	if err != nil {
 		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
 	}
@@ -175,47 +187,52 @@ func (cmd SqlCmd) Exec(ctx context.Context, commandStr string, args []string, dE
 	// We need a username and password for many SQL commands, so set defaults if they don't exist
 	dEnv.Config.SetFailsafes(env.DefaultFailsafeConfig)
 
-	mrEnv, verr := getMultiRepoEnv(ctx, apr, dEnv, cmd)
-	if verr != nil {
-		return HandleVErrAndExitCode(verr, usage)
-	}
-
-	initialRoots, err := mrEnv.GetWorkingRoots(ctx)
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-
-	// Choose the first DB as the current one. This will be the DB in the working dir if there was one there
-	var currentDb string
-	mrEnv.Iter(func(name string, _ *env.DoltEnv) (stop bool, err error) {
-		currentDb = name
-		return true, nil
-	})
-
 	format := engine.FormatTabular
 	if formatSr, ok := apr.GetValue(FormatFlag); ok {
 		var verr errhand.VerboseError
 		format, verr = GetResultFormat(formatSr)
 		if verr != nil {
-			return HandleVErrAndExitCode(errhand.VerboseErrorFromError(verr), usage)
+			return HandleVErrAndExitCode(verr, usage)
 		}
 	}
 
+	// restrict LOAD FILE invocations to current directory
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "/dev/null"
+	}
+	err = sql.SystemVariables.AssignValues(map[string]interface{}{
+		"secure_file_priv": wd,
+	})
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
+	if err != nil {
+		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	}
+	if closeFunc != nil {
+		defer closeFunc()
+	}
+
 	if query, queryOK := apr.GetValue(QueryFlag); queryOK {
-		return queryMode(ctx, mrEnv, initialRoots, apr, query, currentDb, format, usage)
+		if apr.Contains(saveFlag) {
+			return execSaveQuery(sqlCtx, dEnv, queryist, apr, query, format, usage)
+		}
+		return queryMode(sqlCtx, queryist, apr, query, format, usage)
 	} else if savedQueryName, exOk := apr.GetValue(executeFlag); exOk {
-		return savedQueryMode(ctx, mrEnv, initialRoots, savedQueryName, currentDb, format, usage)
+		return executeSavedQuery(sqlCtx, queryist, dEnv, savedQueryName, format, usage)
 	} else if apr.Contains(listSavedFlag) {
-		return listSavedQueriesMode(ctx, mrEnv, initialRoots, currentDb, format, usage)
+		return listSavedQueries(sqlCtx, queryist, dEnv, format, usage)
 	} else {
 		// Run in either batch mode for piped input, or shell mode for interactive
 		isTty := false
-		runInBatchMode := apr.Contains(BatchFlag)
 
 		fi, err := os.Stdin.Stat()
 		if err != nil {
 			if !osutil.IsWindows {
-				return HandleVErrAndExitCode(errhand.BuildDError("Couldn't stat STDIN. This is a bug.").Build(), usage)
+				return sqlHandleVErrAndExitCode(queryist, errhand.BuildDError("Couldn't stat STDIN. This is a bug.").Build(), usage)
 			}
 		} else {
 			isTty = fi.Mode()&os.ModeCharDevice != 0
@@ -223,29 +240,35 @@ func (cmd SqlCmd) Exec(ctx context.Context, commandStr string, args []string, dE
 
 		_, continueOnError := apr.GetValue(continueFlag)
 
-		input := os.Stdin
+		var input io.Reader = os.Stdin
 		if fileInput, ok := apr.GetValue(fileInputFlag); ok {
 			isTty = false
 			input, err = os.OpenFile(fileInput, os.O_RDONLY, os.ModePerm)
 			if err != nil {
-				return HandleVErrAndExitCode(errhand.BuildDError("couldn't open file %s", fileInput).Build(), usage)
+				return sqlHandleVErrAndExitCode(queryist, errhand.BuildDError("couldn't open file %s", fileInput).Build(), usage)
 			}
+			info, err := os.Stat(fileInput)
+			if err != nil {
+				return sqlHandleVErrAndExitCode(queryist, errhand.BuildDError("couldn't get file size %s", fileInput).Build(), usage)
+			}
+
+			input = transform.NewReader(input, textunicode.BOMOverride(transform.Nop))
+
+			// initialize fileReadProg global variable if there is a file to process queries from
+			fileReadProg = &fileReadProgress{bytesRead: 0, totalBytes: info.Size(), printed: 0, displayStrLen: 0}
+			defer fileReadProg.close()
 		}
 
 		if isTty {
-			verr := execShell(ctx, mrEnv, format, currentDb)
-			if verr != nil {
-				return HandleVErrAndExitCode(verr, usage)
-			}
-		} else if runInBatchMode {
-			verr := execBatch(ctx, continueOnError, mrEnv, input, format, currentDb)
-			if verr != nil {
-				return HandleVErrAndExitCode(verr, usage)
+			err := execShell(sqlCtx, queryist, format, cliCtx)
+			if err != nil {
+				return sqlHandleVErrAndExitCode(queryist, errhand.VerboseErrorFromError(err), usage)
 			}
 		} else {
-			verr := execMultiStatements(ctx, continueOnError, mrEnv, input, format, currentDb)
-			if verr != nil {
-				return HandleVErrAndExitCode(verr, usage)
+			input = transform.NewReader(input, textunicode.BOMOverride(transform.Nop))
+			err := execBatchMode(sqlCtx, queryist, input, continueOnError, format)
+			if err != nil {
+				return sqlHandleVErrAndExitCode(queryist, errhand.VerboseErrorFromError(err), usage)
 			}
 		}
 	}
@@ -253,19 +276,79 @@ func (cmd SqlCmd) Exec(ctx context.Context, commandStr string, args []string, dE
 	return 0
 }
 
-func listSavedQueriesMode(
-	ctx context.Context,
-	mrEnv *env.MultiRepoEnv,
-	initialRoots map[string]*doltdb.RootValue,
-	currentDb string,
-	format engine.PrintResultFormat,
-	usage cli.UsagePrinter,
-) int {
-	hasQC, err := initialRoots[currentDb].HasTable(ctx, doltdb.DoltQueryCatalogTableName)
+// sqlHandleVErrAndExitCode is a helper function to print errors to the user. Currently, the Queryist interface is used to
+// determine if this is a local or remote execution. This is hacky, and too simplistic. We should possibly add an error
+// messaging interface to the CliContext.
+func sqlHandleVErrAndExitCode(queryist cli.Queryist, verr errhand.VerboseError, usage cli.UsagePrinter) int {
+	if verr != nil {
+		if msg := verr.Verbose(); strings.TrimSpace(msg) != "" {
+			cli.PrintErrln(msg)
+		}
+
+		if verr.ShouldPrintUsage() {
+			usage()
+		}
+
+		return 1
+	}
+
+	return 0
+}
+
+// handleLegacyArguments is a temporary function to parse args, and print a error and explanation when the old form is provided.
+func (cmd SqlCmd) handleLegacyArguments(ap *argparser.ArgParser, commandStr string, args []string) (*argparser.ArgParseResults, error) {
+
+	apr, err := ap.Parse(args)
+
+	if err != nil {
+		legacyParser := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
+		legacyParser.SupportsString(QueryFlag, "q", "SQL query to run", "Runs a single query and exits.")
+		legacyParser.SupportsString(FormatFlag, "r", "result output format", "How to format result output. Valid values are tabular, csv, json, vertical, and parquet. Defaults to tabular.")
+		legacyParser.SupportsString(saveFlag, "s", "saved query name", "Used with --query, save the query to the query catalog with the name provided. Saved queries can be examined in the dolt_query_catalog system table.")
+		legacyParser.SupportsString(executeFlag, "x", "saved query name", "Executes a saved query with the given name.")
+		legacyParser.SupportsFlag(listSavedFlag, "l", "List all saved queries.")
+		legacyParser.SupportsString(messageFlag, "m", "saved query description", "Used with --query and --save, saves the query with the descriptive message given. See also `--name`.")
+		legacyParser.SupportsFlag(BatchFlag, "b", "Use to enable more efficient batch processing for large SQL import scripts. This mode is no longer supported and this flag is a no-op. To speed up your SQL imports, use either LOAD DATA, or structure your SQL import script to insert many rows per statement.")
+		legacyParser.SupportsString(DataDirFlag, "", "directory", "Defines a directory whose subdirectories should all be dolt data repositories accessible as independent databases within. Defaults to the current directory.")
+		legacyParser.SupportsString(MultiDBDirFlag, "", "directory", "Defines a directory whose subdirectories should all be dolt data repositories accessible as independent databases within. Defaults to the current directory. This is deprecated, you should use `--data-dir` instead")
+		legacyParser.SupportsString(CfgDirFlag, "", "directory", "Defines a directory that contains configuration files for dolt. Defaults to `$data-dir/.doltcfg`. Will only be created if there is a change that affect configuration settings.")
+		legacyParser.SupportsFlag(continueFlag, "c", "Continue running queries on an error. Used for batch mode only.")
+		legacyParser.SupportsString(fileInputFlag, "f", "input file", "Execute statements from the file given.")
+		legacyParser.SupportsString(PrivsFilePathFlag, "", "privilege file", "Path to a file to load and store users and grants. Defaults to `$doltcfg-dir/privileges.db`. Will only be created if there is a change to privileges.")
+		legacyParser.SupportsString(BranchCtrlPathFlag, "", "branch control file", "Path to a file to load and store branch control permissions. Defaults to `$doltcfg-dir/branch_control.db`. Will only be created if there is a change to branch control permissions.")
+		legacyParser.SupportsString(UserFlag, "u", "user", fmt.Sprintf("Defines the local superuser (defaults to `%v`). If the specified user exists, will take on permissions of that user.", DefaultUser))
+
+		_, newErr := legacyParser.Parse(args)
+
+		if newErr != nil {
+			// Neither form of the arguments works. Print the usage and the error of the first parse.
+			return nil, err
+		}
+
+		// The legacy form worked, so print an error and exit.
+		err = fmt.Errorf("SQL arguments have changed. Move global arguments before the sql sub command.")
+		return nil, err
+	}
+
+	return apr, nil
+
+}
+
+func listSavedQueries(ctx *sql.Context, qryist cli.Queryist, dEnv *env.DoltEnv, format engine.PrintResultFormat, usage cli.UsagePrinter) int {
+	if !dEnv.Valid() {
+		return sqlHandleVErrAndExitCode(qryist, errhand.BuildDError("error: --%s must be used in a dolt database directory.", listSavedFlag).Build(), usage)
+	}
+
+	workingRoot, err := dEnv.WorkingRoot(ctx)
+	if err != nil {
+		return sqlHandleVErrAndExitCode(qryist, errhand.VerboseErrorFromError(err), usage)
+	}
+
+	hasQC, err := workingRoot.HasTable(ctx, doltdb.TableName{Name: doltdb.DoltQueryCatalogTableName})
 
 	if err != nil {
 		verr := errhand.BuildDError("error: Failed to read from repository.").AddCause(err).Build()
-		return HandleVErrAndExitCode(verr, usage)
+		return sqlHandleVErrAndExitCode(qryist, verr, usage)
 	}
 
 	if !hasQC {
@@ -273,259 +356,94 @@ func listSavedQueriesMode(
 	}
 
 	query := "SELECT * FROM " + doltdb.DoltQueryCatalogTableName
-	return HandleVErrAndExitCode(execQuery(ctx, mrEnv, query, format, currentDb), usage)
+	return sqlHandleVErrAndExitCode(qryist, execQuery(ctx, qryist, query, format), usage)
 }
 
-func savedQueryMode(
-	ctx context.Context,
-	mrEnv *env.MultiRepoEnv,
-	initialRoots map[string]*doltdb.RootValue,
-	savedQueryName string,
-	currentDb string,
-	format engine.PrintResultFormat,
-	usage cli.UsagePrinter,
-) int {
-	sq, err := dtables.RetrieveFromQueryCatalog(ctx, initialRoots[currentDb], savedQueryName)
+func executeSavedQuery(ctx *sql.Context, qryist cli.Queryist, dEnv *env.DoltEnv, savedQueryName string, format engine.PrintResultFormat, usage cli.UsagePrinter) int {
+	if !dEnv.Valid() {
+		return sqlHandleVErrAndExitCode(qryist, errhand.BuildDError("error: --%s must be used in a dolt database directory.", executeFlag).Build(), usage)
+	}
+
+	workingRoot, err := dEnv.WorkingRoot(ctx)
+	if err != nil {
+		return sqlHandleVErrAndExitCode(qryist, errhand.VerboseErrorFromError(err), usage)
+	}
+
+	sq, err := dtables.RetrieveFromQueryCatalog(ctx, workingRoot, savedQueryName)
 
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		return sqlHandleVErrAndExitCode(qryist, errhand.VerboseErrorFromError(err), usage)
 	}
 
 	cli.PrintErrf("Executing saved query '%s':\n%s\n", savedQueryName, sq.Query)
-	return HandleVErrAndExitCode(execQuery(ctx, mrEnv, sq.Query, format, currentDb), usage)
+	return sqlHandleVErrAndExitCode(qryist, execQuery(ctx, qryist, sq.Query, format), usage)
 }
 
 func queryMode(
-	ctx context.Context,
-	mrEnv *env.MultiRepoEnv,
-	initialRoots map[string]*doltdb.RootValue,
+	ctx *sql.Context,
+	qryist cli.Queryist,
 	apr *argparser.ArgParseResults,
 	query string,
-	currentDb string,
 	format engine.PrintResultFormat,
 	usage cli.UsagePrinter,
 ) int {
 
-	// query mode has 3 sub modes:
-	// If --batch is provided, run with batch optimizations
-	// If --save is provided, run a single query and save it
-	// Otherwise, attempt to parse and execute multiple queries separated by ';'
-	batchMode := apr.Contains(BatchFlag)
-	saveName := apr.GetValueOrDefault(saveFlag, "")
-
 	_, continueOnError := apr.GetValue(continueFlag)
 
-	if saveName != "" {
-		verr := execQuery(ctx, mrEnv, query, format, currentDb)
-		if verr != nil {
-			return HandleVErrAndExitCode(verr, usage)
-		}
-
-		if saveName != "" {
-			saveMessage := apr.GetValueOrDefault(messageFlag, "")
-			newRoot, verr := saveQuery(ctx, initialRoots[currentDb], query, saveName, saveMessage)
-			if verr != nil {
-				return HandleVErrAndExitCode(verr, usage)
-			}
-
-			verr = UpdateWorkingWithVErr(mrEnv.GetEnv(currentDb), newRoot)
-			if verr != nil {
-				return HandleVErrAndExitCode(verr, usage)
-			}
-		}
-	} else if batchMode {
-		batchInput := strings.NewReader(query)
-		verr := execBatch(ctx, continueOnError, mrEnv, batchInput, format, currentDb)
-		if verr != nil {
-			return HandleVErrAndExitCode(verr, usage)
-		}
-	} else {
-		input := strings.NewReader(query)
-		verr := execMultiStatements(ctx, continueOnError, mrEnv, input, format, currentDb)
-		if verr != nil {
-			return HandleVErrAndExitCode(verr, usage)
-		}
+	input := strings.NewReader(query)
+	err := execBatchMode(ctx, qryist, input, continueOnError, format)
+	if err != nil {
+		return sqlHandleVErrAndExitCode(qryist, errhand.VerboseErrorFromError(err), usage)
 	}
 
 	return 0
 }
 
-// getMultiRepoEnv returns an appropriate MultiRepoEnv for this invocation of the command
-func getMultiRepoEnv(ctx context.Context, apr *argparser.ArgParseResults, dEnv *env.DoltEnv, cmd SqlCmd) (*env.MultiRepoEnv, errhand.VerboseError) {
-	var mrEnv *env.MultiRepoEnv
-	multiDir, multiDbMode := apr.GetValue(multiDBDirFlag)
-	if multiDbMode {
-		var err error
-		mrEnv, err = env.LoadMultiEnvFromDir(ctx, env.GetCurrentUserHomeDir, dEnv.Config.WriteableConfig(), dEnv.FS, multiDir, cmd.VersionStr)
-		if err != nil {
-			return nil, errhand.VerboseErrorFromError(err)
-		}
-	} else {
-		var err error
-		mrEnv, err = env.DoltEnvAsMultiEnv(ctx, dEnv)
-		if err != nil {
-			return nil, errhand.VerboseErrorFromError(err)
-		}
+func execSaveQuery(ctx *sql.Context, dEnv *env.DoltEnv, qryist cli.Queryist, apr *argparser.ArgParseResults, query string, format engine.PrintResultFormat, usage cli.UsagePrinter) int {
+	if !dEnv.Valid() {
+		return sqlHandleVErrAndExitCode(qryist, errhand.BuildDError("error: --%s must be used in a dolt database directory.", saveFlag).Build(), usage)
 	}
 
-	return mrEnv, nil
-}
+	saveName := apr.GetValueOrDefault(saveFlag, "")
 
-func execShell(
-	ctx context.Context,
-	mrEnv *env.MultiRepoEnv,
-	format engine.PrintResultFormat,
-	initialDb string,
-) errhand.VerboseError {
-	se, err := engine.NewSqlEngine(
-		ctx,
-		mrEnv,
-		format,
-		initialDb,
-		false,
-		"",
-		"",
-		"root",
-		"",
-		true,
-	)
+	verr := execQuery(ctx, qryist, query, format)
+	if verr != nil {
+		return sqlHandleVErrAndExitCode(qryist, verr, usage)
+	}
+
+	workingRoot, err := dEnv.WorkingRoot(ctx)
 	if err != nil {
-		return errhand.VerboseErrorFromError(err)
+		return sqlHandleVErrAndExitCode(qryist, errhand.BuildDError("error: failed to get working root").AddCause(err).Build(), usage)
 	}
-	defer se.Close()
 
-	err = runShell(ctx, se, mrEnv)
+	saveMessage := apr.GetValueOrDefault(messageFlag, "")
+	newRoot, verr := saveQuery(ctx, workingRoot, query, saveName, saveMessage)
+	if verr != nil {
+		return sqlHandleVErrAndExitCode(qryist, verr, usage)
+	}
+
+	err = dEnv.UpdateWorkingRoot(ctx, newRoot)
 	if err != nil {
-		return errhand.BuildDError(err.Error()).Build()
-	}
-	return nil
-}
-
-func execBatch(
-	ctx context.Context,
-	continueOnErr bool,
-	mrEnv *env.MultiRepoEnv,
-	batchInput io.Reader,
-	format engine.PrintResultFormat,
-	initialDb string,
-) errhand.VerboseError {
-	se, err := engine.NewSqlEngine(
-		ctx,
-		mrEnv,
-		format,
-		initialDb,
-		false,
-		"",
-		"",
-		"root",
-		"",
-		false,
-	)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-	defer se.Close()
-
-	sqlCtx, err := se.NewContext(ctx)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
+		return sqlHandleVErrAndExitCode(qryist, errhand.BuildDError("error: failed to update working root").AddCause(err).Build(), usage)
 	}
 
-	// Add root client
-	sqlCtx.Session.SetClient(sql.Client{User: "root", Address: "%", Capabilities: 0})
-
-	// In batch mode, we need to set a couple flags on the session to prevent constant flushes to disk
-	dsess.DSessFromSess(sqlCtx.Session).EnableBatchedMode()
-	err = runBatchMode(sqlCtx, se, batchInput, continueOnErr)
-	if err != nil {
-		// If we encounter an error, attempt to flush what we have so far to disk before exiting
-		flushErr := flushBatchedEdits(sqlCtx, se)
-		if flushErr != nil {
-			cli.PrintErrf("Could not flush batch: %s", err.Error())
-		}
-
-		return errhand.BuildDError("Error processing batch").AddCause(err).Build()
-	}
-
-	return nil
-}
-
-func execMultiStatements(
-	ctx context.Context,
-	continueOnErr bool,
-	mrEnv *env.MultiRepoEnv,
-	batchInput io.Reader,
-	format engine.PrintResultFormat,
-	initialDb string,
-) errhand.VerboseError {
-	se, err := engine.NewSqlEngine(
-		ctx,
-		mrEnv,
-		format,
-		initialDb,
-		false,
-		"",
-		"",
-		"root",
-		"",
-		true,
-	)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-	defer se.Close()
-
-	sqlCtx, err := se.NewContext(ctx)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-
-	// Add root client
-	sqlCtx.Session.SetClient(sql.Client{User: "root", Address: "%", Capabilities: 0})
-
-	err = runMultiStatementMode(sqlCtx, se, batchInput, continueOnErr)
-	return errhand.VerboseErrorFromError(err)
+	return 0
 }
 
 func execQuery(
-	ctx context.Context,
-	mrEnv *env.MultiRepoEnv,
+	sqlCtx *sql.Context,
+	qryist cli.Queryist,
 	query string,
 	format engine.PrintResultFormat,
-	initialDb string,
 ) errhand.VerboseError {
-	se, err := engine.NewSqlEngine(
-		ctx,
-		mrEnv,
-		format,
-		initialDb,
-		false,
-		"",
-		"",
-		"root",
-		"",
-		true,
-	)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-	defer se.Close()
 
-	sqlCtx, err := se.NewContext(ctx)
-	if err != nil {
-		return errhand.VerboseErrorFromError(err)
-	}
-
-	// Add root client
-	sqlCtx.Session.SetClient(sql.Client{User: "root", Address: "%", Capabilities: 0})
-
-	sqlSch, rowIter, err := processQuery(sqlCtx, query, se)
+	sqlSch, rowIter, _, err := processQuery(sqlCtx, query, qryist)
 	if err != nil {
 		return formatQueryError("", err)
 	}
 
 	if rowIter != nil {
-		err = engine.PrettyPrintResults(sqlCtx, se.GetReturnFormat(), sqlSch, rowIter, HasTopLevelOrderByClause(query))
+		err = engine.PrettyPrintResults(sqlCtx, format, sqlSch, rowIter)
 		if err != nil {
 			return errhand.VerboseErrorFromError(err)
 		}
@@ -541,7 +459,8 @@ func formatQueryError(message string, err error) errhand.VerboseError {
 	)
 
 	if se, ok := vterrors.AsSyntaxError(err); ok {
-		verrBuilder := errhand.BuildDError("Error parsing SQL")
+		verrBuilder := errhand.BuildDError(message)
+		verrBuilder.AddDetails("Error parsing SQL: ")
 		verrBuilder.AddDetails(se.Message)
 
 		statement := se.Statement
@@ -605,6 +524,8 @@ func GetResultFormat(format string) (engine.PrintResultFormat, errhand.VerboseEr
 		return engine.FormatNull, nil
 	case "vertical":
 		return engine.FormatVertical, nil
+	case "parquet":
+		return engine.FormatParquet, nil
 	default:
 		return engine.FormatTabular, errhand.BuildDError("Invalid argument for --result-format. Valid values are tabular, csv, json").Build()
 	}
@@ -614,13 +535,17 @@ func validateSqlArgs(apr *argparser.ArgParseResults) error {
 	_, query := apr.GetValue(QueryFlag)
 	_, save := apr.GetValue(saveFlag)
 	_, msg := apr.GetValue(messageFlag)
-	_, batch := apr.GetValue(BatchFlag)
 	_, list := apr.GetValue(listSavedFlag)
 	_, execute := apr.GetValue(executeFlag)
-	_, multiDB := apr.GetValue(multiDBDirFlag)
+	_, dataDir := apr.GetValue(DataDirFlag)
+	_, multiDbDir := apr.GetValue(MultiDBDirFlag)
 
 	if len(apr.Args) > 0 && !query {
 		return errhand.BuildDError("Invalid Argument: use --query or -q to pass inline SQL queries").Build()
+	}
+
+	if dataDir && multiDbDir {
+		return errhand.BuildDError("Invalid Argument: --data-dir is not compatible with --multi-db-dir").Build()
 	}
 
 	if execute {
@@ -632,8 +557,8 @@ func validateSqlArgs(apr *argparser.ArgParseResults) error {
 			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --message|-m").Build()
 		} else if save {
 			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --save|-s").Build()
-		} else if multiDB {
-			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --multi-db-dir").Build()
+		} else if dataDir || multiDbDir {
+			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --data-dir").Build()
 		}
 	}
 
@@ -646,19 +571,13 @@ func validateSqlArgs(apr *argparser.ArgParseResults) error {
 			return errhand.BuildDError("Invalid Argument: --list-saved is not compatible with --message|-m").Build()
 		} else if save {
 			return errhand.BuildDError("Invalid Argument: --list-saved is not compatible with --save|-s").Build()
-		} else if multiDB {
-			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --multi-db-dir").Build()
+		} else if dataDir || multiDbDir {
+			return errhand.BuildDError("Invalid Argument: --execute|-x is not compatible with --data-dir").Build()
 		}
 	}
 
-	if save && multiDB {
-		return errhand.BuildDError("Invalid Argument: --multi-db-dir queries cannot be saved").Build()
-	}
-
-	if batch {
-		if save || msg {
-			return errhand.BuildDError("Invalid Argument: --batch|-b is not compatible with --save|-s or --message|-m").Build()
-		}
+	if save && (dataDir || multiDbDir) {
+		return errhand.BuildDError("Invalid Argument: --data-dir queries cannot be saved").Build()
 	}
 
 	if query {
@@ -674,11 +593,15 @@ func validateSqlArgs(apr *argparser.ArgParseResults) error {
 		}
 	}
 
+	if multiDbDir {
+		cli.PrintErrln("WARNING: --multi-db-dir is deprecated, use --data-dir instead")
+	}
+
 	return nil
 }
 
 // Saves the query given to the catalog with the name and message given.
-func saveQuery(ctx context.Context, root *doltdb.RootValue, query string, name string, message string) (*doltdb.RootValue, errhand.VerboseError) {
+func saveQuery(ctx *sql.Context, root doltdb.RootValue, query string, name string, message string) (doltdb.RootValue, errhand.VerboseError) {
 	_, newRoot, err := dtables.NewQueryCatalogEntryWithNameAsID(ctx, root, name, query, message)
 	if err != nil {
 		return nil, errhand.BuildDError("Couldn't save query").AddCause(err).Build()
@@ -687,37 +610,62 @@ func saveQuery(ctx context.Context, root *doltdb.RootValue, query string, name s
 	return newRoot, nil
 }
 
-// runMultiStatementMode allows for the execution of more than one query, but it doesn't attempt any batch optimizations
-func runMultiStatementMode(ctx *sql.Context, se *engine.SqlEngine, input io.Reader, continueOnErr bool) error {
+// execBatchMode runs all the queries in the input reader
+func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, continueOnErr bool, format engine.PrintResultFormat) error {
 	scanner := NewSqlStatementScanner(input)
-
 	var query string
 	for scanner.Scan() {
+		if fileReadProg != nil {
+			updateFileReadProgressOutput()
+			fileReadProg.setReadBytes(int64(len(scanner.Bytes())))
+		}
 		query += scanner.Text()
 		if len(query) == 0 || query == "\n" {
 			continue
 		}
-		shouldProcessQuery := true
-		if matches := delimiterRegex.FindStringSubmatch(query); len(matches) == 3 {
-			// If we don't match from anything, then we just pass to the SQL engine and let it complain.
-			scanner.Delimiter = matches[1]
-			shouldProcessQuery = false
+
+		sqlMode := sql.LoadSqlMode(ctx)
+
+		sqlStatement, err := sqlparser.ParseWithOptions(ctx, query, sqlMode.ParserOptions())
+		if err == sqlparser.ErrEmpty {
+			continue
+		} else if err != nil {
+			err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+			if !continueOnErr {
+				return err
+			} else {
+				cli.PrintErrln(err.Error())
+			}
 		}
-		if shouldProcessQuery {
-			sqlSch, rowIter, err := processQuery(ctx, query, se)
-			if err != nil {
-				verr := formatQueryError(fmt.Sprintf("error on line %d for query %s", scanner.statementStartLine, query), err)
-				cli.PrintErrln(verr.Verbose())
-				// If continueOnErr is set keep executing the remaining queries but print the error out anyway.
-				if !continueOnErr {
-					return err
+
+		// store start time for query
+		ctx.SetQueryTime(time.Now())
+		sqlSch, rowIter, _, err := processParsedQuery(ctx, query, qryist, sqlStatement)
+		if err != nil {
+			err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+			if !continueOnErr {
+				return err
+			} else {
+				cli.PrintErrln(err.Error())
+			}
+		}
+
+		if rowIter != nil {
+			switch sqlStatement.(type) {
+			case *sqlparser.Select, *sqlparser.Insert, *sqlparser.Update, *sqlparser.Delete,
+				*sqlparser.OtherRead, *sqlparser.Show, *sqlparser.Explain, *sqlparser.SetOp:
+				// For any statement that prints out result, print a newline to put the regular output on its own line
+				if fileReadProg != nil {
+					fileReadProg.printNewLineIfNeeded()
 				}
 			}
-
-			if rowIter != nil {
-				err = engine.PrettyPrintResults(ctx, se.GetReturnFormat(), sqlSch, rowIter, HasTopLevelOrderByClause(query))
-				if err != nil {
-					return errhand.VerboseErrorFromError(err)
+			err = engine.PrettyPrintResults(ctx, format, sqlSch, rowIter)
+			if err != nil {
+				err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+				if !continueOnErr {
+					return err
+				} else {
+					cli.PrintErrln(err.Error())
 				}
 			}
 		}
@@ -725,72 +673,29 @@ func runMultiStatementMode(ctx *sql.Context, se *engine.SqlEngine, input io.Read
 	}
 
 	if err := scanner.Err(); err != nil {
-		cli.Println(err.Error())
+		return buildBatchSqlErr(scanner.statementStartLine, query, err)
 	}
 
 	return nil
 }
 
-// runBatchMode processes queries until EOF. The Root of the sqlEngine may be updated.
-func runBatchMode(ctx *sql.Context, se *engine.SqlEngine, input io.Reader, continueOnErr bool) error {
-	scanner := NewSqlStatementScanner(input)
-
-	var query string
-	for scanner.Scan() {
-		query += scanner.Text()
-		if len(query) == 0 || query == "\n" {
-			continue
-		}
-		shouldProcessQuery := true
-		if matches := delimiterRegex.FindStringSubmatch(query); len(matches) == 3 {
-			// If we don't match from anything, then we just pass to the SQL engine and let it complain.
-			scanner.Delimiter = matches[1]
-			shouldProcessQuery = false
-		}
-		if shouldProcessQuery {
-			if err := processBatchQuery(ctx, query, se); err != nil {
-				// TODO: this line number will not be accurate for errors that occur when flushing a batch of inserts (as opposed
-				//  to processing the query)
-				verr := formatQueryError(fmt.Sprintf("error on line %d for query %s", scanner.statementStartLine, query), err)
-				cli.PrintErrln(verr.Verbose())
-				// If continueOnErr is set keep executing the remaining queries but print the error out anyway.
-				if !continueOnErr {
-					return err
-				}
-			}
-		}
-		query = ""
-	}
-
-	updateBatchEditOutput()
-	cli.Println() // need a newline after all updates are executed
-
-	if err := scanner.Err(); err != nil {
-		cli.Println(err.Error())
-	}
-
-	return flushBatchedEdits(ctx, se)
+func buildBatchSqlErr(stmtStartLine int, query string, err error) error {
+	return formatQueryError(fmt.Sprintf("error on line %d for query %s", stmtStartLine, query), err)
 }
 
-// runShell starts a SQL shell. Returns when the user exits the shell. The Root of the sqlEngine may
+// execShell starts a SQL shell. Returns when the user exits the shell. The Root of the sqlEngine may
 // be updated by any queries which were processed.
-func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv) error {
+func execShell(sqlCtx *sql.Context, qryist cli.Queryist, format engine.PrintResultFormat, cliCtx cli.CliContext) error {
 	_ = iohelp.WriteLine(cli.CliOut, welcomeMsg)
+	historyFile := filepath.Join(".sqlhistory") // history file written to working dir
 
-	sqlCtx, err := se.NewContext(ctx)
-	if err != nil {
-		return err
+	db, branch, _ := getDBBranchFromSession(sqlCtx, qryist)
+	dirty := false
+	if branch != "" {
+		dirty, _ = isDirty(sqlCtx, qryist)
 	}
 
-	currentDB := sqlCtx.Session.GetCurrentDatabase()
-	currEnv := mrEnv.GetEnv(currentDB)
-
-	// Add root client
-	sqlCtx.Session.SetClient(sql.Client{User: "root", Address: "%", Capabilities: 0})
-
-	historyFile := filepath.Join(".sqlhistory") // history file written to working dir
-	initialPrompt := fmt.Sprintf("%s> ", sqlCtx.GetCurrentDatabase())
-	initialMultilinePrompt := fmt.Sprintf(fmt.Sprintf("%%%ds", len(initialPrompt)), "-> ")
+	initialPrompt, initialMultilinePrompt := formattedPrompts(db, branch, dirty)
 
 	rlConf := readline.Config{
 		Prompt:                 initialPrompt,
@@ -801,20 +706,27 @@ func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv
 		HistorySearchFold:      true,
 		DisableAutoSaveHistory: true,
 	}
-	supportingMysqlShellCmds := []string{"\\g", "\\G"}
+
+	verticalOutputLineTerminators := []string{"\\g", "\\G"}
+	backSlashCommands := make([]string, 0, len(slashCmds))
+	for _, cmd := range slashCmds {
+		backSlashCommands = append(backSlashCommands, "\\"+cmd.Name())
+	}
+
 	shellConf := ishell.UninterpretedConfig{
 		ReadlineConfig: &rlConf,
 		QuitKeywords: []string{
 			"quit", "exit", "quit()", "exit()",
 		},
-		LineTerminator: ";",
-		MysqlShellCmds: supportingMysqlShellCmds,
+		LineTerminator:     ";",
+		SpecialTerminators: verticalOutputLineTerminators,
+		BackSlashCmds:      backSlashCommands,
 	}
 
 	shell := ishell.NewUninterpreted(&shellConf)
 	shell.SetMultiPrompt(initialMultilinePrompt)
 	// TODO: update completer on create / drop / alter statements
-	completer, err := newCompleter(ctx, currEnv)
+	completer, err := newCompleter(sqlCtx, qryist)
 	if err != nil {
 		return err
 	}
@@ -835,9 +747,12 @@ func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv
 		}
 	})
 
+	initialCtx := sqlCtx.Context
+
 	shell.Uninterpreted(func(c *ishell.Context) {
 		query := c.Args[0]
-		if len(strings.TrimSpace(query)) == 0 {
+		query = strings.TrimSpace(query)
+		if len(query) == 0 {
 			return
 		}
 
@@ -852,52 +767,53 @@ func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv
 			shell.Println(color.RedString(err.Error()))
 		}
 
-		returnFormat := se.GetReturnFormat()
 		query = strings.TrimSuffix(query, shell.LineTerminator())
-		for _, sc := range supportingMysqlShellCmds {
-			if strings.HasSuffix(query, "\\G") {
-				returnFormat = engine.FormatVertical
-			}
-			query = strings.TrimSuffix(query, sc)
-		}
 
-		//TODO: Handle comments and enforce the current line terminator
-		if matches := delimiterRegex.FindStringSubmatch(query); len(matches) == 3 {
-			// If we don't match from anything, then we just pass to the SQL engine and let it complain.
-			shell.SetLineTerminator(matches[1])
-			return
+		closureFormat := format
+		// TODO: it would be better to build this into the statement parser rather than special case it here
+		for _, terminator := range verticalOutputLineTerminators {
+			if strings.HasSuffix(query, terminator) {
+				closureFormat = engine.FormatVertical
+			}
+			query = strings.TrimSuffix(query, terminator)
 		}
 
 		var nextPrompt string
-		var sqlSch sql.Schema
-		var rowIter sql.RowIter
-
-		// The SQL parser does not understand any other terminator besides semicolon, so we remove it.
-		if shell.LineTerminator() != ";" && strings.HasSuffix(query, shell.LineTerminator()) {
-			query = query[:len(query)-len(shell.LineTerminator())]
-		}
-
+		var multiPrompt string
 		cont := func() bool {
-			subCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			subCtx, stop := signal.NotifyContext(initialCtx, os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			sqlCtx, err = se.NewContext(subCtx)
-			if err != nil {
-				shell.Println(color.RedString(err.Error()))
-				return false
-			}
+			sqlCtx := sql.NewContext(subCtx, sql.WithSession(sqlCtx.Session))
 
-			if sqlSch, rowIter, err = processQuery(sqlCtx, query, se); err != nil {
-				verr := formatQueryError("", err)
-				shell.Println(verr.Verbose())
-			} else if rowIter != nil {
-				err = engine.PrettyPrintResults(sqlCtx, returnFormat, sqlSch, rowIter, HasTopLevelOrderByClause(query))
+			subCmd, foundCmd := findSlashCmd(query)
+			if foundCmd {
+				err := handleSlashCommand(sqlCtx, subCmd, query, cliCtx)
 				if err != nil {
 					shell.Println(color.RedString(err.Error()))
 				}
+			} else {
+				var sqlSch sql.Schema
+				var rowIter sql.RowIter
+				if sqlSch, rowIter, _, err = processQuery(sqlCtx, query, qryist); err != nil {
+					verr := formatQueryError("", err)
+					shell.Println(verr.Verbose())
+				} else if rowIter != nil {
+					switch closureFormat {
+					case engine.FormatTabular, engine.FormatVertical:
+						err = engine.PrettyPrintResultsExtended(sqlCtx, closureFormat, sqlSch, rowIter)
+					default:
+						err = engine.PrettyPrintResults(sqlCtx, closureFormat, sqlSch, rowIter)
+					}
+
+					if err != nil {
+						shell.Println(color.RedString(err.Error()))
+					}
+				}
 			}
 
-			nextPrompt = fmt.Sprintf("%s> ", sqlCtx.GetCurrentDatabase())
+			nextPrompt, multiPrompt = postCommandUpdate(sqlCtx, qryist)
+
 			return true
 		}()
 
@@ -906,7 +822,7 @@ func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv
 		}
 
 		shell.SetPrompt(nextPrompt)
-		shell.SetMultiPrompt(fmt.Sprintf(fmt.Sprintf("%%%ds", len(nextPrompt)), "-> "))
+		shell.SetMultiPrompt(multiPrompt)
 	})
 
 	shell.Run()
@@ -915,50 +831,162 @@ func runShell(ctx context.Context, se *engine.SqlEngine, mrEnv *env.MultiRepoEnv
 	return nil
 }
 
-// Returns a new auto completer with table names, column names, and SQL keywords.
-func newCompleter(ctx context.Context, dEnv *env.DoltEnv) (*sqlCompleter, error) {
-	// TODO: change the sqlCompleter based on the current database and change it when the database changes.
-	if dEnv == nil {
-		return &sqlCompleter{}, nil
+// postCommandUpdate is a helper function that is run after the shell has completed a command. It updates the the database
+// if needed, and generates new prompts for the shell (based on the branch and if the workspace is dirty).
+func postCommandUpdate(sqlCtx *sql.Context, qryist cli.Queryist) (string, string) {
+	db, branch, ok := getDBBranchFromSession(sqlCtx, qryist)
+	if ok {
+		sqlCtx.SetCurrentDatabase(db)
+	}
+	dirty := false
+	if branch != "" {
+		dirty, _ = isDirty(sqlCtx, qryist)
+	}
+	return formattedPrompts(db, branch, dirty)
+}
+
+// formattedPrompts returns the prompt and multiline prompt for the current session. If the db is empty, the prompt will
+// be "> ", otherwise it will be "db> ". If the branch is empty, the multiline prompt will be "-> ", left padded for
+// alignment with the prompt.
+func formattedPrompts(db, branch string, dirty bool) (string, string) {
+	if db == "" {
+		return "> ", "-> "
+	}
+	if branch == "" {
+		// +2 Allows for the "->" to lineup correctly
+		multi := fmt.Sprintf(fmt.Sprintf("%%%ds", len(db)+2), "-> ")
+		cyanDb := color.CyanString(db)
+		return fmt.Sprintf("%s> ", cyanDb), multi
 	}
 
-	var completionWords []string
+	// +3 is for the "/" and "->" to lineup correctly
+	promptLen := len(db) + len(branch) + 3
+	dirtyStr := ""
+	if dirty {
+		dirtyStr = color.RedString("*")
+		promptLen += 1
+	}
 
-	root, err := dEnv.WorkingRoot(ctx)
+	multi := fmt.Sprintf(fmt.Sprintf("%%%ds", promptLen), "-> ")
+
+	cyanDb := color.CyanString(db)
+	yellowBr := color.YellowString(branch)
+	return fmt.Sprintf("%s/%s%s> ", cyanDb, yellowBr, dirtyStr), multi
+}
+
+// getDBBranchFromSession returns the current database name and current branch  for the session, handling all the errors
+// along the way by printing red error messages to the CLI. If there was an issue getting the db name, the ok return
+// value will be false and the strings will be empty.
+func getDBBranchFromSession(sqlCtx *sql.Context, qryist cli.Queryist) (db string, branch string, ok bool) {
+	sqlCtx.Session.LockWarnings()
+	defer sqlCtx.Session.UnlockWarnings()
+
+	_, resp, _, err := qryist.Query(sqlCtx, "select database() as db, active_branch() as branch")
 	if err != nil {
-		return &sqlCompleter{}, nil
+		cli.Println(color.RedString("Failure to get DB Name for session: " + err.Error()))
+		return db, branch, false
+	}
+	// Expect single row result, with two columns: db name, branch name.
+	row, err := resp.Next(sqlCtx)
+	if err != nil {
+		cli.Println(color.RedString("Failure to get DB Name for session: " + err.Error()))
+		return db, branch, false
+	}
+	if len(row) != 2 {
+		cli.Println(color.RedString("Runtime error. Invalid column count."))
+		return db, branch, false
 	}
 
-	tableNames, err := root.GetTableNames(ctx)
+	if row[1] == nil {
+		branch = ""
+	} else {
+		branch = row[1].(string)
+	}
+	if row[0] == nil {
+		db = ""
+	} else {
+		db = row[0].(string)
 
+		// It is possible to `use mydb/branch`, and as far as your session is concerned your database is mydb/branch. We
+		// allow that, but also want to show the user the branch name in the prompt. So we munge the DB in this case.
+		if strings.HasSuffix(strings.ToLower(db), strings.ToLower("/"+branch)) {
+			db = db[:len(db)-len(branch)-1]
+		}
+	}
+
+	return db, branch, true
+}
+
+// isDirty returns true if the workspace is dirty, false otherwise. This function _assumes_ you are on a database
+// with a branch. If you are not, you will get an error.
+func isDirty(sqlCtx *sql.Context, qryist cli.Queryist) (bool, error) {
+	sqlCtx.Session.LockWarnings()
+	defer sqlCtx.Session.UnlockWarnings()
+
+	_, resp, _, err := qryist.Query(sqlCtx, "select count(table_name) > 0 as dirty from dolt_status")
+
+	if err != nil {
+		cli.Println(color.RedString("Failure to get DB Name for session: " + err.Error()))
+		return false, err
+	}
+	// Expect single row result, with one boolean column.
+	row, err := resp.Next(sqlCtx)
+	if err != nil {
+		cli.Println(color.RedString("Failure to get DB Name for session: " + err.Error()))
+		return false, err
+	}
+	if len(row) != 1 {
+		cli.Println(color.RedString("Runtime error. Invalid column count."))
+		return false, fmt.Errorf("invalid column count")
+	}
+
+	return getStrBoolColAsBool(row[0])
+}
+
+// Returns a new auto completer with table names, column names, and SQL keywords.
+// TODO: update the completer on DDL, branch change, etc.
+func newCompleter(
+	ctx *sql.Context,
+	qryist cli.Queryist,
+) (completer *sqlCompleter, rerr error) {
+	subCtx, stop := signal.NotifyContext(ctx.Context, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sqlCtx := sql.NewContext(subCtx, sql.WithSession(ctx.Session))
+
+	sqlCtx.Session.LockWarnings()
+	defer sqlCtx.Session.UnlockWarnings()
+	_, iter, _, err := qryist.Query(sqlCtx, "select table_schema, table_name, column_name from information_schema.columns;")
 	if err != nil {
 		return nil, err
 	}
 
-	completionWords = append(completionWords, tableNames...)
+	defer func(iter sql.RowIter, context *sql.Context) {
+		err := iter.Close(context)
+		if err != nil && rerr == nil {
+			rerr = err
+		}
+	}(iter, sqlCtx)
+
+	identifiers := make(map[string]struct{})
 	var columnNames []string
-	for _, tableName := range tableNames {
-		tbl, _, err := root.GetTable(ctx, tableName)
-
-		if err != nil {
+	for {
+		r, err := iter.Next(sqlCtx)
+		if err == io.EOF {
+			break
+		} else if err != nil {
 			return nil, err
 		}
 
-		sch, err := tbl.GetSchema(ctx)
+		identifiers[r[0].(string)] = struct{}{}
+		identifiers[r[1].(string)] = struct{}{}
+		identifiers[r[2].(string)] = struct{}{}
+		columnNames = append(columnNames, r[2].(string))
+	}
 
-		if err != nil {
-			return nil, err
-		}
-
-		err = sch.GetAllCols().Iter(func(tag uint64, col schema.Column) (stop bool, err error) {
-			completionWords = append(completionWords, col.Name)
-			columnNames = append(columnNames, col.Name)
-			return false, nil
-		})
-
-		if err != nil {
-			return nil, err
-		}
+	var completionWords []string
+	for k := range identifiers {
+		completionWords = append(completionWords, k)
 	}
 
 	completionWords = append(completionWords, dsqle.CommonKeywords...)
@@ -1030,58 +1058,62 @@ func prepend(s string, ss []string) []string {
 	return newSs
 }
 
-// Processes a single query. The Root of the sqlEngine will be updated if necessary.
+// processQuery processes a single query. The Root of the sqlEngine will be updated if necessary.
 // Returns the schema and the row iterator for the results, which may be nil, and an error if one occurs.
-func processQuery(ctx *sql.Context, query string, se *engine.SqlEngine) (sql.Schema, sql.RowIter, error) {
+func processQuery(ctx *sql.Context, query string, qryist cli.Queryist) (sql.Schema, sql.RowIter, *sql.QueryFlags, error) {
 	sqlStatement, err := sqlparser.Parse(query)
 	if err == sqlparser.ErrEmpty {
 		// silently skip empty statements
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	} else if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	return processParsedQuery(ctx, query, qryist, sqlStatement)
+}
 
+// processParsedQuery processes a single query with the parsed statement provided. The Root of the sqlEngine
+// will be updated if necessary. Returns the schema and the row iterator for the results, which may be nil,
+// and an error if one occurs.
+func processParsedQuery(ctx *sql.Context, query string, qryist cli.Queryist, sqlStatement sqlparser.Statement) (sql.Schema, sql.RowIter, *sql.QueryFlags, error) {
 	switch s := sqlStatement.(type) {
 	case *sqlparser.Use:
-		sch, ri, err := se.Query(ctx, query)
+		sch, ri, _, err := qryist.Query(ctx, query)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		_, err = sql.RowIterToRows(ctx, nil, ri)
+		_, err = sql.RowIterToRows(ctx, ri)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		cli.Println("Database changed")
-		return sch, nil, err
-	case *sqlparser.MultiAlterDDL, *sqlparser.Set, *sqlparser.Commit:
-		_, ri, err := se.Query(ctx, query)
+		return sch, nil, nil, err
+	case *sqlparser.AlterTable, *sqlparser.Set, *sqlparser.Commit:
+		_, ri, _, err := qryist.Query(ctx, query)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		_, err = sql.RowIterToRows(ctx, nil, ri)
+		_, err = sql.RowIterToRows(ctx, ri)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	case *sqlparser.DDL:
-		_, ri, err := se.Query(ctx, query)
+		_, ri, _, err := qryist.Query(ctx, query)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		_, err = sql.RowIterToRows(ctx, nil, ri)
+		_, err = sql.RowIterToRows(ctx, ri)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return nil, nil, nil
-	case *sqlparser.DBDDL:
-		return se.Dbddl(ctx, s, query)
+		return nil, nil, nil, nil
 	case *sqlparser.Load:
 		if s.Local {
-			return nil, nil, fmt.Errorf("LOCAL supported only in sql-server mode")
+			return nil, nil, nil, fmt.Errorf("LOCAL supported only in sql-server mode")
 		}
-		return se.Query(ctx, query)
+		return qryist.Query(ctx, query)
 	default:
-		return se.Query(ctx, query)
+		return qryist.Query(ctx, query)
 	}
 }
 
@@ -1091,10 +1123,18 @@ type stats struct {
 	rowsDeleted    int
 	unflushedEdits int
 	unprintedEdits int
+	displayStrLen  int
+}
+
+type fileReadProgress struct {
+	bytesRead     int64
+	totalBytes    int64
+	printed       int64
+	displayStrLen int
 }
 
 var batchEditStats = &stats{}
-var displayStrLen int
+var fileReadProg *fileReadProgress
 
 const maxBatchSize = 200000
 const updateInterval = 1000
@@ -1111,305 +1151,46 @@ func (s *stats) shouldFlush() bool {
 	return s.unflushedEdits >= maxBatchSize
 }
 
-func flushBatchedEdits(ctx *sql.Context, se *engine.SqlEngine) error {
-	err := se.IterDBs(func(_ string, db dsqle.SqlDatabase) (bool, error) {
-		_, rowIter, err := se.Query(ctx, "COMMIT;")
-		if err != nil {
-			return false, err
-		}
-
-		err = rowIter.Close(ctx)
-		if err != nil {
-			return false, err
-		}
-
-		err = db.Flush(ctx)
-		if err != nil {
-			return false, err
-		}
-
-		return false, nil
-	})
-
-	batchEditStats.unflushedEdits = 0
-
-	return err
-}
-
-// Processes a single query in batch mode. The Root of the sqlEngine may or may not be changed.
-func processBatchQuery(ctx *sql.Context, query string, se *engine.SqlEngine) error {
-	sqlStatement, err := sqlparser.Parse(query)
-	if err == sqlparser.ErrEmpty {
-		// silently skip empty statements
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("Error parsing SQL: %v.", err.Error())
-	}
-
-	currentBatchMode := invalidBatchMode
-	if v, err := ctx.GetSessionVariable(ctx, dsess.CurrentBatchModeKey); err == nil {
-		currentBatchMode = batchMode(v.(int64))
-	} else {
-		return err
-	}
-
-	newBatchMode, err := canProcessAsBatchEdit(ctx, sqlStatement, se, query)
-	if err != nil {
-		cli.PrintErrln(err)
-		return err
-	}
-
-	if currentBatchMode != invalidBatchMode && currentBatchMode != newBatchMode {
-		// We need to commit whatever batch edits we've accumulated so far before executing the query
-		err := flushBatchedEdits(ctx, se)
-		if err != nil {
-			return err
-		}
-	}
-
-	err = ctx.SetSessionVariable(ctx, dsess.CurrentBatchModeKey, int64(newBatchMode))
-	if err != nil {
-		return err
-	}
-
-	if newBatchMode != invalidBatchMode {
-		err = processBatchableEditQuery(ctx, se, query, sqlStatement)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := processNonBatchableQuery(ctx, se, query, sqlStatement)
-		if err != nil {
-			return err
-		}
-	}
-
-	if batchEditStats.shouldUpdateBatchModeOutput() {
-		updateBatchEditOutput()
-	}
-
-	return nil
-}
-
-func processNonBatchableQuery(ctx *sql.Context, se *engine.SqlEngine, query string, sqlStatement sqlparser.Statement) (returnErr error) {
-	sqlSch, rowIter, err := processQuery(ctx, query, se)
-	if err != nil {
-		return err
-	}
-
-	if rowIter != nil {
-		err = mergeResultIntoStats(ctx, sqlStatement, rowIter, batchEditStats)
-		if err != nil {
-			return err
-		}
-
-		// Some statement types should print results, even in batch mode.
-		switch sqlStatement.(type) {
-		case *sqlparser.Select, *sqlparser.OtherRead, *sqlparser.Show, *sqlparser.Explain, *sqlparser.Union:
-			if displayStrLen > 0 {
-				// If we've been printing in batch mode, print a newline to put the regular output on its own line
-				cli.Print("\n")
-				displayStrLen = 0
-			}
-			err = engine.PrettyPrintResults(ctx, se.GetReturnFormat(), sqlSch, rowIter, HasTopLevelOrderByClause(query))
-			if err != nil {
-				return err
-			}
-		default:
-			err = rowIter.Close(ctx)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	// And flush again afterwards, to make sure any following insert statements have the latest data
-	return flushBatchedEdits(ctx, se)
-}
-
-func processBatchableEditQuery(ctx *sql.Context, se *engine.SqlEngine, query string, sqlStatement sqlparser.Statement) (returnErr error) {
-	_, rowIter, err := se.Query(ctx, query)
-	if err != nil {
-		return err
-	}
-
-	if rowIter != nil {
-		defer func() {
-			err := rowIter.Close(ctx)
-			if returnErr == nil {
-				returnErr = err
-			}
-		}()
-		err = mergeResultIntoStats(ctx, sqlStatement, rowIter, batchEditStats)
-		if err != nil {
-			return err
-		}
-	}
-
-	if batchEditStats.shouldFlush() {
-		return flushBatchedEdits(ctx, se)
-	}
-
-	return nil
-}
-
-// canProcessBatchEdit returns whether the given statement can be processed as a batch insert. Only simple inserts
-// (inserting a list of values) and deletes can be processed in this way. Other kinds of insert (notably INSERT INTO
-// SELECT AS and AUTO_INCREMENT) need a flushed root and can't benefit from batch optimizations.
-func canProcessAsBatchEdit(ctx *sql.Context, sqlStatement sqlparser.Statement, se *engine.SqlEngine, query string) (batchMode, error) {
-	switch s := sqlStatement.(type) {
-	case *sqlparser.Delete:
-		foundSubquery, err := checkForSubqueries(query)
-		if err != nil {
-			return invalidBatchMode, err
-		}
-		if foundSubquery {
-			return invalidBatchMode, nil
-		}
-
-		return deleteBatchMode, nil
-
-	case *sqlparser.Insert:
-		if _, ok := s.Rows.(sqlparser.Values); !ok {
-			return invalidBatchMode, nil
-		}
-		foundSubquery, err := checkForSubqueries(query)
-		if err != nil {
-			return invalidBatchMode, err
-		}
-
-		if foundSubquery {
-			return invalidBatchMode, nil
-		}
-
-		// TODO: This check coming first seems to cause problems with ctx.Session. Perhaps in the analyzer.
-		hasAutoInc, err := insertsIntoAutoIncrementCol(ctx, se, query)
-		if err != nil {
-			return invalidBatchMode, err
-		}
-
-		if hasAutoInc {
-			return invalidBatchMode, nil
-		}
-
-		return insertBatchMode, nil
-
-	case *sqlparser.Load:
-		return insertBatchMode, nil
-
-	default:
-		return invalidBatchMode, nil
+// printNewLineIfNeeded prints a new line when there are outputs printed other than its output line of batch read progress.
+func (s *stats) printNewLineIfNeeded() {
+	if s.displayStrLen > 0 {
+		cli.Print("\n")
+		s.displayStrLen = 0
 	}
 }
 
-// checkForSubqueries parses the insert query to check for a subquery.
-func checkForSubqueries(query string) (bool, error) {
-	p, err := sqlparser.Parse(query)
-
-	if err != nil {
-		return false, nil
-	}
-
-	return foundSubquery(p), nil
+// close will print last updated line of processed 100.0% and a new line
+func (f *fileReadProgress) close() {
+	f.bytesRead = f.totalBytes
+	updateFileReadProgressOutput()
+	cli.Println() // need a newline after all updates are executed
 }
 
-func foundSubquery(node sqlparser.SQLNode) bool {
-	has := false
-	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (keepGoing bool, err error) {
-		if _, ok := node.(*sqlparser.Subquery); ok {
-			has = true
-			return false, nil
-		}
-		return true, nil
-	}, node)
-	return has
+// setReadBytes updates number of bytes that are read so far from the file
+func (f *fileReadProgress) setReadBytes(b int64) {
+	f.bytesRead = f.printed + b
 }
 
-func HasTopLevelOrderByClause(query string) bool {
-	st, _ := sqlparser.Parse(query)
-
-	switch s := st.(type) {
-	case *sqlparser.Select:
-		return s.OrderBy != nil
-	case *sqlparser.Union:
-		return s.OrderBy != nil
-	default:
-		return false
+// printNewLineIfNeeded prints a new line when there are outputs printed other than its output line of file read progress.
+func (f *fileReadProgress) printNewLineIfNeeded() {
+	if f.displayStrLen > 0 {
+		cli.Print("\n")
+		f.displayStrLen = 0
 	}
 }
 
-// parses the query to check if it inserts into a table with AUTO_INCREMENT
-func insertsIntoAutoIncrementCol(ctx *sql.Context, se *engine.SqlEngine, query string) (bool, error) {
-	p, err := parse.Parse(ctx, query)
-	if err != nil {
-		return false, err
+// updateFileReadProgressOutput will delete the line it printed before, and print the updated line.
+// If there were other functions printed result, it will print update line on a new line.
+// This function is used for only file reads for dolt sql when `--file` flag is used.
+func updateFileReadProgressOutput() {
+	if fileReadProg == nil {
+		// this should not happen, but sanity check
+		cli.Println("No file is being processed.")
 	}
-
-	if _, ok := p.(*plan.InsertInto); !ok {
-		return false, nil
-	}
-
-	a, err := se.Analyze(ctx, p)
-	if err != nil {
-		return false, err
-	}
-
-	isAutoInc := false
-	transform.Inspect(a, func(n sql.Node) bool {
-		switch n := n.(type) {
-		case *plan.InsertInto:
-			_, _, err = transform.NodeExprs(n.Source, func(exp sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
-				if _, ok := exp.(*expression.AutoIncrement); ok {
-					isAutoInc = true
-				}
-				return exp, transform.SameTree, nil
-			})
-			return false
-		default:
-			return true
-		}
-	})
-
-	if err != nil {
-		return false, err
-	}
-	return isAutoInc, nil
-}
-
-func updateBatchEditOutput() {
-	displayStr := fmt.Sprintf("Rows inserted: %d Rows updated: %d Rows deleted: %d",
-		batchEditStats.rowsInserted, batchEditStats.rowsUpdated, batchEditStats.rowsDeleted)
-	displayStrLen = cli.DeleteAndPrint(displayStrLen, displayStr)
-	batchEditStats.unprintedEdits = 0
-}
-
-// Updates the batch insert stats with the results of an INSERT, UPDATE, or DELETE statement.
-func mergeResultIntoStats(ctx *sql.Context, statement sqlparser.Statement, rowIter sql.RowIter, s *stats) error {
-	switch statement.(type) {
-	case *sqlparser.Insert, *sqlparser.Delete, *sqlparser.Update, *sqlparser.Load:
-		break
-	default:
-		return nil
-	}
-
-	for {
-		row, err := rowIter.Next(ctx)
-		if err == io.EOF {
-			return nil
-		} else if err != nil {
-			return err
-		} else {
-			okResult := row[0].(sql.OkResult)
-			s.unflushedEdits += int(okResult.RowsAffected)
-			s.unprintedEdits += int(okResult.RowsAffected)
-			switch statement.(type) {
-			case *sqlparser.Insert:
-				s.rowsInserted += int(okResult.RowsAffected)
-			case *sqlparser.Delete:
-				s.rowsDeleted += int(okResult.RowsAffected)
-			case *sqlparser.Update:
-				s.rowsUpdated += int(okResult.RowsAffected)
-			}
-		}
-	}
+	// batch can be writing to the line, so print new line.
+	batchEditStats.printNewLineIfNeeded()
+	percent := float64(fileReadProg.bytesRead) / float64(fileReadProg.totalBytes) * 100
+	fileReadProg.printed = fileReadProg.bytesRead
+	displayStr := fmt.Sprintf("Processed %.1f%% of the file", percent)
+	fileReadProg.displayStrLen = cli.DeleteAndPrint(fileReadProg.displayStrLen, displayStr)
 }

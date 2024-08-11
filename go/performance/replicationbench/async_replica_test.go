@@ -21,10 +21,10 @@ import (
 	"strings"
 	"testing"
 
-	srv "github.com/dolthub/dolt/go/cmd/dolt/commands/sqlserver"
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
+
 	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils/testcommands"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 )
 
@@ -60,7 +60,7 @@ func BenchmarkAsyncPushOnWrite(b *testing.B) {
 
 func benchmarkAsyncPush(b *testing.B, test serverTest) {
 	var dEnv *env.DoltEnv
-	var cfg srv.ServerConfig
+	var cfg servercfg.ServerConfig
 	ctx := context.Background()
 
 	// setup
@@ -87,7 +87,7 @@ func benchmarkAsyncPush(b *testing.B, test serverTest) {
 	})
 }
 
-func getAsyncEnvAndConfig(ctx context.Context, b *testing.B) (dEnv *env.DoltEnv, cfg srv.ServerConfig) {
+func getAsyncEnvAndConfig(ctx context.Context, b *testing.B) (dEnv *env.DoltEnv, cfg servercfg.ServerConfig) {
 	multiSetup := testcommands.NewMultiRepoTestSetup(b.Fatal)
 
 	multiSetup.NewDB("dolt_bench")
@@ -95,11 +95,11 @@ func getAsyncEnvAndConfig(ctx context.Context, b *testing.B) (dEnv *env.DoltEnv,
 
 	writerName := multiSetup.DbNames[0]
 
-	localCfg, ok := multiSetup.MrEnv.GetEnv(writerName).Config.GetConfig(env.LocalConfig)
+	localCfg, ok := multiSetup.GetEnv(writerName).Config.GetConfig(env.LocalConfig)
 	if !ok {
 		b.Fatal("local config does not exist")
 	}
-	localCfg.SetStrings(map[string]string{fmt.Sprintf("%s.%s", env.SqlServerGlobalsPrefix, sqle.ReplicateToRemoteKey): "remote1", fmt.Sprintf("%s.%s", env.SqlServerGlobalsPrefix, sqle.AsyncReplicationKey): "1"})
+	localCfg.SetStrings(map[string]string{fmt.Sprintf("%s.%s", env.SqlServerGlobalsPrefix, dsess.ReplicateToRemote): "remote1", fmt.Sprintf("%s.%s", env.SqlServerGlobalsPrefix, dsess.AsyncReplication): "1"})
 
 	yaml := []byte(fmt.Sprintf(`
 log_level: warning
@@ -123,10 +123,10 @@ listener:
  write_timeout_millis: 28800000
 `, writerName, multiSetup.DbPaths[writerName], port))
 
-	cfg, err := srv.NewYamlConfig(yaml)
+	cfg, err := servercfg.NewYamlConfig(yaml)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	return multiSetup.MrEnv.GetEnv(writerName), cfg
+	return multiSetup.GetEnv(writerName), cfg
 }

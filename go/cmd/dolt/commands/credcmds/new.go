@@ -16,7 +16,6 @@ package credcmds
 
 import (
 	"context"
-	"io"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/commands"
@@ -49,10 +48,9 @@ func (cmd NewCmd) Description() string {
 	return newDocs.ShortDesc
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd NewCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd NewCmd) Docs() *cli.CommandDocumentation {
 	ap := cmd.ArgParser()
-	return commands.CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, newDocs, ap))
+	return cli.NewCommandDocumentation(newDocs, ap)
 }
 
 // RequiresRepo should return false if this interface is implemented, and the command does not have the requirement
@@ -67,14 +65,14 @@ func (cmd NewCmd) EventType() eventsapi.ClientEventType {
 }
 
 func (cmd NewCmd) ArgParser() *argparser.ArgParser {
-	ap := argparser.NewArgParser()
+	ap := argparser.NewArgParserWithMaxArgs(cmd.Name(), 0)
 	return ap
 }
 
 // Exec executes the command
-func (cmd NewCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd NewCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cmd.ArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, newDocs, ap))
+	help, usage := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, newDocs, ap))
 	cli.ParseArgsOrDie(ap, args, help)
 
 	_, newCreds, verr := actions.NewCredsFile(dEnv)
@@ -102,9 +100,9 @@ func updateConfigToUseNewCredIfNoExistingCred(dEnv *env.DoltEnv, dCreds creds.Do
 		panic("global config not found.  Should create it here if this is a thing.")
 	}
 
-	_, err := gcfg.GetString(env.UserCreds)
+	_, err := gcfg.GetString(config.UserCreds)
 	if err == config.ErrConfigParamNotFound {
-		return gcfg.SetStrings(map[string]string{env.UserCreds: dCreds.KeyIDBase32Str()})
+		return gcfg.SetStrings(map[string]string{config.UserCreds: dCreds.KeyIDBase32Str()})
 	} else {
 		return err
 	}

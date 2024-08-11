@@ -13,26 +13,43 @@
 // limitations under the License.
 
 include "encoding.fbs";
+include "collation.fbs";
 
 namespace serial;
 
 
 table TableSchema {
-  columns:[Column];
-  indexes:[Index];
-  checks:[string];
+  columns:[Column] (required);
+  clustered_index:Index (required);
+  secondary_indexes:[Index];
+  checks:[CheckConstraint];
+  collation:Collation;
 
+  // this field is necessary because older dolt clients weren't using TryAccessor for Columns, but are in TableSchemas
+  has_features_after_try_accessors:bool;
+
+  // table comment
+  comment:string;
 }
 
 table Column {
   // column name
   name:string (required);
 
-  // full sql column definition
-  definition:string (required);
+  // sql column type
+  sql_type:string;
+
+  // sql default value. For generated columns, this is the generated expression rather than the default.
+  default_value:string;
+
+  // sql comment
+  comment:string;
 
   // sql display order
   display_order:int16;
+
+  // column tag
+  tag: uint64;
 
   // storage encoding
   encoding:Encoding;
@@ -44,24 +61,69 @@ table Column {
   hidden:bool;
   generated:bool;
   virtual:bool;
+
+  // sql on update value
+  on_update_value:string;
 }
 
 table Index {
   // index name
-  name:string (required);
+  name:string;
 
-  // full sql index definition
-  definition:string (required);
+  // sql comment
+  comment:string;
 
-  // key columns of the index stored as
-  // indicies into the schema columns array
+  // ordered list of columns defining the index.
+  // stored as indices into columns vector.
+  index_columns:[uint16] (required);
+
+  // ordered list of columns corresponding to
+  // key tuple fields within index storage.
+  // stored as indices into columns vector.
+  //
+  // for secondary indexes, this is typically
+  // index columns + primary key columns.
   key_columns:[uint16] (required);
 
-  // values columns of the index stored as
-  // indicies into the schema columns array
+  // ordered list of columns corresponding to
+  // value tuple fields within index storage.
+  // stored as indices into columns vector.
+  //
+  // typically, this is only populated for
+  // clustered primary key indexes.
   value_columns:[uint16];
 
   // index meta
-  unique:bool;
+  primary_key:bool;
+  unique_key:bool;
   system_defined:bool;
+
+  prefix_lengths:[uint16];
+  spatial_key:bool;
+
+  // fulltext information
+  fulltext_key:bool;
+  fulltext_info:FulltextInfo;
 }
+
+table FulltextInfo {
+  config_table:string;
+  position_table:string;
+  doc_count_table:string;
+  global_count_table:string;
+  row_count_table:string;
+  key_type:uint8;
+  key_name:string;
+  key_positions:[uint16];
+}
+
+table CheckConstraint {
+    name:string;
+    expression:string;
+    enforced:bool;
+}
+
+// KEEP THIS IN SYNC WITH fileidentifiers.go
+file_identifier "DSCH";
+
+root_type TableSchema;

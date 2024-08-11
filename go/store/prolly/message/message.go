@@ -17,94 +17,149 @@ package message
 import (
 	"context"
 	"fmt"
+	"math"
+
+	fb "github.com/dolthub/flatbuffers/v23/go"
 
 	"github.com/dolthub/dolt/go/gen/fb/serial"
 	"github.com/dolthub/dolt/go/store/hash"
-	"github.com/dolthub/dolt/go/store/val"
 )
 
-const MessageTypesKind int = 28
-
-const messagePrefixSz = 3
-
-type Message []byte
+const (
+	maxChunkSz = math.MaxUint16
+	addrSize   = hash.ByteLen
+	uint16Size = 2
+)
 
 type Serializer interface {
-	Serialize(keys, values [][]byte, subtrees []uint64, level int) Message
+	Serialize(keys, values [][]byte, subtrees []uint64, level int) serial.Message
 }
 
-func GetKeysAndValues(msg Message) (keys, values val.SlicedBuffer, cnt uint16) {
-	id := serial.GetFileID(msg[messagePrefixSz:])
-
-	if id == serial.ProllyTreeNodeFileID {
+func UnpackFields(msg serial.Message) (keys, values ItemAccess, level, count uint16, err error) {
+	switch serial.GetFileID(msg) {
+	case serial.ProllyTreeNodeFileID:
 		return getProllyMapKeysAndValues(msg)
-	}
-	if id == serial.AddressMapFileID {
-		keys = getAddressMapKeys(msg)
-		values = getAddressMapValues(msg)
-		cnt = getAddressMapCount(msg)
+	case serial.AddressMapFileID:
+		keys, err = getAddressMapKeys(msg)
+		if err != nil {
+			return
+		}
+		values, err = getAddressMapValues(msg)
+		if err != nil {
+			return
+		}
+		level, err = getAddressMapTreeLevel(msg)
+		if err != nil {
+			return
+		}
+		count, err = getAddressMapCount(msg)
 		return
+	case serial.MergeArtifactsFileID:
+		return getArtifactMapKeysAndValues(msg)
+	case serial.CommitClosureFileID:
+		keys, err = getCommitClosureKeys(msg)
+		if err != nil {
+			return
+		}
+		values, err = getCommitClosureValues(msg)
+		if err != nil {
+			return
+		}
+		level, err = getCommitClosureTreeLevel(msg)
+		if err != nil {
+			return
+		}
+		count, err = getCommitClosureCount(msg)
+		return
+	case serial.BlobFileID:
+		keys, err = getBlobKeys(msg)
+		if err != nil {
+			return
+		}
+		values, err = getBlobValues(msg)
+		if err != nil {
+			return
+		}
+		level, err = getBlobTreeLevel(msg)
+		if err != nil {
+			return
+		}
+		count, err = getBlobCount(msg)
+		return
+	default:
+		panic(fmt.Sprintf("unknown message id %s", serial.GetFileID(msg)))
 	}
-
-	panic(fmt.Sprintf("unknown message id %s", id))
 }
 
-func WalkAddresses(ctx context.Context, msg Message, cb func(ctx context.Context, addr hash.Hash) error) error {
-	id := serial.GetFileID(msg[messagePrefixSz:])
+func WalkAddresses(ctx context.Context, msg serial.Message, cb func(ctx context.Context, addr hash.Hash) error) error {
+	id := serial.GetFileID(msg)
 	switch id {
 	case serial.ProllyTreeNodeFileID:
 		return walkProllyMapAddresses(ctx, msg, cb)
 	case serial.AddressMapFileID:
 		return walkAddressMapAddresses(ctx, msg, cb)
+	case serial.MergeArtifactsFileID:
+		return walkMergeArtifactAddresses(ctx, msg, cb)
+	case serial.CommitClosureFileID:
+		return walkCommitClosureAddresses(ctx, msg, cb)
+	case serial.BlobFileID:
+		return walkBlobAddresses(ctx, msg, cb)
 	default:
 		panic(fmt.Sprintf("unknown message id %s", id))
 	}
 }
 
-func GetTreeLevel(msg Message) int {
-	id := serial.GetFileID(msg[messagePrefixSz:])
-	switch id {
-	case serial.ProllyTreeNodeFileID:
-		return getProllyMapTreeLevel(msg)
-	case serial.AddressMapFileID:
-		return getAddressMapTreeLevel(msg)
-	default:
-		panic(fmt.Sprintf("unknown message id %s", id))
-	}
-}
-
-func GetTreeCount(msg Message) int {
-	id := serial.GetFileID(msg[messagePrefixSz:])
+func GetTreeCount(msg serial.Message) (int, error) {
+	id := serial.GetFileID(msg)
 	switch id {
 	case serial.ProllyTreeNodeFileID:
 		return getProllyMapTreeCount(msg)
 	case serial.AddressMapFileID:
 		return getAddressMapTreeCount(msg)
+	case serial.MergeArtifactsFileID:
+		return getMergeArtifactTreeCount(msg)
+	case serial.CommitClosureFileID:
+		return getCommitClosureTreeCount(msg)
+	case serial.BlobFileID:
+		return getBlobTreeCount(msg)
 	default:
 		panic(fmt.Sprintf("unknown message id %s", id))
 	}
 }
 
-func GetSubtrees(msg Message) []uint64 {
-	id := serial.GetFileID(msg[messagePrefixSz:])
+func GetSubtrees(msg serial.Message) ([]uint64, error) {
+	id := serial.GetFileID(msg)
 	switch id {
 	case serial.ProllyTreeNodeFileID:
 		return getProllyMapSubtrees(msg)
 	case serial.AddressMapFileID:
 		return getAddressMapSubtrees(msg)
+	case serial.MergeArtifactsFileID:
+		return getMergeArtifactSubtrees(msg)
+	case serial.CommitClosureFileID:
+		return getCommitClosureSubtrees(msg)
+	case serial.BlobFileID:
+		return getBlobSubtrees(msg)
 	default:
 		panic(fmt.Sprintf("unknown message id %s", id))
 	}
 }
 
-func assertTrue(b bool) {
+func lookupVectorOffset(vo fb.VOffsetT, tab fb.Table) uint16 {
+	off := fb.UOffsetT(tab.Offset(vo)) + tab.Pos
+	off += fb.GetUOffsetT(tab.Bytes[off:])
+	// data starts after metadata containing the vector length
+	return uint16(off + fb.UOffsetT(fb.SizeUOffsetT))
+}
+
+func assertTrue(b bool, msg string) {
 	if !b {
-		panic("assertion failed")
+		panic("assertion failed: " + msg)
 	}
 }
 
-func assertFalse(b bool) {
+func assertFalse(b bool, msg string) {
 	if b {
-		panic("assertion failed")
+		panic("assertion failed: " + msg)
 	}
 }

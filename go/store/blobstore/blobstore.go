@@ -1,4 +1,4 @@
-// Copyright 2019 Dolthub, Inc.
+// Copyright 2023 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,10 +22,23 @@ import (
 
 // Blobstore is an interface for storing and retrieving blobs of data by key
 type Blobstore interface {
-	Exists(ctx context.Context, key string) (bool, error)
-	Get(ctx context.Context, key string, br BlobRange) (io.ReadCloser, string, error)
-	Put(ctx context.Context, key string, reader io.Reader) (string, error)
-	CheckAndPut(ctx context.Context, expectedVersion, key string, reader io.Reader) (string, error)
+	// Path returns this blobstore's path.
+	Path() (path string)
+
+	// Exists returns true if a blob keyed by |key| exists.
+	Exists(ctx context.Context, key string) (ok bool, err error)
+
+	// Get returns a byte range of from the blob keyed by |key|, and the latest store version.
+	Get(ctx context.Context, key string, br BlobRange) (rc io.ReadCloser, version string, err error)
+
+	// Put creates a new blob from |reader| keyed by |key|, it returns the latest store version.
+	Put(ctx context.Context, key string, totalSize int64, reader io.Reader) (version string, err error)
+
+	// CheckAndPut updates the blob keyed by |key| using a check-and-set on |expectedVersion|.
+	CheckAndPut(ctx context.Context, expectedVersion, key string, totalSize int64, reader io.Reader) (version string, err error)
+
+	// Concatenate creates a new blob named |key| by concatenating |sources|.
+	Concatenate(ctx context.Context, key string, sources []string) (version string, err error)
 }
 
 // GetBytes is a utility method calls bs.Get and handles reading the data from the returned
@@ -50,5 +63,5 @@ func GetBytes(ctx context.Context, bs Blobstore, key string, br BlobRange) ([]by
 // PutBytes is a utility method calls bs.Put by wrapping the supplied []byte in an io.Reader
 func PutBytes(ctx context.Context, bs Blobstore, key string, data []byte) (string, error) {
 	reader := bytes.NewReader(data)
-	return bs.Put(ctx, key, reader)
+	return bs.Put(ctx, key, int64(len(data)), reader)
 }

@@ -31,7 +31,6 @@ teardown() {
 # see 'cp-and-mv.bats' for renaming a table with `dolt mv`
 
 @test "rename-tables: diff a renamed table" {
-    skip_nbf_dolt_1
     dolt sql <<SQL
 CREATE TABLE test (pk int PRIMARY KEY);
 SQL
@@ -42,12 +41,11 @@ SQL
     run dolt diff
     [ "$status" -eq 0 ]
     [[ "${lines[0]}" =~ "diff --dolt a/test b/quiz" ]] || false
-    [[ "${lines[1]}" =~ "--- a/test @" ]] || false
-    [[ "${lines[2]}" =~ "+++ b/quiz @" ]] || false
+    [[ "${lines[1]}" =~ "--- a/test" ]] || false
+    [[ "${lines[2]}" =~ "+++ b/quiz" ]] || false
 }
 
 @test "rename-tables: sql diff a renamed table" {
-    skip_nbf_dolt_1
     dolt sql <<SQL
 CREATE TABLE test (pk int PRIMARY KEY);
 SQL
@@ -77,7 +75,7 @@ INSERT INTO quiz VALUES (9);
 SQL
     dolt add -A && dolt commit -m "renamed test to quiz, added values"
     skip "merge works on matching table names currently, panics on renames"
-    run dolt merge other
+    run dolt merge other -m "merge"
     [ "$status" -eq 0 ]
     run dolt ls
     [ "$status" -eq 0 ]

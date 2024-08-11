@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     dolt sql <<SQL
 CREATE TABLE test (
@@ -11,6 +10,7 @@ CREATE TABLE test (
 );
 SQL
 
+    dolt add .
     dolt commit -a -m "Add a table"
 }
 
@@ -23,8 +23,7 @@ teardown() {
     # call proc
     dolt sql -q "create table test2 (pk int primary key)"
 
-    run dolt sql -q "call dolt_clean()"
-    [ $status -eq 0 ]
+    dolt sql -q "call dolt_clean()"
 
     run dolt status
     [ "$status" -eq 0 ]
@@ -33,14 +32,13 @@ teardown() {
 
     # call dproc
     dolt sql -q "create table test2 (pk int primary key)"
-    run dolt sql -q "call dclean('--dry-run')"
-    [ $status -eq 0 ]
+    dolt sql -q "call dolt_clean('--dry-run')"
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new table:      test2" ]] || false
+    [[ "$output" =~ "new table:        test2" ]] || false
 
-    dolt sql -q "call dclean('test2')"
+    dolt sql -q "call dolt_clean('test2')"
 
     # dolt cli
     dolt sql -q "create table test2 (pk int primary key)"
@@ -48,27 +46,27 @@ teardown() {
     dolt clean test3
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new table:      test2" ]] || false
-    [[ ! "$output" =~ "new table:      test3" ]] || false
+    [[ "$output" =~ "new table:        test2" ]] || false
+    [[ ! "$output" =~ "new table:        test3" ]] || false
 
     # don't touch staged root
     dolt add test2
     dolt clean
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new table:      test2" ]] || false
+    [[ "$output" =~ "new table:        test2" ]] || false
 }
 
 @test "sql-clean: DOLT_CLEAN unknown table name" {
     dolt sql -q "create table test2 (pk int primary key)"
 
-    run dolt sql -q "call dclean('unknown')"
+    run dolt sql -q "call dolt_clean('unknown')"
     [ $status -eq 1 ]
     [[ "$output" =~ "table not found: 'unknown'" ]] || false
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new table:      test2" ]] || false
+    [[ "$output" =~ "new table:        test2" ]] || false
 
     run dolt clean unknown
     [ $status -eq 1 ]
@@ -76,6 +74,6 @@ teardown() {
 
     run dolt status
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "new table:      test2" ]] || false
+    [[ "$output" =~ "new table:        test2" ]] || false
 }
 

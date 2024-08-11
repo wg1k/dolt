@@ -19,10 +19,10 @@ import (
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/variables"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/dtestutils"
 	"github.com/dolthub/dolt/go/libraries/doltcore/row"
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/store/types"
@@ -95,16 +95,16 @@ func TestExecutePersist(t *testing.T) {
 // Tests the given query on a freshly created dataset, asserting that the result has the given schema and rows. If
 // expectedErr is set, asserts instead that the execution returns an error that matches.
 func testPersistQuery(t *testing.T, test PersistTest) {
-	dEnv := dtestutils.CreateTestEnv()
-	CreateEmptyTestDatabase(dEnv, t)
+	dEnv, err := CreateEmptyTestDatabase()
+	require.NoError(t, err)
+	defer dEnv.DoltDB.Close()
 
 	if test.AdditionalSetup != nil {
 		test.AdditionalSetup(t, dEnv)
 	}
 
-	sql.InitSystemVariables()
+	variables.InitSystemVariables()
 
-	var err error
 	root, _ := dEnv.WorkingRoot(context.Background())
 	root, err = executeModify(t, context.Background(), dEnv, root, test.PersistQuery)
 	if len(test.ExpectedErr) > 0 {

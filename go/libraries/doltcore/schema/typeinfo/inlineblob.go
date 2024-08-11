@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/sqltypes"
 
 	"github.com/dolthub/dolt/go/store/types"
@@ -41,6 +42,10 @@ type inlineBlobType struct {
 
 var _ TypeInfo = (*inlineBlobType)(nil)
 
+var (
+	VarbinaryDefaultType = &inlineBlobType{gmstypes.MustCreateBinary(sqltypes.VarBinary, 16383)}
+)
+
 func CreateInlineBlobTypeFromParams(params map[string]string) (TypeInfo, error) {
 	var length int64
 	var err error
@@ -56,9 +61,9 @@ func CreateInlineBlobTypeFromParams(params map[string]string) (TypeInfo, error) 
 		var sqlType sql.StringType
 		switch sqlStr {
 		case inlineBlobTypeParam_SQL_Binary:
-			sqlType, err = sql.CreateBinary(sqltypes.Binary, length)
+			sqlType, err = gmstypes.CreateBinary(sqltypes.Binary, length)
 		case inlineBlobTypeParam_SQL_VarBinary:
-			sqlType, err = sql.CreateBinary(sqltypes.VarBinary, length)
+			sqlType, err = gmstypes.CreateBinary(sqltypes.VarBinary, length)
 		default:
 			return nil, fmt.Errorf(`create inlineblob type info has "%v" param with value "%v"`, inlineBlobTypeParam_SQL, sqlStr)
 		}
@@ -101,13 +106,13 @@ func (ti *inlineBlobType) ConvertValueToNomsValue(ctx context.Context, vrw types
 	if v == nil {
 		return types.NullValue, nil
 	}
-	strVal, err := ti.sqlBinaryType.Convert(v)
+	strVal, _, err := ti.sqlBinaryType.Convert(v)
 	if err != nil {
 		return nil, err
 	}
-	val, ok := strVal.(string)
+	val, ok := strVal.([]byte)
 	if ok {
-		return *(*types.InlineBlob)(unsafe.Pointer(&val)), nil
+		return types.InlineBlob(val), nil
 	}
 	return nil, fmt.Errorf(`"%v" has unexpectedly encountered a value of type "%T" from embedded type`, ti.String(), v)
 }
@@ -235,6 +240,8 @@ func inlineBlobTypeConverter(ctx context.Context, src *inlineBlobType, destTi Ty
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *floatType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *geomcollType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *geometryType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *inlineBlobType:
@@ -244,6 +251,12 @@ func inlineBlobTypeConverter(ctx context.Context, src *inlineBlobType, destTi Ty
 	case *jsonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *linestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multilinestringType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipointType:
+		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
+	case *multipolygonType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)
 	case *pointType:
 		return wrapConvertValueToNomsValue(dest.ConvertValueToNomsValue)

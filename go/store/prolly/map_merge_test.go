@@ -15,6 +15,7 @@
 package prolly
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -42,6 +43,7 @@ func Test3WayMapMerge(t *testing.T) {
 		val.Type{Enc: val.Uint32Enc, Nullable: true},
 		val.Type{Enc: val.Uint32Enc, Nullable: true},
 	)
+	ns := tree.NewTestNodeStore()
 
 	for _, s := range scales {
 		name := fmt.Sprintf("test proCur map at scale %d", s)
@@ -51,12 +53,12 @@ func Test3WayMapMerge(t *testing.T) {
 			})
 			t.Run("3way merge inserts", func(t *testing.T) {
 				for k := 0; k < 10; k++ {
-					testThreeWayMapMerge(t, kd, vd, s)
+					testThreeWayMapMerge(t, kd, vd, s, ns)
 				}
 			})
 			t.Run("tuple merge fn", func(t *testing.T) {
 				for k := 0; k < 10; k++ {
-					testTupleMergeFn(t, kd, vd, s)
+					testTupleMergeFn(t, kd, vd, s, ns)
 				}
 			})
 		})
@@ -67,23 +69,24 @@ func testEqualMapMerge(t *testing.T, sz int) {
 	om, _ := makeProllyMap(t, sz)
 	m := om.(Map)
 	ctx := context.Background()
-	mm, err := MergeMaps(ctx, m, m, m, panicOnConflict)
+	mm, _, err := MergeMaps(ctx, m, m, m, panicOnConflict)
 	require.NoError(t, err)
 	assert.NotNil(t, mm)
 	assert.Equal(t, m.HashOf(), mm.HashOf())
 }
 
-func testThreeWayMapMerge(t *testing.T, kd, vd val.TupleDesc, sz int) {
-	baseTuples, leftEdits, rightEdits := makeTuplesAndMutations(kd, vd, sz)
-	om := prollyMapFromTuples(t, kd, vd, baseTuples)
+func testThreeWayMapMerge(t *testing.T, kd, vd val.TupleDesc, sz int, ns tree.NodeStore) {
+	baseTuples, leftEdits, rightEdits := makeTuplesAndMutations(kd, vd, sz, ns)
+	base := mustProllyMapFromTuples(t, kd, vd, baseTuples)
 
-	base := om.(Map)
 	left := applyMutationSet(t, base, leftEdits)
 	right := applyMutationSet(t, base, rightEdits)
 
 	ctx := context.Background()
-	final, err := MergeMaps(ctx, left, right, base, panicOnConflict)
+	final, stats, err := MergeMaps(ctx, left, right, base, panicOnConflict)
 	assert.NoError(t, err)
+
+	var adds, modifications, deletes int
 
 	for _, add := range leftEdits.adds {
 		ok, err := final.Has(ctx, add[0])
@@ -96,6 +99,7 @@ func testThreeWayMapMerge(t *testing.T, kd, vd val.TupleDesc, sz int) {
 		assert.NoError(t, err)
 	}
 	for _, add := range rightEdits.adds {
+		adds++
 		ok, err := final.Has(ctx, add[0])
 		assert.NoError(t, err)
 		assert.True(t, ok)
@@ -112,6 +116,7 @@ func testThreeWayMapMerge(t *testing.T, kd, vd val.TupleDesc, sz int) {
 		assert.False(t, ok)
 	}
 	for _, del := range rightEdits.deletes {
+		deletes++
 		ok, err := final.Has(ctx, del)
 		assert.NoError(t, err)
 		assert.False(t, ok)
@@ -122,35 +127,39 @@ func testThreeWayMapMerge(t *testing.T, kd, vd val.TupleDesc, sz int) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 		err = final.Get(ctx, up[0], func(key, value val.Tuple) error {
-			assert.Equal(t, value, up[1])
+			assert.Equal(t, value, up[2])
 			return nil
 		})
 		assert.NoError(t, err)
 	}
 	for _, up := range rightEdits.updates {
+		modifications++
 		ok, err := final.Has(ctx, up[0])
 		assert.NoError(t, err)
 		assert.True(t, ok)
 		err = final.Get(ctx, up[0], func(key, value val.Tuple) error {
-			assert.Equal(t, value, up[1])
+			assert.Equal(t, value, up[2])
 			return nil
 		})
 		assert.NoError(t, err)
 	}
+
+	require.Equal(t, adds, stats.Adds)
+	require.Equal(t, modifications, stats.Modifications)
+	require.Equal(t, deletes, stats.Removes)
 }
 
-func testTupleMergeFn(t *testing.T, kd, vd val.TupleDesc, sz int) {
+func testTupleMergeFn(t *testing.T, kd, vd val.TupleDesc, sz int, ns tree.NodeStore) {
 	ctx := context.Background()
-	tuples := tree.RandomTuplePairs(sz, kd, vd)
-	om := prollyMapFromTuples(t, kd, vd, tuples)
-	base := om.(Map)
+	tuples := tree.RandomTuplePairs(sz, kd, vd, ns)
+	base := mustProllyMapFromTuples(t, kd, vd, tuples)
 
 	mutSz := sz / 10
 	testRand.Shuffle(len(tuples), func(i, j int) {
 		tuples[i], tuples[j] = tuples[j], tuples[i]
 	})
 
-	// make overlapping edits
+	// make overlapping Edits
 	left := makeUpdatesToTuples(kd, vd, tuples[:mutSz]...)
 	right := makeUpdatesToTuples(kd, vd, tuples[:mutSz]...)
 
@@ -171,7 +180,12 @@ func testTupleMergeFn(t *testing.T, kd, vd val.TupleDesc, sz int) {
 	require.NoError(t, err)
 
 	idx := 0
-	final, err := MergeMaps(ctx, leftMap, rightMap, base, func(l, r tree.Diff) (merged tree.Diff, ok bool) {
+	final, _, err := MergeMaps(ctx, leftMap, rightMap, base, func(l, r tree.Diff) (merged tree.Diff, ok bool) {
+		if l.Type == r.Type && bytes.Equal(l.To, r.To) {
+			// convergent edit
+			return l, true
+		}
+
 		assert.Equal(t, l.Key, r.Key)
 		assert.Equal(t, l.From, r.From)
 
@@ -210,10 +224,10 @@ type mutationSet struct {
 	updates [][3]val.Tuple
 }
 
-func makeTuplesAndMutations(kd, vd val.TupleDesc, sz int) (base [][2]val.Tuple, left, right mutationSet) {
+func makeTuplesAndMutations(kd, vd val.TupleDesc, sz int, ns tree.NodeStore) (base [][2]val.Tuple, left, right mutationSet) {
 	mutSz := sz / 10
 	totalSz := sz + (mutSz * 2)
-	tuples := tree.RandomTuplePairs(totalSz, kd, vd)
+	tuples := tree.RandomTuplePairs(totalSz, kd, vd, ns)
 
 	base = tuples[:sz]
 
@@ -259,7 +273,7 @@ func applyMutationSet(t *testing.T, base Map, edits mutationSet) (m Map) {
 		require.NoError(t, err)
 	}
 	for _, up := range edits.updates {
-		err = mut.Put(ctx, up[0], up[1])
+		err = mut.Put(ctx, up[0], up[2])
 		require.NoError(t, err)
 	}
 
@@ -269,5 +283,9 @@ func applyMutationSet(t *testing.T, base Map, edits mutationSet) (m Map) {
 }
 
 func panicOnConflict(left, right tree.Diff) (tree.Diff, bool) {
+	if left.Type == right.Type && bytes.Equal(left.To, right.To) {
+		// convergent edit
+		return left, true
+	}
 	panic("cannot merge cells")
 }

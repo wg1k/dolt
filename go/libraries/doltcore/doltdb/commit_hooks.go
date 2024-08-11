@@ -16,6 +16,7 @@ package doltdb
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -24,7 +25,6 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/store/datas"
-	"github.com/dolthub/dolt/go/store/datas/pull"
 	"github.com/dolthub/dolt/go/store/hash"
 	"github.com/dolthub/dolt/go/store/types"
 )
@@ -33,6 +33,7 @@ type PushOnWriteHook struct {
 	destDB datas.Database
 	tmpDir string
 	out    io.Writer
+	fmt    *types.NomsBinFormat
 }
 
 var _ CommitHook = (*PushOnWriteHook)(nil)
@@ -40,56 +41,31 @@ var _ CommitHook = (*PushOnWriteHook)(nil)
 // NewPushOnWriteHook creates a ReplicateHook, parameterizaed by the backup database
 // and a local tempfile for pushing
 func NewPushOnWriteHook(destDB *DoltDB, tmpDir string) *PushOnWriteHook {
-	return &PushOnWriteHook{destDB: destDB.db, tmpDir: tmpDir}
+	return &PushOnWriteHook{
+		destDB: destDB.db,
+		tmpDir: tmpDir,
+		fmt:    destDB.Format(),
+	}
 }
 
 // Execute implements CommitHook, replicates head updates to the destDb field
-func (ph *PushOnWriteHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) error {
-	return pushDataset(ctx, ph.destDB, db, ph.tmpDir, ds)
+func (ph *PushOnWriteHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) (func(context.Context) error, error) {
+	return nil, pushDataset(ctx, ph.destDB, db, ds, ph.tmpDir)
 }
 
-// HandleError implements CommitHook
-func (ph *PushOnWriteHook) HandleError(ctx context.Context, err error) error {
-	if ph.out != nil {
-		ph.out.Write([]byte(err.Error()))
-	}
-	return nil
-}
-
-// SetLogger implements CommitHook
-func (ph *PushOnWriteHook) SetLogger(ctx context.Context, wr io.Writer) error {
-	ph.out = wr
-	return nil
-}
-
-// replicate pushes a dataset from srcDB to destDB and force sets the destDB ref to the new dataset value
-func pushDataset(ctx context.Context, destDB, srcDB datas.Database, tempTableDir string, ds datas.Dataset) error {
+func pushDataset(ctx context.Context, destDB, srcDB datas.Database, ds datas.Dataset, tmpDir string) error {
 	addr, ok := ds.MaybeHeadAddr()
 	if !ok {
-		// No head, return
-		return nil
+		_, err := destDB.Delete(ctx, ds, "")
+		return err
+	}
+
+	err := pullHash(ctx, destDB, srcDB, []hash.Hash{addr}, tmpDir, nil, nil)
+	if err != nil {
+		return err
 	}
 
 	rf, err := ref.Parse(ds.ID())
-	if err != nil {
-		return err
-	}
-
-	srcCS := datas.ChunkStoreFromDatabase(srcDB)
-	destCS := datas.ChunkStoreFromDatabase(destDB)
-	waf, err := types.WalkAddrsForChunkStore(srcCS)
-	if err != nil {
-		return err
-	}
-
-	puller, err := pull.NewPuller(ctx, tempTableDir, defaultChunksPerTF, srcCS, destCS, waf, addr, nil)
-	if err == pull.ErrDBUpToDate {
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	err = puller.Pull(ctx)
 	if err != nil {
 		return err
 	}
@@ -99,8 +75,29 @@ func pushDataset(ctx context.Context, destDB, srcDB datas.Database, tempTableDir
 		return err
 	}
 
-	_, err = destDB.SetHead(ctx, ds, addr)
+	_, err = destDB.SetHead(ctx, ds, addr, "")
 	return err
+}
+
+// HandleError implements CommitHook
+func (ph *PushOnWriteHook) HandleError(ctx context.Context, err error) error {
+	if ph.out != nil {
+		_, err := ph.out.Write([]byte(fmt.Sprintf("error pushing: %+v", err)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (*PushOnWriteHook) ExecuteForWorkingSets() bool {
+	return false
+}
+
+// SetLogger implements CommitHook
+func (ph *PushOnWriteHook) SetLogger(ctx context.Context, wr io.Writer) error {
+	ph.out = wr
+	return nil
 }
 
 type PushArg struct {
@@ -133,20 +130,21 @@ func NewAsyncPushOnWriteHook(bThreads *sql.BackgroundThreads, destDB *DoltDB, tm
 	return &AsyncPushOnWriteHook{ch: ch}, nil
 }
 
+func (*AsyncPushOnWriteHook) ExecuteForWorkingSets() bool {
+	return false
+}
+
 // Execute implements CommitHook, replicates head updates to the destDb field
-func (ah *AsyncPushOnWriteHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) error {
-	addr, ok := ds.MaybeHeadAddr()
-	if !ok {
-		return ErrHashNotFound
-	}
+func (ah *AsyncPushOnWriteHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) (func(context.Context) error, error) {
+	addr, _ := ds.MaybeHeadAddr()
 
 	select {
 	case ah.ch <- PushArg{ds: ds, db: db, hash: addr}:
 	case <-ctx.Done():
 		ah.ch <- PushArg{ds: ds, db: db, hash: addr}
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	return nil
+	return nil, nil
 }
 
 // HandleError implements CommitHook
@@ -176,12 +174,12 @@ func NewLogHook(msg []byte) *LogHook {
 }
 
 // Execute implements CommitHook, writes message to log channel
-func (lh *LogHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) error {
+func (lh *LogHook) Execute(ctx context.Context, ds datas.Dataset, db datas.Database) (func(context.Context) error, error) {
 	if lh.out != nil {
 		_, err := lh.out.Write(lh.msg)
-		return err
+		return nil, err
 	}
-	return nil
+	return nil, nil
 }
 
 // HandleError implements CommitHook
@@ -196,6 +194,10 @@ func (lh *LogHook) HandleError(ctx context.Context, err error) error {
 func (lh *LogHook) SetLogger(ctx context.Context, wr io.Writer) error {
 	lh.out = wr
 	return nil
+}
+
+func (*LogHook) ExecuteForWorkingSets() bool {
+	return false
 }
 
 func RunAsyncReplicationThreads(bThreads *sql.BackgroundThreads, ch chan PushArg, destDB *DoltDB, tmpDir string, logger io.Writer) error {
@@ -243,33 +245,29 @@ func RunAsyncReplicationThreads(bThreads *sql.BackgroundThreads, ch chan PushArg
 			return nil
 		}
 
-		var newHeadsCopy = make(map[string]PushArg, asyncPushBufferSize)
-		for k, v := range newHeads {
-			newHeadsCopy[k] = v
-		}
+		toRet := newHeads
+		newHeads = make(map[string]PushArg, asyncPushBufferSize)
 
-		return newHeadsCopy
-	}
-
-	isNewHeads := func(newHeads map[string]PushArg) bool {
-		defer mu.Unlock()
-		mu.Lock()
-		return len(newHeads) != 0
+		return toRet
 	}
 
 	flush := func(newHeads map[string]PushArg, latestHeads map[string]hash.Hash) {
 		newHeadsCopy := getHeadsCopy()
-		if !isNewHeads(newHeadsCopy) {
+		if len(newHeadsCopy) == 0 {
 			return
 		}
 		for id, newCm := range newHeadsCopy {
 			if latest, ok := latestHeads[id]; !ok || latest != newCm.hash {
 				// use background context to drain after sql context is canceled
-				err := pushDataset(context.Background(), destDB.db, newCm.db, tmpDir, newCm.ds)
+				err := pushDataset(context.Background(), destDB.db, newCm.db, newCm.ds, tmpDir)
 				if err != nil {
 					logger.Write([]byte("replication failed: " + err.Error()))
 				}
-				latestHeads[id] = newCm.hash
+				if newCm.hash.IsEmpty() {
+					delete(latestHeads, id)
+				} else {
+					latestHeads[id] = newCm.hash
+				}
 			}
 		}
 	}

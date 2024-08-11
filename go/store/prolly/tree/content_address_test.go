@@ -27,20 +27,21 @@ import (
 )
 
 var goldenHash = hash.Hash{
-	0x39, 0x1c, 0xcb, 0xd8,
-	0xea, 0xd2, 0xdc, 0x42,
-	0x76, 0xb7, 0x38, 0xf1,
-	0x0d, 0x4f, 0x48, 0x91,
-	0x7d, 0x1f, 0xb7, 0xb4,
+	0x33, 0xba, 0x6a, 0x18, 0xcb,
+	0xcb, 0xa7, 0x41, 0x4a, 0xdb,
+	0x1e, 0x3d, 0xbf, 0x3f, 0x1e,
+	0xea, 0x7d, 0x47, 0x69, 0x6c,
 }
 
-// todo(andy): need and analogous test in pkg prolly
+// todo(andy): need an analogous test in pkg prolly
 func TestContentAddress(t *testing.T) {
 	tups, _ := AscendingUintTuples(12345)
 	m := makeTree(t, tups)
 	require.NotNil(t, m)
 	require.Equal(t, goldenHash, m.HashOf())
-	assert.Equal(t, 12345, m.TreeCount())
+	tc, err := m.TreeCount()
+	require.NoError(t, err)
+	assert.Equal(t, 12345, tc)
 }
 
 func makeTree(t *testing.T, tuples [][2]val.Tuple) Node {
@@ -48,8 +49,8 @@ func makeTree(t *testing.T, tuples [][2]val.Tuple) Node {
 	ns := NewTestNodeStore()
 
 	// todo(andy): move this test
-	serializer := message.ProllyMapSerializer{Pool: ns.Pool()}
-	chunker, err := newEmptyChunker(ctx, ns, serializer)
+	s := message.NewProllyMapSerializer(val.TupleDesc{}, ns.Pool())
+	chunker, err := newEmptyChunker(ctx, ns, s)
 	require.NoError(t, err)
 	for _, pair := range tuples {
 		err := chunker.AddPair(ctx, Item(pair[0]), Item(pair[1]))

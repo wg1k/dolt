@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	gmstypes "github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle"
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/json"
+	"github.com/dolthub/dolt/go/store/types"
 )
 
 type jsonValueTest struct {
@@ -43,6 +45,10 @@ type jsonValueTest struct {
 }
 
 func TestJsonValues(t *testing.T) {
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // todo: convert to enginetests
+	}
+
 	SkipByDefaultInCI(t)
 	setupCommon := []testCommand{
 		{cmd.SqlCmd{}, args{"-q", `create table js (pk int primary key, js json);`}},
@@ -121,17 +127,19 @@ func TestJsonValues(t *testing.T) {
 func testJsonValue(t *testing.T, test jsonValueTest, setupCommon []testCommand) {
 	ctx := context.Background()
 	dEnv := dtestutils.CreateTestEnv()
+	cliCtx, verr := cmd.NewArgFreeCliContext(ctx, dEnv)
+	require.NoError(t, verr)
 
 	setup := append(setupCommon, test.setup...)
 	for _, c := range setup {
-		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv)
+		exitCode := c.cmd.Exec(ctx, c.cmd.Name(), c.args, dEnv, cliCtx)
 		require.Equal(t, 0, exitCode)
 	}
 
 	root, err := dEnv.WorkingRoot(ctx)
 	require.NoError(t, err)
 
-	actRows, err := sqle.ExecuteSelect(t, dEnv, dEnv.DoltDB, root, test.query)
+	actRows, err := sqle.ExecuteSelect(dEnv, root, test.query)
 	require.NoError(t, err)
 
 	require.Equal(t, len(test.rows), len(actRows))
@@ -142,7 +150,7 @@ func testJsonValue(t *testing.T, test jsonValueTest, setupCommon []testCommand) 
 
 			// special logic for comparing JSONValues
 			if js, ok := exp.(json.NomsJSON); ok {
-				cmp, err := js.Compare(sql.NewEmptyContext(), act.(json.NomsJSON))
+				cmp, err := gmstypes.CompareJSON(js, act.(json.NomsJSON))
 				require.NoError(t, err)
 				assert.Zero(t, cmp)
 			} else {
@@ -154,6 +162,10 @@ func testJsonValue(t *testing.T, test jsonValueTest, setupCommon []testCommand) 
 
 // round-trips large random JSON objects through the SQL engine
 func TestLargeJsonObjects(t *testing.T) {
+	if types.Format_Default != types.Format_LD_1 {
+		t.Skip() // todo: convert to enginetests
+	}
+
 	SkipByDefaultInCI(t)
 	setupCommon := []testCommand{
 		{cmd.SqlCmd{}, args{"-q", `create table js (pk int primary key, js json);`}},

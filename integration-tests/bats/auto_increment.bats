@@ -270,7 +270,7 @@ SQL
     dolt commit -m "inserted 20 & 21 on other"
 
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
     dolt sql -q "INSERT INTO test VALUES (NULL,22);"
     run dolt sql -q "SELECT pk FROM test WHERE c0 = 22 ORDER BY pk;" -r csv
     [ "$status" -eq 0 ]
@@ -434,23 +434,22 @@ SQL
 }
 
 @test "auto_increment: dolt_merge() works with no auto increment overlap" {
-    skip_nbf_dolt_1
-    
     dolt sql <<SQL
 CREATE TABLE t (
     pk int PRIMARY KEY AUTO_INCREMENT,
     c0 int
 );
 
+CALL DOLT_ADD('.');
 INSERT INTO t (c0) VALUES (1), (2);
-SELECT DOLT_COMMIT('-a', '-m', 'cm1');
-SELECT DOLT_CHECKOUT('-b', 'test');
+call dolt_commit('-a', '-m', 'cm1');
+call dolt_checkout('-b', 'test');
 
 INSERT INTO t (c0) VALUES (3), (4);
-SELECT DOLT_COMMIT('-a', '-m', 'cm2');
-SELECT DOLT_CHECKOUT('main');
+call dolt_commit('-a', '-m', 'cm2');
+call dolt_checkout('main');
 
-SELECT DOLT_MERGE('test');
+call dolt_merge('test');
 INSERT INTO t VALUES (NULL,5),(6,6),(NULL,7);
 SQL
 
@@ -473,15 +472,16 @@ CREATE TABLE t (
     c0 int
 );
 
+CALL DOLT_ADD('.');
 INSERT INTO t (c0) VALUES (1), (2);
-SELECT DOLT_COMMIT('-a', '-m', 'cm1');
-SELECT DOLT_CHECKOUT('-b', 'test');
+call dolt_commit('-a', '-m', 'cm1');
+call dolt_checkout('-b', 'test');
 
 INSERT INTO t (c0) VALUES (3), (4);
-SELECT DOLT_COMMIT('-a', '-m', 'cm2');
-SELECT DOLT_CHECKOUT('main');
+call dolt_commit('-a', '-m', 'cm2');
+call dolt_checkout('main');
 
-SELECT DOLT_MERGE('test');
+call dolt_merge('test');
 INSERT INTO t VALUES (10,10),(NULL,11);
 SQL
 
@@ -500,23 +500,22 @@ SQL
 }
 
 @test "auto_increment: dolt_merge() with a gap in an auto increment key" {
-    skip_nbf_dolt_1
-    
     dolt sql <<SQL
 CREATE TABLE t (
     pk int PRIMARY KEY AUTO_INCREMENT,
     c0 int
 );
 
+CALL DOLT_ADD('.');
 INSERT INTO t (c0) VALUES (1), (2);
-SELECT DOLT_COMMIT('-a', '-m', 'cm1');
-SELECT DOLT_CHECKOUT('-b', 'test');
+call dolt_commit('-a', '-m', 'cm1');
+call dolt_checkout('-b', 'test');
 
 INSERT INTO t VALUES (4,4), (5,5);
-SELECT DOLT_COMMIT('-a', '-m', 'cm2');
-SELECT DOLT_CHECKOUT('main');
+call dolt_commit('-a', '-m', 'cm2');
+call dolt_checkout('main');
 
-SELECT DOLT_MERGE('test');
+call dolt_merge('test');
 INSERT INTO t VALUES (3,3),(NULL,6);
 SQL
 
@@ -541,15 +540,16 @@ CREATE TABLE t (
     c0 int
 );
 
+CALL DOLT_ADD('.');
 INSERT INTO t VALUES (4, 4), (5, 5);
-SELECT DOLT_COMMIT('-a', '-m', 'cm1');
-SELECT DOLT_CHECKOUT('-b', 'test');
+call dolt_commit('-a', '-m', 'cm1');
+call dolt_checkout('-b', 'test');
 
 INSERT INTO t VALUES (1,1), (2, 2);
-SELECT DOLT_COMMIT('-a', '-m', 'cm2');
-SELECT DOLT_CHECKOUT('main');
+call dolt_commit('-a', '-m', 'cm2');
+call dolt_checkout('main');
 
-SELECT DOLT_MERGE('test');
+call dolt_merge('test');
 INSERT INTO t VALUES (NULL,6);
 SQL
 
@@ -697,4 +697,156 @@ SQL
     run dolt sql -q "SHOW CREATE TABLE public.test"
     [ $status -eq 0 ]
     [[ "$output" =~ "NOT NULL AUTO_INCREMENT" ]] || false
+}
+
+@test "auto_increment: globally distinct auto increment values" {
+    dolt sql  <<SQL
+call dolt_add('.');
+call dolt_commit('-am', 'empty table');
+call dolt_branch('branch1');
+call dolt_branch('branch2');
+
+insert into test (c0) values (1), (2);
+call dolt_commit('-am', 'main values');
+
+call dolt_checkout('branch1');
+insert into test (c0) values (3), (4);
+call dolt_commit('-am', 'branch1 values');
+
+call dolt_checkout('branch2');
+insert into test (c0) values (5), (6);
+call dolt_commit('-am', 'branch2 values');
+SQL
+
+    run dolt sql -q 'select * from test' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "1,1" ]] || false
+    [[ "$output" =~ "2,2" ]] || false
+
+    dolt checkout branch1
+    run dolt sql -q 'select * from test' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "3,3" ]] || false
+    [[ "$output" =~ "4,4" ]] || false
+
+    dolt checkout branch2
+    run dolt sql -q 'select * from test' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "5,5" ]] || false
+    [[ "$output" =~ "6,6" ]] || false
+
+    # Should have the same result across multiple invocations of sql as well
+    dolt checkout main
+    dolt sql  <<SQL
+create table t1 (ai bigint primary key auto_increment, c0 int);
+call dolt_add('.');
+call dolt_commit('-am', 'empty table');
+call dolt_branch('branch3');
+call dolt_branch('branch4');
+insert into t1 (c0) values (1), (2);
+call dolt_commit('-am', 'main values');
+SQL
+
+    dolt sql  <<SQL    
+call dolt_checkout('branch3');
+insert into t1 (c0) values (3), (4);
+call dolt_commit('-am', 'branch3 values');
+SQL
+
+    dolt sql  <<SQL        
+call dolt_checkout('branch4');
+insert into t1 (c0) values (5), (6);
+call dolt_commit('-am', 'branch4 values');
+SQL
+
+    run dolt sql -q 'select * from t1' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "1,1" ]] || false
+    [[ "$output" =~ "2,2" ]] || false
+
+    dolt checkout branch3
+    run dolt sql -q 'select * from t1' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "3,3" ]] || false
+    [[ "$output" =~ "4,4" ]] || false
+
+    dolt checkout branch4
+    run dolt sql -q 'select * from t1' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "5,5" ]] || false
+    [[ "$output" =~ "6,6" ]] || false    
+}
+
+@test "auto_increment: newly cloned database" {
+    dolt sql  <<SQL
+call dolt_add('.');
+call dolt_commit('-am', 'empty table');
+call dolt_branch('branch1');
+call dolt_branch('branch2');
+
+insert into test (c0) values (1), (2);
+call dolt_commit('-am', 'main values');
+
+call dolt_checkout('branch1');
+insert into test (c0) values (3), (4);
+call dolt_commit('-am', 'branch1 values');
+
+call dolt_checkout('branch2');
+insert into test (c0) values (5), (6);
+call dolt_commit('-am', 'branch2 values');
+SQL
+
+    dolt remote add remote1 file://./remote1
+    dolt push remote1 main
+    dolt push remote1 branch1
+    dolt push remote1 branch2
+
+    dolt clone file://./remote1 clone
+    cd clone
+
+    # The clone should find the values on the remote branches that haven't been
+    # checked out locally
+    dolt sql  <<SQL    
+insert into test (c0) values (7), (8);
+SQL
+
+    run dolt sql -q 'select * from test' -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "7,7" ]] || false
+    [[ "$output" =~ "8,8" ]] || false
+}
+
+@test "auto_increment: manually set auto increment to original value" {
+    dolt sql  <<SQL
+drop table test;
+create table test (id int auto_increment primary key);
+insert into test values ();
+insert into test values ();
+SQL
+
+    run dolt sql -q "select * from test order by 1" -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "2" ]] || false
+
+    dolt sql -q "delete from test"
+    dolt sql  <<SQL
+alter table test auto_increment=1;
+insert into test values ();
+insert into test values ();
+SQL
+
+    run dolt sql -q "select * from test order by 1" -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "2" ]] || false
+
+    dolt sql  <<SQL
+alter table test auto_increment=1;
+insert into test values ();
+insert into test values ();
+SQL
+
+    # auto_increment update ignored because it's lower than current table max
+    run dolt sql -q "select * from test where id > 2 order by 1" -r csv
+    [ $status -eq 0 ]
+    [[ "$output" =~ "4" ]] || false
 }

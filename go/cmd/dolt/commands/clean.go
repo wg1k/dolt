@@ -15,13 +15,14 @@
 package commands
 
 import (
+	"bytes"
 	"context"
-	"io"
+
+	"github.com/gocraft/dbr/v2"
+	"github.com/gocraft/dbr/v2/dialect"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
-	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
-	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
 )
 
@@ -56,40 +57,70 @@ func (cmd CleanCmd) Description() string {
 	return "Remove untracked tables from working set."
 }
 
-// CreateMarkdown creates a markdown file containing the helptext for the command at the given path
-func (cmd CleanCmd) CreateMarkdown(wr io.Writer, commandStr string) error {
+func (cmd CleanCmd) Docs() *cli.CommandDocumentation {
 	ap := cli.CreateCleanArgParser()
-	return CreateMarkdown(wr, cli.GetCommandDocumentation(commandStr, cleanDocContent, ap))
+	return cli.NewCommandDocumentation(cleanDocContent, ap)
 }
 
 func (cmd CleanCmd) ArgParser() *argparser.ArgParser {
 	return cli.CreateCleanArgParser()
 }
 
+func (cmd CleanCmd) RequiresRepo() bool {
+	return false
+}
+
 // Exec executes the command
-func (cmd CleanCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv) int {
+func (cmd CleanCmd) Exec(ctx context.Context, commandStr string, args []string, dEnv *env.DoltEnv, cliCtx cli.CliContext) int {
 	ap := cli.CreateCleanArgParser()
-	help, usage := cli.HelpAndUsagePrinters(cli.GetCommandDocumentation(commandStr, cleanDocContent, ap))
+	help, _ := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, cleanDocContent, ap))
 	apr := cli.ParseArgsOrDie(ap, args, help)
 
-	roots, err := dEnv.Roots(ctx)
+	queryist, sqlCtx, closeFunc, err := cliCtx.QueryEngine(ctx)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Println(err.Error())
+		return 1
+	}
+	if closeFunc != nil {
+		defer closeFunc()
 	}
 
-	ws, err := dEnv.WorkingSet(ctx)
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+	var params []interface{}
+
+	firstParamDone := false
+	var buffer bytes.Buffer
+	buffer.WriteString("CALL DOLT_CLEAN(")
+	if apr.Contains(cli.DryRunFlag) {
+		buffer.WriteString("\"--dry-run\"")
+		firstParamDone = true
+	}
+	if apr.NArg() > 0 {
+		// loop over apr.Args() and add them to the buffer
+		for i := 0; i < apr.NArg(); i++ {
+			if firstParamDone {
+				buffer.WriteString(", ")
+			}
+			buffer.WriteString("?")
+			params = append(params, apr.Arg(i))
+			firstParamDone = true
+		}
+	}
+	buffer.WriteString(")")
+	query := buffer.String()
+
+	if len(params) > 0 {
+		query, err = dbr.InterpolateForDialect(query, params, dialect.MySQL)
+		if err != nil {
+			cli.Println(err.Error())
+			return 1
+		}
 	}
 
-	roots, err = actions.CleanUntracked(ctx, roots, apr.Args, apr.Contains(DryrunCleanParam))
+	_, err = GetRowsForSql(queryist, sqlCtx, query)
 	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
-	}
-	err = dEnv.UpdateWorkingSet(ctx, ws.WithWorkingRoot(roots.Working).WithStagedRoot(roots.Staged).ClearMerge())
-	if err != nil {
-		return HandleVErrAndExitCode(errhand.VerboseErrorFromError(err), usage)
+		cli.Println(err.Error())
+		return 1
 	}
 
-	return handleResetError(err, usage)
+	return 0
 }

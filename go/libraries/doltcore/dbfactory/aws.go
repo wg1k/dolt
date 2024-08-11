@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -27,9 +28,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/s3"
 
+	"github.com/dolthub/dolt/go/libraries/utils/awsrefreshcreds"
 	"github.com/dolthub/dolt/go/store/chunks"
 	"github.com/dolthub/dolt/go/store/datas"
 	"github.com/dolthub/dolt/go/store/nbs"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/types"
 )
 
@@ -47,6 +50,8 @@ const (
 	//AWSCredsProfile is a creation parameter that can be used to specify which AWS profile to use.
 	AWSCredsProfile = "aws-creds-profile"
 )
+
+var AWSFileCredsRefreshDuration = time.Minute
 
 var AWSCredTypes = []string{RoleCS.String(), EnvCS.String(), FileCS.String()}
 
@@ -106,19 +111,25 @@ func AWSCredentialSourceFromStr(str string) AWSCredentialSource {
 type AWSFactory struct {
 }
 
+func (fact AWSFactory) PrepareDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) error {
+	// nothing to prepare
+	return nil
+}
+
 // CreateDB creates an AWS backed database
-func (fact AWSFactory) CreateDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) (datas.Database, types.ValueReadWriter, error) {
+func (fact AWSFactory) CreateDB(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) (datas.Database, types.ValueReadWriter, tree.NodeStore, error) {
 	var db datas.Database
 	cs, err := fact.newChunkStore(ctx, nbf, urlObj, params)
 
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	vrw := types.NewValueStore(cs)
-	db = datas.NewTypesDatabase(vrw)
+	ns := tree.NewNodeStore(cs)
+	db = datas.NewTypesDatabase(vrw, ns)
 
-	return db, vrw, nil
+	return db, vrw, ns, nil
 }
 
 func (fact AWSFactory) newChunkStore(ctx context.Context, nbf *types.NomsBinFormat, urlObj *url.URL, params map[string]interface{}) (chunks.ChunkStore, error) {
@@ -140,6 +151,11 @@ func (fact AWSFactory) newChunkStore(ctx context.Context, nbf *types.NomsBinForm
 	}
 
 	sess := session.Must(session.NewSessionWithOptions(opts))
+	_, err = sess.Config.Credentials.Get()
+	if err != nil {
+		return nil, err
+	}
+
 	q := nbs.NewUnlimitedMemQuotaProvider()
 	return nbs.NewAWSStore(ctx, nbf.VersionString(), parts[0], dbName, parts[1], s3.New(sess), dynamodb.New(sess), defaultMemTableSize, q)
 }
@@ -186,6 +202,11 @@ func awsConfigFromParams(params map[string]interface{}) (session.Options, error)
 		opts.Profile = val.(string)
 	}
 
+	filePath, ok := params[AWSCredsFileParam]
+	if ok && len(filePath.(string)) != 0 && awsCredsSource == RoleCS {
+		awsCredsSource = FileCS
+	}
+
 	switch awsCredsSource {
 	case EnvCS:
 		awsConfig = awsConfig.WithCredentials(credentials.NewEnvCredentials())
@@ -193,7 +214,11 @@ func awsConfigFromParams(params map[string]interface{}) (session.Options, error)
 		if filePath, ok := params[AWSCredsFileParam]; !ok {
 			return opts, os.ErrNotExist
 		} else {
-			creds := credentials.NewSharedCredentials(filePath.(string), profile)
+			provider := &credentials.SharedCredentialsProvider{
+				Filename: filePath.(string),
+				Profile:  profile,
+			}
+			creds := credentials.NewCredentials(awsrefreshcreds.NewRefreshingCredentialsProvider(provider, AWSFileCredsRefreshDuration))
 			awsConfig = awsConfig.WithCredentials(creds)
 		}
 	case AutoCS:

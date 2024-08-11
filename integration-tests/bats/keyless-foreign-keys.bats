@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     dolt sql <<SQL
 CREATE TABLE parent (
@@ -1115,7 +1114,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated parent"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1160,7 +1159,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated parent"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
@@ -1192,7 +1191,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated child"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1237,7 +1236,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated child"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
@@ -1270,7 +1269,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated both"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
 
     run dolt sql -q "SELECT * FROM parent ORDER BY id ASC" -r=csv
     [ "$status" -eq "0" ]
@@ -1317,7 +1316,7 @@ SQL
     dolt add -A
     dolt commit --force -m "updated both"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
     run dolt sql -q "SELECT * FROM dolt_constraint_violations" -r=csv
     [ "$status" -eq "0" ]
     [[ "$output" =~ "table,num_violations" ]] || false
@@ -1348,7 +1347,7 @@ SQL
     dolt add -A
     dolt commit -m "added 2s"
     dolt checkout main
-    dolt merge other
+    dolt merge other -m "merge other"
     run dolt conflicts resolve --theirs parent
     [ "$status" -eq "1" ]
     [[ "$output" =~ "violation" ]] || false

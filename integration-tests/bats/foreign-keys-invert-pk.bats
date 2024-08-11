@@ -3,7 +3,6 @@ load $BATS_TEST_DIRNAME/helper/common.bash
 
 setup() {
     setup_common
-    skip_nbf_dolt_1
 
     dolt sql <<SQL
 create table a (x int, y int, primary key (y,x));
@@ -11,6 +10,7 @@ create table b (x int, y int, primary key (y,x), foreign key (y) references a(y)
 insert into a values (4,0), (3,1), (2,2);
 insert into b values (2,1), (4,2), (3,0);
 SQL
+    dolt add .
 }
 
 teardown() {
@@ -20,6 +20,11 @@ teardown() {
 
 @test "foreign-keys-invert-pk: test commit check pass" {
     dolt commit -am "cm"
+}
+
+@test "foreign-keys-invert-pk: no secondary indexes made" {
+    run dolt index ls
+    [[ $output = "No indexes in the working set" ]] || false
 }
 
 @test "foreign-keys-invert-pk: check referential integrity on merge" {
@@ -33,7 +38,7 @@ SQL
 
     dolt checkout main
 
-    run dolt merge feat
+    run dolt merge feat -m "merge feat"
     run dolt constraints verify --all
     [ "$status" -eq "1" ]
 

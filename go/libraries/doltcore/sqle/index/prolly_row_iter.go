@@ -15,123 +15,156 @@
 package index
 
 import (
-	"strings"
-
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/vitess/go/vt/proto/query"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/schema"
 	"github.com/dolthub/dolt/go/store/prolly"
+	"github.com/dolthub/dolt/go/store/prolly/tree"
 	"github.com/dolthub/dolt/go/store/val"
 )
 
-func init() {
-	// todo: multiple query types can map to a single encoding
-	encodingToType[val.Int8Enc] = query.Type_INT8
-	encodingToType[val.Uint8Enc] = query.Type_UINT8
-	encodingToType[val.Int16Enc] = query.Type_INT16
-	encodingToType[val.Uint16Enc] = query.Type_UINT16
-	encodingToType[val.Int32Enc] = query.Type_INT32
-	encodingToType[val.Uint32Enc] = query.Type_UINT32
-	encodingToType[val.Int64Enc] = query.Type_INT64
-	encodingToType[val.Uint64Enc] = query.Type_UINT64
-	encodingToType[val.Float32Enc] = query.Type_FLOAT32
-	encodingToType[val.Float64Enc] = query.Type_FLOAT64
-	encodingToType[val.DecimalEnc] = query.Type_DECIMAL
-	encodingToType[val.YearEnc] = query.Type_YEAR
-	encodingToType[val.DateEnc] = query.Type_TIMESTAMP
-	encodingToType[val.DatetimeEnc] = query.Type_TIMESTAMP
-	encodingToType[val.StringEnc] = query.Type_VARCHAR
-	encodingToType[val.ByteStringEnc] = query.Type_VARBINARY
-	encodingToType[val.JSONEnc] = query.Type_JSON
-}
-
-var encodingToType [256]query.Type
-
 type prollyRowIter struct {
 	iter prolly.MapIter
+	ns   tree.NodeStore
 
-	sqlSch  sql.Schema
 	keyDesc val.TupleDesc
 	valDesc val.TupleDesc
+
 	keyProj []int
 	valProj []int
+	// ordProj is a concatenated list of output ordinals for |keyProj| and |valProj|
+	ordProj []int
 	rowLen  int
 }
 
 var _ sql.RowIter = prollyRowIter{}
-var _ sql.RowIter2 = prollyRowIter{}
 
-func NewProllyRowIter(
-	sch schema.Schema,
-	schSch sql.Schema,
-	rows prolly.Map,
-	iter prolly.MapIter,
-	projections []string,
-) (sql.RowIter, error) {
-
-	// todo(andy): NomsRangeReader seemingly ignores projections
-	//if projections == nil {
-	//	projections = sch.GetAllCols().GetColumnNames()
-	//}
-
-	projections = sch.GetAllCols().GetColumnNames()
-	keyProj, valProj := projectionMappings(sch, projections)
+func NewProllyRowIterForMap(sch schema.Schema, rows prolly.Map, iter prolly.MapIter, projections []uint64) sql.RowIter {
+	if projections == nil {
+		projections = sch.GetAllCols().Tags
+	}
 
 	kd, vd := rows.Descriptors()
+	ns := rows.NodeStore()
 
+	return NewProllyRowIterForSchema(sch, iter, kd, vd, projections, ns)
+}
+
+func NewProllyRowIterForSchema(
+	sch schema.Schema,
+	iter prolly.MapIter,
+	kd val.TupleDesc,
+	vd val.TupleDesc,
+	projections []uint64,
+	ns tree.NodeStore,
+) sql.RowIter {
 	if schema.IsKeyless(sch) {
-		return &prollyKeylessIter{
-			iter:    iter,
-			valDesc: vd,
-			valProj: valProj,
-			rowLen:  len(projections),
-		}, nil
+		return NewKeylessProllyRowIter(sch, iter, vd, projections, ns)
 	}
+
+	return NewKeyedProllyRowIter(sch, iter, kd, vd, projections, ns)
+}
+
+func NewKeyedProllyRowIter(
+	sch schema.Schema,
+	iter prolly.MapIter,
+	kd val.TupleDesc,
+	vd val.TupleDesc,
+	projections []uint64,
+	ns tree.NodeStore,
+) sql.RowIter {
+	keyProj, valProj, ordProj := projectionMappings(sch, projections)
 
 	return prollyRowIter{
 		iter:    iter,
-		sqlSch:  schSch,
 		keyDesc: kd,
 		valDesc: vd,
 		keyProj: keyProj,
 		valProj: valProj,
+		ordProj: ordProj,
 		rowLen:  len(projections),
-	}, nil
+		ns:      ns,
+	}
 }
 
-func projectionMappings(sch schema.Schema, projs []string) (keyMap, valMap val.OrdinalMapping) {
-	keyMap = make(val.OrdinalMapping, sch.GetPKCols().Size())
-	for idx := range keyMap {
-		keyMap[idx] = -1
-		idxCol := sch.GetPKCols().GetAtIndex(idx)
-		for j, proj := range projs {
-			if strings.ToLower(idxCol.Name) == strings.ToLower(proj) {
-				keyMap[idx] = j
-				break
-			}
-		}
-	}
+func NewKeylessProllyRowIter(
+	sch schema.Schema,
+	iter prolly.MapIter,
+	vd val.TupleDesc,
+	projections []uint64,
+	ns tree.NodeStore,
+) sql.RowIter {
+	_, valProj, ordProj := projectionMappings(sch, projections)
 
-	valMap = make(val.OrdinalMapping, sch.GetNonPKCols().Size())
-	for idx := range valMap {
-		valMap[idx] = -1
-		idxCol := sch.GetNonPKCols().GetAtIndex(idx)
-		for j, proj := range projs {
-			if strings.ToLower(idxCol.Name) == strings.ToLower(proj) {
-				valMap[idx] = j
-				break
-			}
-		}
+	return &prollyKeylessIter{
+		iter:    iter,
+		valDesc: vd,
+		valProj: valProj,
+		ordProj: ordProj,
+		rowLen:  len(projections),
+		ns:      ns,
 	}
+}
 
+// projectionMappings returns data structures that specify 1) which fields we read
+// from key and value tuples, and 2) the position of those fields in the output row.
+func projectionMappings(sch schema.Schema, projections []uint64) (keyMap, valMap, ordMap val.OrdinalMapping) {
+	keyMap, valMap, ordMap = ProjectionMappingsForIndex(sch, projections)
+	adjustOffsetsForKeylessTable(sch, keyMap, valMap)
+	return keyMap, valMap, ordMap
+}
+
+func adjustOffsetsForKeylessTable(sch schema.Schema, keyMap val.OrdinalMapping, valMap val.OrdinalMapping) {
 	if schema.IsKeyless(sch) {
-		skip := val.OrdinalMapping{-1}
-		keyMap = append(skip, keyMap...) // hashId
-		valMap = append(skip, valMap...) // cardinality
+		// skip the cardinality value, increment every index
+		for i := range keyMap {
+			keyMap[i]++
+		}
+		for i := range valMap {
+			valMap[i]++
+		}
+	}
+}
+
+func ProjectionMappingsForIndex(sch schema.Schema, projections []uint64) (keyMap, valMap, ordMap val.OrdinalMapping) {
+	pks := sch.GetPKCols()
+	nonPks := sch.GetNonPKCols()
+
+	numPhysicalColumns := len(projections)
+	if schema.IsVirtual(sch) {
+		numPhysicalColumns = 0
+		for _, t := range projections {
+			if idx, ok := sch.GetAllCols().TagToIdx[t]; ok && !sch.GetAllCols().GetByIndex(idx).Virtual {
+				numPhysicalColumns++
+			}
+		}
 	}
 
-	return
+	// Build a slice of positional values. For a set of P projections, for K key columns and N=P-K non-key columns,
+	// we'll generate a slice 2P long structured as follows:
+	// [K key projections, // list of tuple indexes to read for key columns
+	//  N non-key projections, // list of tuple indexes to read for non-key columns, ordered backward from end
+	//  P output ordinals]  // list of output column ordinals for each projection
+	// Afterward we slice this into three separate mappings to return.
+	allMap := make([]int, 2*numPhysicalColumns)
+	keyIdx := 0
+	nonKeyIdx := numPhysicalColumns - 1
+	for projNum, tag := range projections {
+		if idx, ok := pks.StoredIndexByTag(tag); ok && !pks.GetByStoredIndex(idx).Virtual {
+			allMap[keyIdx] = idx
+			allMap[numPhysicalColumns+keyIdx] = projNum
+			keyIdx++
+		} else if idx, ok := nonPks.StoredIndexByTag(tag); ok && !nonPks.GetByStoredIndex(idx).Virtual {
+			allMap[nonKeyIdx] = idx
+			allMap[numPhysicalColumns+nonKeyIdx] = projNum
+			nonKeyIdx--
+		}
+	}
+
+	keyMap = allMap[:keyIdx]
+	valMap = allMap[keyIdx:numPhysicalColumns]
+	ordMap = allMap[numPhysicalColumns:]
+	return keyMap, valMap, ordMap
 }
 
 func (it prollyRowIter) Next(ctx *sql.Context) (sql.Row, error) {
@@ -141,62 +174,21 @@ func (it prollyRowIter) Next(ctx *sql.Context) (sql.Row, error) {
 	}
 
 	row := make(sql.Row, it.rowLen)
-
-	for keyIdx, rowIdx := range it.keyProj {
-		if rowIdx == -1 {
-			continue
-		}
-		row[rowIdx], err = GetField(it.keyDesc, keyIdx, key)
+	for i, idx := range it.keyProj {
+		outputIdx := it.ordProj[i]
+		row[outputIdx], err = tree.GetField(ctx, it.keyDesc, idx, key, it.ns)
 		if err != nil {
 			return nil, err
 		}
 	}
-	for valIdx, rowIdx := range it.valProj {
-		if rowIdx == -1 {
-			continue
-		}
-		row[rowIdx], err = GetField(it.valDesc, valIdx, value)
+	for i, idx := range it.valProj {
+		outputIdx := it.ordProj[len(it.keyProj)+i]
+		row[outputIdx], err = tree.GetField(ctx, it.valDesc, idx, value, it.ns)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return DenormalizeRow(it.sqlSch, row)
-}
-
-func (it prollyRowIter) Next2(ctx *sql.Context, frame *sql.RowFrame) error {
-	key, value, err := it.iter.Next(ctx)
-	if err != nil {
-		return err
-	}
-
-	// TODO: handle out of order projections
-	for keyIdx, rowIdx := range it.keyProj {
-		if rowIdx == -1 {
-			continue
-		}
-
-		enc := it.keyDesc.Types[keyIdx].Enc
-
-		frame.Append(sql.Value{
-			Typ: encodingToType[enc],
-			Val: it.keyDesc.GetField(keyIdx, key),
-		})
-	}
-
-	for valIdx, rowIdx := range it.valProj {
-		if rowIdx == -1 {
-			continue
-		}
-
-		enc := it.valDesc.Types[valIdx].Enc
-
-		frame.Append(sql.Value{
-			Typ: encodingToType[enc],
-			Val: it.valDesc.GetField(valIdx, value),
-		})
-	}
-
-	return nil
+	return row, nil
 }
 
 func (it prollyRowIter) Close(ctx *sql.Context) error {
@@ -205,9 +197,11 @@ func (it prollyRowIter) Close(ctx *sql.Context) error {
 
 type prollyKeylessIter struct {
 	iter prolly.MapIter
+	ns   tree.NodeStore
 
 	valDesc val.TupleDesc
 	valProj []int
+	ordProj []int
 	rowLen  int
 
 	curr sql.Row
@@ -239,11 +233,9 @@ func (it *prollyKeylessIter) nextTuple(ctx *sql.Context) error {
 	it.card = val.ReadKeylessCardinality(value)
 	it.curr = make(sql.Row, it.rowLen)
 
-	for valIdx, rowIdx := range it.valProj {
-		if rowIdx == -1 {
-			continue
-		}
-		it.curr[rowIdx], err = GetField(it.valDesc, valIdx, value)
+	for i, idx := range it.valProj {
+		outputIdx := it.ordProj[i]
+		it.curr[outputIdx], err = tree.GetField(ctx, it.valDesc, idx, value, it.ns)
 		if err != nil {
 			return err
 		}

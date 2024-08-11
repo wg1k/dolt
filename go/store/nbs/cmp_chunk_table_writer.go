@@ -18,13 +18,14 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
-	"hash"
+	gohash "hash"
 	"io"
+	"os"
 	"sort"
 
 	"github.com/golang/snappy"
 
-	nomshash "github.com/dolthub/dolt/go/store/hash"
+	"github.com/dolthub/dolt/go/store/hash"
 )
 
 const defaultTableSinkBlockSize = 2 * 1024 * 1024
@@ -36,36 +37,31 @@ var ErrNotFinished = errors.New("not finished")
 // ErrAlreadyFinished is an error returned if Finish is called more than once on a CmpChunkTableWriter
 var ErrAlreadyFinished = errors.New("already Finished")
 
-var ErrChunkAlreadyWritten = errors.New("chunk already written")
+// ErrDuplicateChunkWritten is returned by Finish if the same chunk was given to the writer multiple times.
+var ErrDuplicateChunkWritten = errors.New("duplicate chunks written")
 
 // CmpChunkTableWriter writes CompressedChunks to a table file
 type CmpChunkTableWriter struct {
 	sink                  *HashingByteSink
 	totalCompressedData   uint64
 	totalUncompressedData uint64
-	prefixes              prefixIndexSlice // TODO: This is in danger of exploding memory
-	blockAddr             *addr
-	chunkHashes           nomshash.HashSet
+	prefixes              prefixIndexSlice
+	blockAddr             *hash.Hash
+	path                  string
 }
 
 // NewCmpChunkTableWriter creates a new CmpChunkTableWriter instance with a default ByteSink
 func NewCmpChunkTableWriter(tempDir string) (*CmpChunkTableWriter, error) {
 	s, err := NewBufferedFileByteSink(tempDir, defaultTableSinkBlockSize, defaultChBufferSize)
-
 	if err != nil {
 		return nil, err
 	}
 
-	return &CmpChunkTableWriter{NewHashingByteSink(s), 0, 0, nil, nil, nomshash.NewHashSet()}, nil
+	return &CmpChunkTableWriter{NewMD5HashingByteSink(s), 0, 0, nil, nil, s.path}, nil
 }
 
-// Size returns the number of compressed chunks that have been added
-func (tw *CmpChunkTableWriter) Size() int {
+func (tw *CmpChunkTableWriter) ChunkCount() int {
 	return len(tw.prefixes)
-}
-
-func (tw *CmpChunkTableWriter) ChunkCount() uint32 {
-	return uint32(len(tw.prefixes))
 }
 
 // Gets the size of the entire table file in bytes
@@ -75,7 +71,7 @@ func (tw *CmpChunkTableWriter) ContentLength() uint64 {
 
 // Gets the MD5 of the entire table file
 func (tw *CmpChunkTableWriter) GetMD5() []byte {
-	return tw.sink.GetMD5()
+	return tw.sink.GetSum()
 }
 
 // AddCmpChunk adds a compressed chunk
@@ -84,11 +80,6 @@ func (tw *CmpChunkTableWriter) AddCmpChunk(c CompressedChunk) error {
 		panic("NBS blocks cannot be zero length")
 	}
 
-	if tw.chunkHashes.Has(c.H) {
-		return ErrChunkAlreadyWritten
-	}
-
-	tw.chunkHashes.Insert(c.H)
 	uncmpLen, err := snappy.DecodedLen(c.CompressedData)
 
 	if err != nil {
@@ -105,11 +96,9 @@ func (tw *CmpChunkTableWriter) AddCmpChunk(c CompressedChunk) error {
 	tw.totalCompressedData += uint64(len(c.CompressedData))
 	tw.totalUncompressedData += uint64(uncmpLen)
 
-	a := addr(c.H)
 	// Stored in insertion order
 	tw.prefixes = append(tw.prefixes, prefixIndexRec{
-		a.Prefix(),
-		a[addrPrefixSize:],
+		c.H,
 		uint32(len(tw.prefixes)),
 		uint32(fullLen),
 	})
@@ -137,9 +126,7 @@ func (tw *CmpChunkTableWriter) Finish() (string, error) {
 
 	var h []byte
 	h = blockHash.Sum(h)
-
-	var blockAddr addr
-	copy(blockAddr[:], h)
+	blockAddr := hash.New(h[:hash.ByteLen])
 
 	tw.blockAddr = &blockAddr
 	return tw.blockAddr.String(), nil
@@ -169,29 +156,67 @@ func (tw *CmpChunkTableWriter) Flush(wr io.Writer) error {
 	return nil
 }
 
-func (tw *CmpChunkTableWriter) writeIndex() (hash.Hash, error) {
+func (tw *CmpChunkTableWriter) Reader() (io.ReadCloser, error) {
+	if tw.blockAddr == nil {
+		return nil, ErrNotFinished
+	}
+	return tw.sink.Reader()
+}
+
+func (tw *CmpChunkTableWriter) Remove() error {
+	return os.Remove(tw.path)
+}
+
+func containsDuplicates(prefixes prefixIndexSlice) bool {
+	if len(prefixes) == 0 {
+		return false
+	}
+	for i := 0; i < len(prefixes); i++ {
+		curr := prefixes[i]
+		// The list is sorted by prefixes. We have to perform n^2
+		// checks against every run of matching prefixes. For all
+		// shapes of real world data this is not a concern.
+		for j := i + 1; j < len(prefixes); j++ {
+			cmp := prefixes[j]
+			if cmp.addr.Prefix() != curr.addr.Prefix() {
+				break
+			}
+			if cmp.addr == curr.addr {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (tw *CmpChunkTableWriter) writeIndex() (gohash.Hash, error) {
 	sort.Sort(tw.prefixes)
 
-	pfxScratch := [addrPrefixSize]byte{}
+	// We do a sanity check here to assert that we are never writing duplicate chunks into
+	// a table file using this interface.
+	if containsDuplicates(tw.prefixes) {
+		return nil, ErrDuplicateChunkWritten
+	}
+
+	pfxScratch := [hash.PrefixLen]byte{}
 	blockHash := sha512.New()
 
 	numRecords := uint32(len(tw.prefixes))
 	lengthsOffset := lengthsOffset(numRecords)   // skip prefix and ordinal for each record
 	suffixesOffset := suffixesOffset(numRecords) // skip size for each record
-	suffixesLen := uint64(numRecords) * addrSuffixSize
+	suffixesLen := uint64(numRecords) * hash.SuffixLen
 	buff := make([]byte, suffixesLen+suffixesOffset)
 
 	var pos uint64
 	for _, pi := range tw.prefixes {
-		binary.BigEndian.PutUint64(pfxScratch[:], pi.prefix)
+		binary.BigEndian.PutUint64(pfxScratch[:], pi.addr.Prefix())
 
 		// hash prefix
 		n := uint64(copy(buff[pos:], pfxScratch[:]))
-		if n != addrPrefixSize {
+		if n != hash.PrefixLen {
 			return nil, errors.New("failed to copy all data")
 		}
-
-		pos += n
+		pos += hash.PrefixLen
 
 		// order
 		binary.BigEndian.PutUint32(buff[pos:], pi.order)
@@ -202,10 +227,10 @@ func (tw *CmpChunkTableWriter) writeIndex() (hash.Hash, error) {
 		binary.BigEndian.PutUint32(buff[offset:], pi.size)
 
 		// hash suffix
-		offset = suffixesOffset + uint64(pi.order)*addrSuffixSize
-		n = uint64(copy(buff[offset:], pi.suffix))
+		offset = suffixesOffset + uint64(pi.order)*hash.SuffixLen
+		n = uint64(copy(buff[offset:], pi.addr.Suffix()))
 
-		if n != addrSuffixSize {
+		if n != hash.SuffixLen {
 			return nil, errors.New("failed to copy all bytes")
 		}
 	}
