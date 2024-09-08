@@ -140,6 +140,25 @@ assert_has_key_value() {
     assert_has_key "ParentClosure" "$output"
 }
 
+@test "show: --no-pretty commit hash" {
+    dolt commit --allow-empty -m "commit: initialize table1"
+    hash=$(dolt sql -q "select dolt_hashof('head');" -r csv | tail -n 1)
+    run dolt show --no-pretty $hash
+    [ $status -eq 0 ]
+    [[ "$output" =~ "SerialMessage" ]] || false
+    assert_has_key "Name" "$output"
+    assert_has_key_value "Name" "Bats Tests" "$output"
+    assert_has_key_value "Desc" "commit: initialize table1" "$output"
+    assert_has_key_value "Name" "Bats Tests" "$output"
+    assert_has_key_value "Email" "bats@email.fake" "$output"
+    assert_has_key "Timestamp" "$output"
+    assert_has_key "UserTimestamp" "$output"
+    assert_has_key_value "Height" "2" "$output"
+    assert_has_key "RootValue" "$output"
+    assert_has_key "Parents" "$output"
+    assert_has_key "ParentClosure" "$output"
+}
+
 @test "show: HEAD root" {
     dolt sql -q "create table table1 (pk int PRIMARY KEY)"
     dolt sql -q "insert into table1 values (1), (2), (3)"
@@ -297,4 +316,30 @@ EOF
     [[ "$output" =~ "Comment: " ]] || false
     [[ "$output" =~ "Checks: [" ]] || false
     [[ "$output" =~ "Collation: utf8mb4_0900_bin" ]] || false
+}
+
+@test "show: secondary index leaf" {
+    dolt sql <<EOF
+create table test(pk int primary key, v2 int unique);
+insert into test values (0, 35), (1, 19), (2, 3);
+EOF
+    run dolt show "#9afhmiubuqjviu4qocn15tqlgigea26l"
+    [ $status -eq 0 ]
+    [[ "$output" =~ "SerialMessage" ]] || false
+    [[ "$output" =~ "{ key: 03000000, 02000000 value:  }" ]] || false
+    [[ "$output" =~ "{ key: 13000000, 01000000 value:  }" ]] || false
+    [[ "$output" =~ "{ key: 23000000, 00000000 value:  }" ]] || false
+}
+
+@test "show: secondary index non-leaf" {
+    dolt sql <<EOF
+create table test(pk int primary key, v1 int, index(v1));
+insert into test values (1, 0);
+EOF
+    for i in {1..10}; do dolt sql -q "insert ignore into test select 2*(pk+$i), (pk+$i) from test;"; done
+    run dolt show "#3ir2otqqb8pnu28um6jc1ipv05iamdlk"
+    [ $status -eq 0 ]
+    [[ "$output" =~ "SerialMessage" ]] || false
+    [[ "$output" =~ "{ key: 73000000, e6000000 ref: #pdcuscnfqsusgil1642k5hup1cp5co6t }" ]] || false
+    [[ "$output" =~ "{ key: f4090000, e8130000 ref: #hddhk8djkj275q1so9fs3ag48v7qsfsi }" ]] || false
 }
