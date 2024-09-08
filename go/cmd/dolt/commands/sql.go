@@ -612,7 +612,7 @@ func saveQuery(ctx *sql.Context, root doltdb.RootValue, query string, name strin
 
 // execBatchMode runs all the queries in the input reader
 func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, continueOnErr bool, format engine.PrintResultFormat) error {
-	scanner := NewSqlStatementScanner(input)
+	scanner := newStreamScanner(input)
 	var query string
 	for scanner.Scan() {
 		if fileReadProg != nil {
@@ -630,7 +630,7 @@ func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, conti
 		if err == sqlparser.ErrEmpty {
 			continue
 		} else if err != nil {
-			err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+			err = buildBatchSqlErr(scanner.state.statementStartLine, query, err)
 			if !continueOnErr {
 				return err
 			} else {
@@ -642,7 +642,7 @@ func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, conti
 		ctx.SetQueryTime(time.Now())
 		sqlSch, rowIter, _, err := processParsedQuery(ctx, query, qryist, sqlStatement)
 		if err != nil {
-			err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+			err = buildBatchSqlErr(scanner.state.statementStartLine, query, err)
 			if !continueOnErr {
 				return err
 			} else {
@@ -661,7 +661,7 @@ func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, conti
 			}
 			err = engine.PrettyPrintResults(ctx, format, sqlSch, rowIter)
 			if err != nil {
-				err = buildBatchSqlErr(scanner.statementStartLine, query, err)
+				err = buildBatchSqlErr(scanner.state.statementStartLine, query, err)
 				if !continueOnErr {
 					return err
 				} else {
@@ -673,7 +673,7 @@ func execBatchMode(ctx *sql.Context, qryist cli.Queryist, input io.Reader, conti
 	}
 
 	if err := scanner.Err(); err != nil {
-		return buildBatchSqlErr(scanner.statementStartLine, query, err)
+		return buildBatchSqlErr(scanner.state.statementStartLine, query, err)
 	}
 
 	return nil
@@ -786,7 +786,7 @@ func execShell(sqlCtx *sql.Context, qryist cli.Queryist, format engine.PrintResu
 
 			sqlCtx := sql.NewContext(subCtx, sql.WithSession(sqlCtx.Session))
 
-			subCmd, foundCmd := findSlashCmd(query)
+			subCmd, foundCmd := isSlashQuery(query)
 			if foundCmd {
 				err := handleSlashCommand(sqlCtx, subCmd, query, cliCtx)
 				if err != nil {
@@ -829,6 +829,15 @@ func execShell(sqlCtx *sql.Context, qryist cli.Queryist, format engine.PrintResu
 	_ = iohelp.WriteLine(cli.CliOut, "Bye")
 
 	return nil
+}
+
+func isSlashQuery(query string) (cli.Command, bool) {
+	// strip leading whitespace
+	query = strings.TrimLeft(query, " \t\n\r\v\f")
+	if strings.HasPrefix(query, "\\") {
+		return findSlashCmd(query[1:])
+	}
+	return nil, false
 }
 
 // postCommandUpdate is a helper function that is run after the shell has completed a command. It updates the the database
@@ -1113,7 +1122,7 @@ func processParsedQuery(ctx *sql.Context, query string, qryist cli.Queryist, sql
 		}
 		return qryist.Query(ctx, query)
 	default:
-		return qryist.Query(ctx, query)
+		return qryist.QueryWithBindings(ctx, query, sqlStatement, nil, nil)
 	}
 }
 
